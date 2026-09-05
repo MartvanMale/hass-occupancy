@@ -14,11 +14,21 @@ __pycache__/
 *.pkl
 models/
 
-# The panel's toolchain and its build output. dist/ is an artifact the deploy
-# scripts produce and rsync; it is never committed, because a minified bundle
-# with a fresh content hash in every diff tells a reader nothing.
+# The panel's toolchain. node_modules/ is 69 MB of it and has no business here.
+#
+# `*/panel/dist/` used to sit on the line below, and does not any more. The
+# built bundle IS committed, and deliberately: the Dockerfile only COPYs
+# `panel/dist`, nothing compiles a frontend on the Home Assistant box, and an
+# add-on installed from this repository's URL gets nothing but a git clone --
+# so an ignored dist/ is an add-on that cannot be installed from the store at
+# all. It fails at the COPY, with a Docker error that says nothing about the
+# panel. The cost is a minified bundle in every diff that touches the panel,
+# which is real and is the smaller of the two.
+#
+# `scripts/build-panel.sh` writes `panel/dist/.source-hash` beside the bundle
+# and the pre-commit hook checks it, so a source edit committed without a
+# rebuild is refused rather than silently shipped.
 node_modules/
-*/panel/dist/
 
 # Contributor and agent instructions, kept local. Case matters on Linux, so this
 # has to be the real spelling -- `claude.md` matches nothing.

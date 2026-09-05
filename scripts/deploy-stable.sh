@@ -42,9 +42,11 @@ echo "About to deploy Occupancy Forecast $version to $HOST:$DIR and rebuild it."
 read -rp "Type the version to confirm: " confirm
 [[ "$confirm" == "$version" ]] || { echo "aborted"; exit 1; }
 
-# Build stable's panel from stable's own promoted source, then ship it: the
-# HA box has no node and the Dockerfile only COPYs dist/.
-scripts/build-panel.sh occupancy-forecast
+# Check the committed bundle, do not rebuild it. promote.sh builds stable's
+# panel from stable's own promoted source so that the bundle is in the
+# promotion commit; building here instead would dirty the tree the clean check
+# above just validated, and ship something that is in no commit anywhere.
+scripts/check-panel.sh occupancy-forecast
 
 rsync -a --delete \
   --exclude '__pycache__' --exclude '*.pyc' --exclude '.pytest_cache' \

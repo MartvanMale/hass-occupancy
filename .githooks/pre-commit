@@ -13,8 +13,39 @@
 # fix is to make the change in occupancy-forecast-edge/ instead -- not to set the
 # variable.
 #
+# It also refuses to commit a panel source edit without the rebuilt bundle.
+# `panel/dist/` is committed -- the Dockerfile only COPYs it and a store install
+# is a git clone -- so a stale bundle is not a build error but an add-on that
+# serves last week's panel and says nothing about it.
+#
 # Enable with:  git config core.hooksPath .githooks
 set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# The panel check runs BEFORE the PROMOTE escape below, and for both trees: a
+# promotion commit carries stable's freshly built bundle and is exactly as able
+# to carry a stale one.
+#
+# It checks the WORKING TREE, not the index, so `git commit` of a partially
+# staged panel can still get a mismatched pair through. That is the same
+# character of guard as the rest of this hook -- it stops the 1am mistake, it is
+# not a proof -- and closing it would mean checking out the index to a temp dir
+# on every commit.
+for tree in occupancy-forecast-edge occupancy-forecast; do
+    staged_panel=$(git diff --cached --name-only --diff-filter=ACMRD \
+                   -- "$tree/panel/src" "$tree/panel/index.html" \
+                      "$tree/panel/package.json" "$tree/panel/package-lock.json" \
+                      "$tree/panel/tsconfig.json" "$tree/panel/vite.config.ts" || true)
+    [[ -n "$staged_panel" ]] || continue
+
+    if ! scripts/check-panel.sh "$tree"; then
+        echo >&2
+        echo "pre-commit: $tree/panel source is staged but its committed bundle" >&2
+        echo "            does not match it. Rebuild and stage dist/ too." >&2
+        exit 1
+    fi
+done
 
 if [[ "${PROMOTE:-}" == "1" ]]; then
     exit 0

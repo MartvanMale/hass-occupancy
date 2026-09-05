@@ -1,0 +1,11 @@
+# The build context is this directory, and on a development machine it holds
+# things the image has no use for. A clone from GitHub has none of them -- these
+# are all gitignored -- so this file only matters for a local `docker build` and
+# for the rsynced copy on the Home Assistant box.
+#
+# panel/src is NOT excluded: the Dockerfile does not COPY it, so it costs a
+# little context transfer and nothing else, and excluding it would make the
+# add-on directory on the box a worse thing to read when something is wrong.
+panel/node_modules/
+**/__pycache__/
+.pytest_cache/

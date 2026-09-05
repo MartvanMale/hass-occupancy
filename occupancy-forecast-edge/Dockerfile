@@ -32,10 +32,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY occupancy_forecast/ ./occupancy_forecast/
 
 # The built Ingress panel, produced by scripts/build-panel.sh on the development
-# machine and rsynced here by the deploy scripts. Deliberately no node stage: the
-# Home Assistant box builds this image, and no other add-on on it compiles a
-# frontend locally. If this COPY fails the panel was never built -- run the
-# deploy script rather than adding node here.
+# machine and COMMITTED, so it is in the build context wherever that context
+# comes from -- an rsync from a deploy script, or a git clone Supervisor made
+# because somebody added this repository to their add-on store. Deliberately no
+# node stage: the Home Assistant box builds this image, and no other add-on on it
+# compiles a frontend locally.
+#
+# If this COPY fails, panel/dist is not in the tree. In a clone that means the
+# bundle was committed stale or not at all, which is a bug here and not
+# something the installing user can do anything about; on a development machine
+# it means `scripts/build-panel.sh <tree>` has not been run.
 COPY panel/dist ./occupancy_forecast/web/dist/
 
 COPY run.sh /run.sh

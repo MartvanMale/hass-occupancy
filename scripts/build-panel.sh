@@ -11,6 +11,12 @@
 # target box, so this repo's stand-in for CI is the deploy scripts, and this is
 # the step they run first. The add-on's Dockerfile only COPYs the result.
 #
+# The result is also COMMITTED, which is the other half of the same argument: an
+# add-on installed from this repository's URL is a git clone and nothing more, so
+# a bundle that exists only on this machine is an add-on nobody else can install.
+# That is why this script finishes by stamping dist/ with a hash of its inputs --
+# see scripts/panel-source-hash.sh.
+#
 # In a container rather than a local node, for the same reason scripts/test.sh
 # runs pytest in one: the toolchain is pinned by package-lock.json and nothing
 # has to be installed on the host.
@@ -41,4 +47,10 @@ docker run --rm \
   node:22-alpine \
   sh -c '[ -d node_modules ] || npm ci --no-audit --no-fund; npm run build'
 
-echo "built $TREE/panel/dist"
+# After the build, never before: vite.config.ts sets `emptyOutDir: true`, so
+# anything written into dist/ ahead of this is deleted by it. The file sits at
+# dist/ root rather than in dist/assets, which is the directory web/__init__.py
+# mounts -- so it is not reachable over Ingress.
+scripts/panel-source-hash.sh "$TREE" > "$TREE/panel/dist/.source-hash"
+
+echo "built $TREE/panel/dist  (source-hash $(cut -c1-12 < "$TREE/panel/dist/.source-hash"))"

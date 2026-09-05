@@ -43,14 +43,20 @@ fi
 echo "Running tests against the edge tree..."
 scripts/test.sh
 
-# The panel's SOURCE is promoted; its build output is not. dist/ is rebuilt
-# from the promoted source by deploy-stable.sh, so stable ships a bundle built
-# from stable's own tree rather than a copy of whatever edge last compiled.
+# The panel's SOURCE is promoted; its build output is not copied. dist/ is
+# rebuilt below from the promoted source, so stable ships a bundle built from
+# stable's own tree rather than a copy of whatever edge last compiled.
 rsync -a --delete \
   --exclude '__pycache__' --exclude '*.pyc' --exclude '.pytest_cache' \
   --exclude 'node_modules' --exclude 'dist' \
   --exclude 'config.yaml' --exclude 'DOCS.md' --exclude 'CHANGELOG.md' \
   occupancy-forecast-edge/ occupancy-forecast/
+
+# Build it here rather than at deploy time, because the bundle is committed and
+# so has to be IN the promotion commit. deploy-stable.sh cannot build it: that
+# script's first act is to require occupancy-forecast/ be clean, and a build
+# would dirty the tree it just validated.
+scripts/build-panel.sh occupancy-forecast
 
 echo
 if [[ -z "$(git status --porcelain occupancy-forecast/)" ]]; then
@@ -67,4 +73,6 @@ echo "  2. Move the ## Unreleased block from occupancy-forecast-edge/CHANGELOG.m
 echo "     occupancy-forecast/CHANGELOG.md under \"## <version> - $(date +%F)\", keeping the"
 echo "     ### Added/Changed/Fixed headings, and empty it."
 echo "  3. PROMOTE=1 git commit -a      (the hook rejects occupancy-forecast/ without it)"
+echo "     Stage occupancy-forecast/panel/dist/ with it -- the rebuilt bundle is"
+echo "     part of the release, and \`git commit -a\` will not pick up new files."
 echo "  4. scripts/deploy-stable.sh"

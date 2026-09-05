@@ -198,8 +198,21 @@ Edit under `occupancy-forecast-edge/`. Then:
 ```sh
 ./scripts/test.sh          # tsc --noEmit, then pytest in python:3.13-slim
 ./scripts/build-panel.sh   # Vite in a container; the Dockerfile only COPYs dist/
+./scripts/check-panel.sh   # is the committed bundle built from the current source?
 ./scripts/promote.sh       # edge -> stable
 ```
+
+**The panel's compiled bundle is committed**, which is unusual and deliberate.
+Nothing compiles a frontend on the Home Assistant box — the Dockerfile has no
+node stage, because no other add-on on that box builds one either — and an
+add-on installed from this repository's URL is a git clone and nothing more. An
+ignored `panel/dist` is therefore an add-on that cannot be installed from the
+store at all: the build fails at the `COPY`, saying nothing about the panel.
+
+So `node_modules/` is ignored and `dist/` is not. Edit the panel, run
+`build-panel.sh`, and commit the bundle with the source. `build-panel.sh` stamps
+`panel/dist/.source-hash` with a hash of its inputs and the pre-commit hook
+compares it, so committing one without the other is refused rather than shipped.
 
 470 tests, no network, no Home Assistant, no broker. They run against a synthetic
 household that matches nobody's real installation, which is what stops one
@@ -216,17 +229,21 @@ former, because the shipped image deliberately does not carry a test framework.
 
 ### Deploying
 
-Both add-ons are installed **locally** — copied into `ha:/addons/<slug>/`, where
-Supervisor builds them — rather than from this repository's URL. So deploying is
-a file copy plus `ha addons rebuild`, and needs neither a version bump nor a
-push. `deploy-edge.sh` stamps the deployed `config.yaml` with the current commit
-sha, so the add-on page in Home Assistant says exactly which build is running.
+Here, both add-ons are installed **locally** — copied into `ha:/addons/<slug>/`,
+where Supervisor builds them — rather than from this repository's URL. So
+deploying is a file copy plus `ha addons rebuild`, and needs neither a version
+bump nor a push. `deploy-edge.sh` stamps the deployed `config.yaml` with the
+current commit sha, so the add-on page in Home Assistant says exactly which
+build is running. (For anyone installing from the store the version *is* the
+mechanism: an add-on installed from a repository URL offers an update only when
+`config.yaml`'s `version:` changes.)
 
 `scripts/deploy-stable.sh` does the same for the stable add-on, but refuses
 unless `occupancy-forecast/` is committed *and* is a clean promotion of edge.
 
 A `.githooks/pre-commit` refuses commits that touch the generated `occupancy-forecast/`
-tree; enable it once with `git config core.hooksPath .githooks`.
+tree, and commits that change panel source without the rebuilt bundle; enable it
+once with `git config core.hooksPath .githooks`.
 
 ### Versions and the changelog
 

@@ -1,2 +1,4 @@
+# dist/ is NOT here on purpose -- the bundle is committed, because the add-on's
+# Dockerfile only COPYs it and a store install has no way to build it. See the
+# root .gitignore for the whole argument.
 node_modules/
-dist/

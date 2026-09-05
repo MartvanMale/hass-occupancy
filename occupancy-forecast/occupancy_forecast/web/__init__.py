@@ -13,12 +13,13 @@ icon service, because an Ingress page on an installation with no internet must
 still render. The panel does use a web font, IBM Plex -- but the woff2 files are
 vendored into `panel/src/fonts/`, emitted into `dist/assets/` by the build, and
 served by the mount below, which is the same rule and not an exception to it. And
-nothing is built on
-the Home Assistant box: `scripts/build-panel.sh` runs Vite here, on the
-development machine, and the deploy scripts rsync the finished `dist/` alongside
-the Python. That is what every other add-on on the box does -- Zigbee2MQTT and
-Music Assistant ship frontends bundled in CI, not compiled on the user's
-hardware -- and it is why the Dockerfile has no node in it.
+nothing is built on the Home Assistant box: `scripts/build-panel.sh` runs Vite
+here, on the development machine, and the finished `dist/` is committed and
+travels with the Python -- rsynced by the deploy scripts, or cloned by Supervisor
+when the add-on is installed from the repository URL. That is what every other
+add-on on the box does -- Zigbee2MQTT and Music Assistant ship frontends bundled
+in CI, not compiled on the user's hardware -- and it is why the Dockerfile has no
+node in it.
 
 The look, the Mushroom geometry and the icon set moved to `panel/src/style.css`
 and `panel/src/components/Icon.tsx` unchanged; the reasoning for the numbers went
