@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <!-- Substituted at serve time with config.display_name(). Two add-ons run
+         side by side and their Ingress panels look identical, so a literal here
+         would put stable's name on edge's tab. See occupancy_forecast/web/__init__.py. -->
+    <title>Occupancy Forecast</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+# Test-only. The image ships requirements.txt; the suite runs against a dev
+# container so a store install does not carry a test framework.
+-r requirements.txt
+pytest==8.4.2

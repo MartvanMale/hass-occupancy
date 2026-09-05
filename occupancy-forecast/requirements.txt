@@ -1,0 +1,23 @@
+# Pinned so a rebuild months from now reproduces the model that is running.
+pandas==2.3.3
+numpy==2.3.4
+pyarrow==21.0.0
+scikit-learn==1.7.2
+# Already arrives with scikit-learn, pinned here because train.py imports it
+# directly to farm the 48 horizons out across processes.
+joblib==1.6.0
+paho-mqtt==2.1.0
+fastapi==0.121.2
+uvicorn==0.38.0
+holidays==0.68
+
+# For the Home Assistant trigger subscription in listen.py, via its SYNC client
+# (`websockets.sync.client`) -- the rest of this add-on is threads, and an
+# asyncio client would mean a second event loop beside uvicorn's for no gain.
+# Pure Python, no compiled dependency.
+#
+# This is the one place that crosses the stdlib-only note in sources/ha.py.
+# That note is about making four urllib requests a minute, where pulling in an
+# HTTP stack really would be silly; a persistent, authenticated, reconnecting
+# WebSocket is not something to hand-roll on a raw socket.
+websockets==15.0.1

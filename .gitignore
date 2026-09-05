@@ -1,0 +1,32 @@
+# Python's own leavings, and the artefacts a local run drops in the tree. The
+# databases and the parquet belong in /data inside the container; they land here
+# only when something is run against the working tree by hand.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+*.parquet
+
+# Fitted models. Same story: they live in /data, but a local
+# `python -m occupancy_forecast.train` run will drop them here.
+*.pkl
+models/
+
+# The panel's toolchain and its build output. dist/ is an artifact the deploy
+# scripts produce and rsync; it is never committed, because a minified bundle
+# with a fresh content hash in every diff tells a reader nothing.
+node_modules/
+*/panel/dist/
+
+# Contributor and agent instructions, kept local. Case matters on Linux, so this
+# has to be the real spelling -- `claude.md` matches nothing.
+CLAUDE.md
+
+# NOT ignored, and deliberately: the STABLE add-on (occupancy-forecast/) is
+# generated from occupancy-forecast-edge/ by scripts/promote.sh, but it is
+# tracked in full, because it is what the HA box builds and git has to be able
+# to say what stable is running. Its config.yaml, DOCS.md and CHANGELOG.md are
+# hand-written and the rest is a copy of ../occupancy-forecast-edge. Edit the
+# originals there, never the copies here.

@@ -1,0 +1,58 @@
+# The stable build. This file, DOCS.md and CHANGELOG.md are hand-written; every
+# other file in this directory is GENERATED from ../occupancy-forecast-edge by
+# scripts/promote.sh. Do not edit those copies here -- edit the originals under
+# occupancy-forecast-edge/, and an edit made here is destroyed by the next promotion.
+#
+# `version` is bumped only by a promotion, and a promotion is Mart's decision.
+name: Occupancy Forecast
+version: "0.1.0"
+slug: occupancy_forecast
+description: >-
+  Forecasts who will be home, hour by hour, for the next two days -- and how
+  many minutes until someone actually arrives.
+url: https://github.com/MartvanMale/hass-occupancy
+license: MIT
+arch:
+  # scikit-learn has no armv7 wheels worth waiting for; better to say so than to
+  # ship an add-on that takes forty minutes to install and then fails.
+  - aarch64
+  - amd64
+init: false
+
+# Ingress rather than a mapped port: Home Assistant proxies the configuration
+# page into the sidebar, authenticated, with nothing extra exposed on the LAN.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:home-clock-outline
+panel_title: Occupancy
+
+# Supervisor injects the broker's host, port and credentials, so the user never
+# types them and there is no host default to get wrong.
+#
+# `want`, not `need`: without a broker the add-on still collects history, still
+# trains and still answers its API -- it just cannot publish entities, and
+# run.sh says so in the log. `need` would refuse to start at all, which is a
+# worse answer for somebody who has not set up MQTT yet.
+services:
+  - mqtt:want
+
+# Read-only access to Home Assistant's own API, for history and current states.
+homeassistant_api: true
+
+options:
+  log_level: info
+  source: store
+  influx_url: ""
+  influx_org: ""
+  influx_bucket: homeassistant
+  influx_token: ""
+schema:
+  log_level: list(trace|debug|info|notice|warning|error|fatal)
+  # `store` accumulates its own history from Home Assistant and works anywhere.
+  # `influx` is for installs that already archive HA and would otherwise throw
+  # months of history away and start again from ten days.
+  source: list(store|influx)
+  influx_url: str?
+  influx_org: str?
+  influx_bucket: str?
+  influx_token: password?

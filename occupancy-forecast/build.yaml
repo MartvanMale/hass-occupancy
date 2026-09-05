@@ -1,0 +1,15 @@
+# Debian, not the Home Assistant Python base, and the reason matters.
+#
+# The Python base is Alpine, i.e. musl. scikit-learn has published ZERO
+# musllinux wheels across every release it has ever made -- that is project
+# policy, not a gap in this version -- so pip would compile it from source:
+# Cython, C++ and OpenMP, needing a toolchain an add-on has no business
+# carrying. numpy, pandas and pyarrow all ship musllinux wheels; scikit-learn is
+# the sole offender, and it is not optional here.
+#
+# On Debian every dependency has a manylinux wheel and the install is a
+# download. trixie ships python3 3.13, which is what this package is developed
+# and tested against.
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base-debian:trixie
+  amd64: ghcr.io/home-assistant/amd64-base-debian:trixie

@@ -1,0 +1,769 @@
+/*
+ * The look is borrowed from the Mushroom card set, which is what the dashboards
+ * next door are built out of. **Borrowed, not depended on:** Mushroom is Lovelace
+ * JavaScript, and an Ingress page is a cross-origin iframe -- neither its code nor
+ * its `--mush-*` variables reach in here, and fetching anything at runtime would
+ * break the panel on an installation with no internet. So the geometry below is
+ * Mushroom's numbers, hardcoded, and the icons are inlined SVG paths. Nothing this
+ * panel needs is loaded from anywhere.
+ *
+ * Mushroom's own token values, read off the card set rather than eyeballed:
+ * --mush-spacing 10px (12px here, matching Home Assistant's card padding),
+ * --mush-icon-size 36px on a 50% radius, --mush-card-primary 14px/500,
+ * --mush-card-secondary 12px/400, --mush-chip-height 36px on a 19px radius,
+ * --mush-control-height 42px on a 12px radius, --mush-title 24px/normal.
+ *
+ * The signature move is the shape: a circle filled `rgba(colour, .2)` with the
+ * symbol at full strength on top. That is why the accents are stored as RGB
+ * triplets -- one value has to drive both halves. The triplets themselves are
+ * the occupancy palette already validated for the dashboard cards, so a colour
+ * means the same thing there as it does here.
+ *
+ * Surfaces are Home Assistant's own light and dark defaults, because the iframe
+ * inherits no theme and has to pick for itself; `prefers-color-scheme` is the
+ * only signal it gets.
+ *
+ * The typeface is IBM Plex, vendored into `src/fonts/` under the SIL Open Font
+ * License 1.1 (see `src/fonts/OFL.txt`), for the same reason `Icon.tsx` inlines
+ * its MDI paths rather than importing `@mdi/js`: a `<link>` to a font service is
+ * a panel that renders in Times on an installation with no internet, and Ingress
+ * is a cross-origin iframe that cannot borrow Home Assistant's own copy either.
+ */
+
+/*
+ * Three faces, which is exactly what the panel uses: Sans 400 for
+ * `--secondary-weight` and the h1, Sans 500 for `--primary-weight`, Mono 400 for
+ * the columns of digits. No 600, no italics, no Serif -- an unused weight is
+ * 24 kB in the image that no browser will ever ask for.
+ *
+ * Split latin / latin-ext on `unicode-range`, which is how the files arrive from
+ * upstream and is worth keeping: an English panel naming ASCII entity ids never
+ * fetches the second half, and the 159-country holiday list is the only thing
+ * that might. `swap`, not `optional`: the files are same-origin over a LAN, so
+ * the swap window is milliseconds, and `optional` would leave the panel randomly
+ * rendering in the fallback for no visible reason.
+ *
+ * The fallback stack below is the one the panel used before the fonts existed,
+ * so a face that fails to load leaves it looking exactly as it did.
+ */
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("./fonts/IBMPlexSans-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("./fonts/IBMPlexSans-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500;
+  font-display: swap; src: url("./fonts/IBMPlexSans-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500;
+  font-display: swap; src: url("./fonts/IBMPlexSans-500-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("./fonts/IBMPlexMono-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400;
+  font-display: swap; src: url("./fonts/IBMPlexMono-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+:root {
+  --sans: "IBM Plex Sans", Roboto, "Helvetica Neue", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  color-scheme: light dark;
+
+  --spacing: 12px;
+  --card-radius: 12px;
+  --icon-size: 36px;
+  --icon-symbol-size: 21px;
+  --control-height: 42px;
+  --control-radius: 12px;
+  --chip-height: 36px;
+  --chip-radius: 19px;
+
+  --primary-size: 14px;   --primary-weight: 500;
+  --secondary-size: 12px; --secondary-weight: 400;
+  --title-size: 24px;     --subtitle-size: 16px;
+
+  --bg: #fafafa;
+  --card: #fff;
+  /* The popup's own surface. On light it can be the card colour, because the
+     shadow does the separating. On dark a shadow is nearly invisible and a
+     popup flipped up over the card above it read as being *inside* that card,
+     so there it is a step lighter instead. */
+  --popup: #fff;
+  --popup-edge: rgba(130, 130, 130, .25);
+  --text: #212121;
+  --text-2: #727272;
+
+  --rgb-aqua: 25,158,112;
+  --rgb-blue: 57,135,229;
+  --rgb-orange: 217,89,38;
+  --rgb-red: 219,68,55;
+  --rgb-grey: 130,130,130;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111; --card: #1c1c1c; --text: #e1e1e1; --text-2: #9b9b9b;
+          --popup: #2b2b2b; --popup-edge: rgba(190, 190, 190, .22); }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; padding: var(--spacing);
+       font: 14px/1.5 var(--sans);
+       background: var(--bg); color: var(--text); }
+
+/* No max-width. The panel is a grid of cards in an iframe the user sized, and
+   capping it at a reading column left three cramped columns on a desktop while
+   the rest of the window sat empty. The track minimum below does the shaping.
+
+   `.steps` is the one exception and does cap itself, because a single column is
+   a different shape from a grid: there is no second track to fill, so the width
+   goes entirely into stretching one chart and one line of prose. See there. */
+.wrap { margin: 0 auto; }
+
+.head { display: flex; align-items: center; gap: var(--spacing);
+        padding: 12px 4px 20px; flex-wrap: wrap; }
+h1 { font-size: var(--title-size); font-weight: 400; line-height: 1.2; margin: 0; }
+.head .sub { font-size: var(--subtitle-size); color: var(--text-2); margin: 2px 0 0; }
+
+/* The two tabs. `margin-left: auto` rather than a grid column because .head is
+   a flex row of two items and the strip is simply the third, pushed to the far
+   end; on a narrow iframe .head wraps and the strip takes its own line.
+
+   One of the two VIEWPORT media queries in this file, and legitimately so:
+   everywhere else the thing that should decide a layout is the width of the
+   card, which is why .card is a query container. The header is not in a card and
+   has nothing to query, so the window is the only signal there is. The other one
+   drops the walkthrough's rail for exactly the same reason -- a step is not in a
+   card either. Anything INSIDE a card is a container query, and stays one. */
+.tabs { display: flex; gap: 6px; margin-left: auto; }
+.tab { background: transparent; color: var(--text-2); padding: 0 16px; }
+.tab:hover { background: rgba(var(--rgb-grey), .12); }
+.tab svg { fill: currentColor; }
+/* The selected tab is the aqua pill the Save button already is, so "this is the
+   live one" means the same thing in both places. aria-selected is the source of
+   truth for the styling as well as for the screen reader, which keeps the two
+   from ever disagreeing. */
+.tab[aria-selected=true] { background: rgba(var(--rgb-aqua), .2);
+                           color: rgb(var(--rgb-aqua)); }
+@media (max-width: 30rem) {
+  .tabs { width: 100%; margin-left: 0; }
+  .tab { flex: 1 1 0; justify-content: center; }
+}
+
+/* 24rem, not 20rem: a row is a 36px shape, a line of text and a select naming a
+   Home Assistant entity, which needs about 28rem to sit on one line. At 20rem
+   every card was born too narrow for its own contents. */
+.cards { display: grid; gap: var(--spacing); margin-bottom: var(--spacing);
+         grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+         /* Each card is as tall as its own contents. Stretched to the row's
+            tallest, a three-row Status card next to a six-row one was mostly
+            empty white. */
+         align-items: start; }
+
+/* Exactly two columns, for a grid of PAIRS rather than of peers. `auto-fit`
+   with a 24rem track puts the Now tab's four cards in one row on a wide panel,
+   which says they are four equal things; they are two and two.
+
+   `align-items: stretch`, overriding `.cards` above, and that is the whole
+   reason this class exists. The default there is `start`, so each card is as
+   tall as its own contents -- correct for a grid of unrelated cards, and wrong
+   here, where the two cards of a row are read across and their bottom edges not
+   lining up reads as a mistake. The cost is whitespace under the shorter card
+   of each row, and it is worth it: the alternative, letting each column pack
+   independently, put a ragged seam down the middle of the page.
+
+   A viewport media query, and the third in this file. Same justification as the
+   other two: this is a top-level layout with no card around it, so the window is
+   the only thing there is to ask. 62rem is two 28rem columns plus the gap and
+   the body padding, measured against the narrowest card that still reads. */
+.cards.pair { grid-template-columns: repeat(2, minmax(0, 1fr));
+              align-items: stretch; }
+@media (max-width: 62rem) {
+  .cards.pair { grid-template-columns: minmax(0, 1fr); }
+  /* Row order is what makes the rows line up, and it is the wrong order to READ
+     in one column -- it interleaves the pair about the forecast with the pair
+     about the models. Swapping the middle two puts them back into "what it says,
+     then what is behind it" when there is no second column to pair across. */
+  .cards.pair > :nth-child(2) { order: 3; }
+  .cards.pair > :nth-child(3) { order: 2; }
+}
+
+/* ---- the Data walkthrough ---------------------------------------------- */
+
+/* One column, not the grid above. A step is a beat in an argument that is read
+   in order, and `auto-fit` reorders it by however many tracks happen to fit.
+
+   The cap is the exception the `.wrap` comment points at. Uncapped, a 1400px
+   window put `TimeSeries` -- a 1000x140 viewBox stretched with
+   `preserveAspectRatio: none` -- at nearly 10:1, where a real signal reads as a
+   flat line, and ran the prose to about 160 characters a line. 72rem is roughly
+   three of the grid's 24rem tracks, so a step is never narrower than the cards
+   on the other two tabs were. */
+.steps { max-width: 72rem; margin: 0 auto var(--spacing); display: grid; gap: 28px; }
+
+/* One column of full-width cards, with the gap that `.card` does not carry
+   itself. Every card on Overview used to get its spacing from `.cards`' grid,
+   so a card placed OUTSIDE that grid had none -- and two of them in a row sat
+   flush. Same shape as `.steps`, and `.cards` gives up its own margin inside
+   here so the two spacings do not add up. */
+.stack { display: grid; gap: var(--spacing); }
+.stack > .cards { margin-bottom: 0; }
+.lede { max-width: 62ch; color: var(--text-2); font-size: var(--subtitle-size);
+        line-height: 1.5; margin: 4px 4px 24px; }
+
+/* NO `container-type` on .step, .step-body or .steps. `@container (max-width:
+   30rem)` at the foot of this file is unnamed, so it resolves against the
+   NEAREST container ancestor; a container here would silently take that query
+   off the card and put it on something a good deal wider, and the control rows
+   would stop wrapping on a phone. The card is the container, and stays it. */
+.step { display: grid; grid-template-columns: 30px minmax(0, 1fr);
+        gap: var(--spacing); align-items: start; }
+.step-body { min-width: 0; }
+
+.step-rail { display: grid; grid-template-rows: auto 1fr; justify-items: center;
+             height: 100%; }
+.step-no { width: 30px; height: 30px; border-radius: 50%;
+           display: flex; align-items: center; justify-content: center;
+           font-size: 13px; font-weight: var(--primary-weight);
+           font-variant-numeric: tabular-nums;
+           background: rgba(var(--rgb-grey), .16); color: var(--text-2); }
+/* A hairline, and a background rather than a border so it collapses cleanly to
+   nothing on the last step. Forced colours strips it; see that block below. */
+.wire { width: 1px; background: rgba(var(--rgb-grey), .3); margin: 6px 0 0; }
+.step:last-child .wire { display: none; }
+
+.step-eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+                text-transform: uppercase; color: var(--text-2);
+                margin: 6px 4px 1px; }
+.step-head { font-size: var(--subtitle-size); font-weight: 500; line-height: 1.3;
+             margin: 0 4px 4px; }
+.step-intro { max-width: 68ch; margin-bottom: 12px; }
+/* A step names its own slab, so the card inside carries no title of its own and
+   the padding that separated one from the rows is not wanted either. */
+.step .card + .card { margin-top: var(--spacing); }
+
+/* Two columns inside a slab, keyed off the CARD's width rather than the
+   window's -- the same distinction the control rows already make.
+   `minmax(0, 1fr)`, never `1fr`: a grid item's automatic minimum is its
+   min-content, and one `.scroller` table or one long entity id would push the
+   track wider than the card. */
+.cols { display: grid; gap: 0 calc(var(--spacing) * 2);
+        grid-template-columns: minmax(0, 1fr); }
+@container (min-width: 44rem) {
+  .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+@media (max-width: 30rem) {
+  /* The rail is decoration, and 42px of it is a tenth of a phone screen. */
+  .step { grid-template-columns: minmax(0, 1fr); }
+  .step-rail { display: none; }
+}
+
+/* The archive picker.
+   `auto-fill`, not `auto-fit`: with two entities collected on day one, auto-fit
+   collapses the empty tracks and stretches those two across the whole card,
+   which is a different-looking page for no reason but how much history there
+   is. 20rem is an entity id plus its shape plus the chip. */
+.pickers { display: grid; gap: 2px; margin-top: 2px;
+           grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); }
+
+/* The tile is the button, so it has to undo the aqua pill every <button> on
+   this page inherits -- the same override .tab and button.secondary make. Height
+   auto rather than --control-height: this one wraps to two lines of text. */
+.pick { display: flex; align-items: center; gap: var(--spacing);
+        width: 100%; height: auto; padding: 6px 8px; text-align: left;
+        background: transparent; color: var(--text);
+        border: 1px solid transparent; }
+.pick:hover:not(:disabled) { background: rgba(var(--rgb-grey), .12); }
+.pick[aria-current=true] { background: rgba(var(--rgb-aqua), .12);
+                           border-color: rgba(var(--rgb-aqua), .35); }
+/* Not `opacity: .5` like a normal disabled button. An entity with no rows is
+   not a control that is temporarily unavailable, it is a fact worth reading --
+   and the row already says so in orange. Only the pointer changes. */
+.pick:disabled { opacity: 1; cursor: default; }
+.pick .info { display: flex; flex-direction: column; flex: 1 1 0; min-width: 40%; }
+.pick .primary { font-weight: var(--secondary-weight); }
+/* An entity id is the one identifier here long enough to need breaking, and it
+   is read character by character when it is wrong. */
+.pick .mono { font-family: var(--mono); font-size: 12.5px;
+              overflow-wrap: break-word; }
+.pick.off .primary, .pick.off .secondary { color: var(--text-2); }
+
+/* The horizon slider. Not inside a `.row`: the trailing slot there is sized for
+   a chip or a select, and a range wants the slab's whole width. */
+.hz { padding: 6px 4px 2px; }
+.hzhead { display: flex; align-items: baseline; gap: var(--spacing);
+          flex-wrap: wrap; }
+/* Big, because it is the one number the whole step is about, and everything
+   under it is a consequence of it. */
+.readout { font-size: 30px; line-height: 1.15; color: rgb(var(--rgb-aqua)); }
+.hzsum { flex: 1 1 14rem; }
+
+/* `accent-color` and otherwise native. See HorizonSlider.tsx for why: a
+   hand-drawn thumb would be the only invented control on the page and would
+   need its own forced-colors fallback, which this gets for nothing. */
+.range { width: 100%; height: var(--control-height); margin: 4px 0 0;
+         accent-color: rgb(var(--rgb-aqua)); cursor: pointer; }
+.range:focus-visible { outline: 2px solid rgba(var(--rgb-aqua), .6);
+                       outline-offset: 2px; border-radius: 6px; }
+.ticks { display: flex; justify-content: space-between; padding: 0 2px 4px;
+         font-size: 11px; color: var(--text-2); }
+
+/* A feature family: name and description on the left, count over a magnitude
+   bar on the right. Not a `.row` -- there is no shape and no control, and at
+   fifteen of them the 36px circle was most of the card.
+
+   The bar is a COMPARISON, and the number above it is the value. Both, because
+   the widths are square-rooted (see FeatureCards.tsx) and a square root is not
+   something a reader should have to undo by eye to find out how many columns
+   `daily lag` has. */
+.famrow { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem;
+          gap: var(--spacing); align-items: center; padding: 9px 4px;
+          border-bottom: 1px solid rgba(var(--rgb-grey), .16); }
+.famrow:last-child { border-bottom: 0; }
+.famrow b { display: block; font-size: var(--primary-size);
+            font-weight: var(--primary-weight); line-height: 1.3; }
+.famrow span { display: block; font-size: var(--secondary-size);
+               color: var(--text-2); line-height: 1.35;
+               overflow-wrap: break-word; }
+.famrow .amt { text-align: right; }
+.famrow .amt em { font-style: normal; font-size: var(--secondary-size);
+                  color: var(--text-2); }
+.track { height: 5px; border-radius: 3px; margin-top: 4px; overflow: hidden;
+         border: 1px solid rgba(var(--rgb-grey), .3); }
+.track i { display: block; height: 100%; background: rgb(var(--rgb-aqua)); }
+/* A family with no columns is a signal this house does not have, not a fault.
+   Grey, and an empty track rather than a missing one -- the absence is the
+   information. */
+.famrow.off b, .famrow.off span, .famrow.off .amt em { color: var(--text-2); }
+.famrow.off .track i { background: rgba(var(--rgb-grey), .4); }
+
+/* A query container, so the rows below can respond to the width of the CARD
+   rather than the width of the window. That distinction is the whole bug this
+   replaced: a viewport media query never fires on a wide desktop, where the
+   window is 1400px and the card holding the squeezed row is 380px. */
+.card { background: var(--card); border-radius: var(--card-radius);
+        padding: var(--spacing); align-content: start;
+        container-type: inline-size; }
+.card > .title { font-size: var(--subtitle-size); font-weight: 500;
+                 margin: 4px 4px 2px; }
+.card > .title small { font-size: var(--secondary-size); font-weight: 400;
+                       color: var(--text-2); }
+.card > .subtitle { font-size: var(--secondary-size); color: var(--text-2);
+                    line-height: 1.45; margin: 0 4px 10px; }
+
+.row { display: flex; align-items: center; gap: var(--spacing);
+       padding: 6px 4px; border-radius: var(--control-radius); }
+label.row { cursor: pointer; }
+label.row:hover { background: rgba(var(--rgb-grey), .12); }
+.shape { flex: 0 0 var(--icon-size); width: var(--icon-size);
+         height: var(--icon-size); border-radius: 50%;
+         display: flex; align-items: center; justify-content: center;
+         background: rgba(var(--c), .2); color: rgb(var(--c)); }
+.shape svg { width: var(--icon-symbol-size); height: var(--icon-symbol-size);
+             fill: currentColor; }
+
+/* Two numbers, each fixing a different half of the same bug.
+   `min-width: 40%`, not 0: the trailing control is a flex item as wide as its
+   longest option wants to be, and with a zero floor here it
+   crushed the text beside it to one character per line -- the sentence rendered
+   vertically. The select yields instead (see its own min-width below).
+   `flex-basis: 0`, not auto: with a content basis the text block's hypothetical
+   size is its max-content, which on a wrapping row is wider than the line, so
+   the text wrapped BELOW the icon and left the shape sitting alone. A zero basis
+   means it never triggers a wrap; the 40% floor still holds its width. */
+.info { flex: 1 1 0; min-width: 40%; }
+.primary { font-size: var(--primary-size); font-weight: var(--primary-weight);
+           line-height: 1.35; }
+/* break-word, not anywhere: `anywhere` lets the min-content width fall to a
+   single character, which is what let the squeeze above turn into vertical text.
+   `break-word` floors it at the longest word and still wraps long entity ids. */
+.secondary { font-size: var(--secondary-size); font-weight: var(--secondary-weight);
+             color: var(--text-2); line-height: 1.35; overflow-wrap: break-word; }
+/* The routine sentence, under the forecast's own on the same row. A line of its
+   own rather than a clause, because the two come from different places -- the
+   model's crossing above, this person's arithmetic below -- and running them
+   together would read as one claim. */
+.secondary .routine { display: block; margin-top: 2px; }
+.row.off .primary { color: var(--text-2); }
+/* Every use of `.num` is digits meant to be compared down a column -- the two
+   score tables and the timestamps at the ends of a chart -- so it is where the
+   mono face earns its place and nowhere else. An entity id stays in the sans
+   face: in mono it reads as a config file rather than as a name.
+
+   `tabular-nums` stays even though a monospace face makes it redundant: it is
+   what holds the columns together in the fallback face if the woff2 never
+   arrives, and it costs nothing when it does. */
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+        height: var(--chip-height); padding: 0 12px;
+        border-radius: var(--chip-radius);
+        background: rgba(var(--rgb-grey), .12);
+        font-size: var(--primary-size); font-weight: var(--primary-weight);
+        white-space: nowrap; }
+.chip svg { width: 18px; height: 18px; fill: rgb(var(--c)); }
+
+button { font: inherit; font-size: var(--primary-size);
+         font-weight: var(--primary-weight); color: var(--text);
+         height: var(--control-height); padding: 0 12px; border: none;
+         border-radius: var(--control-radius); cursor: pointer;
+         max-width: 100%;
+         background: rgba(var(--rgb-grey), .12); }
+input[type=checkbox] { flex: 0 0 auto; width: 20px; height: 20px; margin: 0 8px;
+                       cursor: pointer; accent-color: rgb(var(--rgb-aqua)); }
+
+button { display: inline-flex; align-items: center; gap: 8px; padding: 0 20px;
+         background: rgba(var(--rgb-aqua), .2); color: rgb(var(--rgb-aqua)); }
+button:hover { background: rgba(var(--rgb-aqua), .3); }
+button:disabled { opacity: .5; cursor: default; }
+button svg { width: 20px; height: 20px; fill: currentColor; }
+.actions { display: flex; align-items: center; gap: var(--spacing); padding: 4px; }
+
+/* The Training card has four of them and lives in a card, not across the page.
+   A GRID, not a wrapping flex row: content-sized buttons wrapped to two lines
+   left a ragged right edge that looked like a bug rather than a layout, because
+   "Retrain now" and "Reload models" are four characters apart. Equal tracks put
+   both edges of the block flush against the card's padding on every line.
+
+   `auto-fit` with a 9.5rem floor rather than a fixed `1fr 1fr`, so the count
+   follows the card: four across on a wide one, two on a typical one, one on a
+   phone -- and because four items divide evenly by 4, 2 and 1, every one of
+   those is flush at both ends. The floor is "Reload models" plus its icon plus
+   the padding, measured, not guessed. */
+.actions.wrapped { display: grid; gap: 8px; padding: 8px 4px 4px;
+                   grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); }
+/* Centred, because a stretched button whose label sits hard left reads as a
+   menu item. The icon and the label travel together as one centred group. */
+.actions.wrapped button { padding: 0 14px; justify-content: center; }
+
+/* Secondary actions: the same pill, without claiming to be the thing you came
+   to press. Retrain is the aqua one. */
+button.secondary { background: rgba(var(--rgb-grey), .12); color: var(--text); }
+button.secondary:hover { background: rgba(var(--rgb-grey), .2); }
+button.secondary svg { fill: var(--text-2); }
+p.empty.error { color: rgb(var(--rgb-red)); }
+
+/* The dropdown.
+   A browser draws an open <select> itself, with the operating system's colours,
+   and no CSS reaches inside it -- on the dark panel that was a white list of 159
+   countries. Replacing the control is the only way to style the open state, so
+   everything below is the popup the native one would not let us have.
+   `position: relative` here is what the popup hangs off; the card's
+   `container-type` makes it a containing block for absolutely positioned
+   children but does NOT clip them, so the list is free to overhang the card. */
+.select { position: relative; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.select > button { display: flex; align-items: center; justify-content: space-between;
+                   gap: 8px; width: 100%;
+                   background: rgba(var(--rgb-grey), .12); color: var(--text); }
+.select > button:hover { background: rgba(var(--rgb-grey), .2); }
+.select > button svg { width: 20px; height: 20px; fill: var(--text-2);
+                       flex: 0 0 auto; }
+.select > button[aria-expanded=true] svg { transform: rotate(180deg); }
+.select .value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.popup { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0;
+         min-width: 100%; max-width: min(24rem, 88vw);
+         background: var(--popup); border-radius: var(--control-radius);
+         padding: 6px;
+         /* The one shadow on the page. The popup is the only thing that has to
+            read as floating above a card rather than beside one. */
+         box-shadow: 0 6px 24px rgba(0, 0, 0, .35);
+         outline: 1px solid var(--popup-edge); }
+.popup.up { top: auto; bottom: calc(100% + 4px); }
+
+.popup .search { width: 100%; height: 34px; margin-bottom: 6px;
+                 font: inherit; font-size: var(--primary-size); color: var(--text);
+                 padding: 0 10px; border: none; border-radius: 8px;
+                 background: rgba(var(--rgb-grey), .16); }
+.popup .search::placeholder { color: var(--text-2); }
+.popup .search:focus { outline: 2px solid rgba(var(--rgb-aqua), .6); }
+
+.popup ul { list-style: none; margin: 0; padding: 0;
+            max-height: 15rem; overflow-y: auto; }
+.popup li { display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+            font-size: var(--primary-size);
+            overflow-wrap: break-word; }
+.popup li svg { width: 18px; height: 18px; flex: 0 0 auto;
+                fill: rgb(var(--rgb-aqua)); }
+/* Hover and keyboard cursor are the same state deliberately: with a filter box
+   holding focus, the mouse and the arrow keys have to agree on what Enter does. */
+.popup li.active { background: rgba(var(--rgb-grey), .18); }
+.popup li[aria-selected=true] { font-weight: var(--primary-weight); }
+.popup li.none { color: var(--text-2); font-size: var(--secondary-size);
+                 cursor: default; }
+.saved { font-weight: 500; color: rgb(var(--rgb-aqua));
+         opacity: 0; transition: opacity .2s; }
+.saved.on { opacity: 1; }
+.error { font-weight: 500; color: rgb(var(--rgb-red)); }
+
+.empty { font-size: var(--secondary-size); color: var(--text-2);
+         margin: 0; padding: 6px 4px; }
+
+/* A break inside a card, for a group of rows that needs naming. Quieter than
+   the card's own title, because it is a subdivision of it and not a rival. */
+.subhead { font-size: var(--secondary-size); font-weight: 500;
+           color: var(--text-2); margin: 10px 0 2px; padding: 0 4px; }
+
+/* The horizon strip: 48 cells where there used to be 48 rows. Aqua and blue are
+   the two model families; the cell is only a smaller way of saying which won.
+
+   At FULL strength, not the .2 wash the icon shapes use. The pair is the one
+   validated for categorical use -- deutan dE 9.4 against each other and over 3:1
+   against both surfaces -- and diluting it to a tint throws that away, which
+   matters more here than on an icon because the cell is 7px wide and the colour
+   is the only thing in it. The 2px gap is the spacer that keeps two adjacent
+   fills from reading as one.
+
+   The third state is HOLLOW, not a third hue. It used to be orange, for the
+   baseline that was serving the horizon; nothing is served there now, and
+   absence is not a category -- a solid third colour would read as one, and it
+   would drop a third saturated fill next to a pair whose separation was
+   measured. A wash with a ring says "there is a cell here and it is empty",
+   which is the fact. */
+.strip { display: flex; gap: 2px; padding: 8px 4px 0; }
+.strip i { flex: 1 1 0; min-width: 0; height: 22px; border-radius: 2px;
+           background: rgb(var(--c)); }
+.strip i.off { background: rgba(var(--rgb-grey), .18);
+               box-shadow: inset 0 0 0 1px rgba(var(--rgb-grey), .45); }
+
+/* Scale at the ends, legend in the middle. The legend is not decoration: with
+   two categories, identity must never rest on colour alone, and this is what a
+   reader who cannot separate the hues uses instead. The per-cell title and the
+   summary row above say it a third and fourth time. */
+.scale { display: flex; justify-content: space-between; align-items: center;
+         gap: var(--spacing); padding: 6px 4px 2px;
+         font-size: var(--secondary-size); color: var(--text-2); }
+.legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.legend i { width: 10px; height: 10px; border-radius: 2px;
+            background: rgb(var(--c)); }
+.legend span { margin-right: 6px; }
+/* Swatch and label travel together, so three keys wrap as three pairs rather
+   than breaking a colour away from the word it explains. */
+.legend .key { display: inline-flex; align-items: center; gap: 6px;
+               margin-right: 2px; }
+.legend .key span { margin-right: 0; }
+/* A legend key that switches a curve off is a button, and every <button> on
+   this page inherits the aqua pill -- so, like .tab and button.secondary, it has
+   to say it is not one. Height auto: it sits in a 12px scale row, not in a
+   42px control row. */
+button.key { height: auto; padding: 2px 6px; border-radius: 6px;
+             background: transparent; color: var(--text-2);
+             font-size: var(--secondary-size); font-weight: var(--secondary-weight);
+             cursor: pointer; }
+button.key:hover { background: rgba(var(--rgb-grey), .14); color: var(--text); }
+/* Off is carried by the faded swatch AND the struck-through label: with three
+   curves that can each be hidden, colour alone is not enough to say which. */
+button.key[aria-pressed=false] { opacity: .65; }
+button.key[aria-pressed=false] i { opacity: .3; }
+button.key[aria-pressed=false] span { text-decoration: line-through; }
+
+/* A line chart, in inline SVG. The height comes from the component because a
+   sparkline is this same box at 48px rather than a second component.
+
+   `preserveAspectRatio: none` is set as an ATTRIBUTE in the JSX, not here --
+   it is SVG geometry rather than presentation, and putting it in CSS would let
+   a future edit to this file silently change what the chart means. */
+.chart { width: 100%; padding: 4px 4px 0; }
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+/* non-scaling-stroke is what keeps this 2px while the viewBox is stretched to
+   the card's width. Without it the line thickens and wobbles with the aspect. */
+.chart .line { fill: none; stroke: rgb(var(--c)); stroke-width: 2;
+               stroke-linejoin: round; stroke-linecap: round; }
+.chart .grid { stroke: rgba(var(--rgb-grey), .25); stroke-width: 1; }
+/* Unobserved slots. The line already breaks over them; this is the second
+   channel, so the gap is not carried by absence alone. */
+.chart .gap { fill: rgba(var(--rgb-grey), .16); }
+.chart-summary { padding: 2px 4px 4px; margin: 0; }
+
+/* The crosshair, and the readout beside it.
+   A vertical line is the only mark whose meaning survives `preserveAspectRatio:
+   none`, so it is the one thing drawn inside the SVG; the numbers are HTML over
+   the box, which is also why both chart wrappers are positioning contexts. */
+.chart, .curves { touch-action: pan-y; }
+.chart { position: relative; }
+.chart .crosshair, .curves .crosshair { stroke: var(--text-2); stroke-width: 1;
+                                        opacity: .55; pointer-events: none; }
+
+.tip { position: absolute; top: 6px; z-index: 6; pointer-events: none;
+       min-width: 9rem; padding: 7px 9px; border-radius: 8px;
+       background: var(--popup); outline: 1px solid var(--popup-edge);
+       box-shadow: 0 6px 24px rgba(0, 0, 0, .35);
+       font-size: var(--secondary-size); }
+.tiphead { font-family: var(--mono); font-size: 11px; color: var(--text-2);
+           margin-bottom: 4px; white-space: nowrap; }
+.tiprow { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.tiprow i { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+.tiprow span { color: var(--text-2); flex: 1 1 auto; }
+.tiprow b { font-weight: var(--primary-weight); }
+.legend i.gapkey { background: rgba(var(--rgb-grey), .45); }
+/* The strip's hollow cell, at legend size. Same treatment, so the key and the
+   thing it names are recognisably one shape. */
+.legend i.offkey { background: rgba(var(--rgb-grey), .18);
+                   box-shadow: inset 0 0 0 1px rgba(var(--rgb-grey), .45); }
+
+/* Per-fold bars. The horizon strip's flex row and 2px gap, but each cell's
+   height carries a number, so the fixed 22px goes and the cells sit on a common
+   baseline instead of centring. */
+.strip.bars { align-items: flex-end; height: 48px; }
+.strip.bars i { height: auto; }
+
+/* The calibration square. preserveAspectRatio is left at its DEFAULT here,
+   unlike the time series: the dashed diagonal only means "perfectly calibrated"
+   while both axes are on the same scale, and circles are only circles while the
+   transform is uniform. */
+.calib { max-width: 18rem; margin: 8px auto 0; }
+.calib svg { display: block; width: 100%; aspect-ratio: 1;
+             overflow: visible; }
+.calib .ref { stroke: rgba(var(--rgb-grey), .5); stroke-width: 1;
+              stroke-dasharray: 3 3; }
+.calib .bin { fill: rgb(var(--c)); }
+
+/* A table is the right shape for per-horizon scores -- six numbers a row, read
+   down a column -- and the wrong shape for a 380px card, so it scrolls inside
+   its own box rather than widening the page. */
+.scroller { overflow-x: auto; margin: 4px 0; }
+table.metrics, table.bins { border-collapse: collapse; width: 100%;
+                            font-size: var(--secondary-size); }
+table.metrics th, table.bins th { text-align: left; font-weight: 500;
+                                  color: var(--text-2); padding: 4px 8px 4px 4px;
+                                  white-space: nowrap; }
+table.metrics td, table.bins td { padding: 3px 8px 3px 4px; white-space: nowrap;
+                                  border-top: 1px solid rgba(var(--rgb-grey), .18); }
+table.metrics tr.off td, table.bins tr.off td { color: var(--text-2); }
+table.bins { max-width: 22rem; margin: 0 auto; }
+
+/* Forced colours strips every background away, taking the whole encoding with
+   it. Fall back to a border, which the mode does honour. */
+@media (forced-colors: active) {
+  /* A tinted disc and a hairline are both background-only, and background is
+     the first thing this mode takes away. */
+  .step-no { border: 1px solid CanvasText; }
+  /* Background is stripped, so the tinted "this is the one" tile would become
+     indistinguishable from its eleven neighbours. */
+  .pick[aria-current=true] { border-color: Highlight; outline: 1px solid Highlight; }
+  /* A bar whose fill is a background is a bar that is not there. */
+  .track i { background: CanvasText; }
+  .famrow.off .track i { background: Canvas; }
+  /* Both Brier lines collapse to CanvasText; the dash is what is left. */
+  .chart .line.model { stroke: CanvasText; }
+  .chart .line.base { stroke: CanvasText; }
+  .chart .ribbon { fill: Canvas; stroke: GrayText; }
+  .chart .marker { stroke: Highlight; }
+  .legend i.dashkey { border-top-color: CanvasText; }
+  .tip { background: Canvas; outline: 1px solid CanvasText; box-shadow: none; }
+  .tiprow i { border: 1px solid CanvasText; }
+  /* The faded swatch goes with the background; the strike-through is what is
+     left saying a curve is switched off. */
+  button.key[aria-pressed=false] { opacity: 1; }
+  .wire { background: none; border-left: 1px solid CanvasText; }
+  .strip i { border: 1px solid CanvasText; }
+  /* The border above is what survives here, so hollow-vs-filled still reads. */
+  .strip i.off { background: Canvas; box-shadow: none; }
+  /* A stroke of rgb(var(--c)) is stripped too, and a chart with no line is not
+     a degraded chart, it is a blank box. */
+  .chart .line { stroke: CanvasText; }
+  .chart .gap { fill: Canvas; stroke: GrayText; stroke-dasharray: 2 2; }
+  .legend i.nightkey { background: Canvas; border-color: GrayText; }
+}
+
+/* A CONTAINER query, deliberately. Below this width a row cannot hold its text
+   and a select on one line, so the control takes a line of its own -- which is
+   what the panel already did on a phone, now for the same reason rather than a
+   coincidence of viewport size. Threshold: a row needs ~28rem to sit inline and
+   a 480px phone card measures ~28.5rem, so 30rem covers both.
+
+   Scoped to .control, i.e. to the rows that actually hold a select. Applied to
+   every row it made things worse than the bug: chips broke onto their own line
+   and the status rows put their text under the icon. */
+@container (max-width: 30rem) {
+  .row.control { flex-wrap: wrap; }
+  .row.control .select { width: 100%; flex: 1 1 100%; max-width: none; }
+}
+
+
+/* Forecast curves. Same approach as the sparkline: a stretched viewBox, so the
+   stroke has to opt out of scaling and nothing inside may care about its
+   proportions. */
+.curves { position: relative; margin: 4px 0 2px; }
+.curves svg { display: block; width: 100%; height: 200px; overflow: visible; }
+/* `stroke-linecap: round` is load-bearing now that a curve can break: a single
+   served horizon between two holes is a zero-length sub-path, which the default
+   `butt` cap renders as nothing at all. */
+.curves .curve { fill: none; stroke: rgb(var(--c)); stroke-width: 2;
+                 vector-effect: non-scaling-stroke; stroke-linejoin: round;
+                 stroke-linecap: round; }
+.curves .grid { stroke: rgba(var(--rgb-grey), .25); stroke-width: 1;
+                vector-effect: non-scaling-stroke; stroke-dasharray: 3 4; }
+/* Night is a backdrop, not a series: no border, and light enough that a line
+   crossing it stays the thing you read. */
+.curves .night { fill: rgba(var(--rgb-grey), .16); }
+/* The legend key for the one mark that is not a curve, mirroring the wash it
+   stands for. There were two; the dashed hole mark was removed on request. */
+.legend i.nightkey { background: rgba(var(--rgb-grey), .16);
+                     border: 1px solid rgba(var(--rgb-grey), .35); }
+/* The clock beside the horizon in a chart tip. Dimmer than the horizon: the
+   horizon is what was asked for, the time is what it means. */
+.tiphead .tipwhen { color: var(--text-2); font-weight: 400; margin-left: 6px; }
+.curves-max, .curves-min, .chart-max, .chart-min {
+  position: absolute; right: 0; font-size: .72rem;
+  color: var(--text-2); pointer-events: none; }
+.curves-max, .chart-max { top: -6px; }
+.curves-min, .chart-min { bottom: -6px; }
+
+/* ---- Brier by horizon --------------------------------------------------- */
+
+/* The chart box has to be a positioning context, because the axis labels and
+   the marker's label are HTML over the SVG rather than `<text>` inside it --
+   text in a box with `preserveAspectRatio: none` is text that has been
+   horizontally scaled by whatever the card's width happened to be. */
+.chart.score { position: relative; height: 200px; margin: 4px 0 2px; }
+/* `.chart .line` above already supplies fill, width, joins and a `--c` stroke;
+   these two only replace the colour, because the score chart is the one place
+   where two lines in one box mean different things. */
+.chart .line.model { stroke: rgb(var(--rgb-aqua)); }
+/* Dashed carries the identity, not the colour: forced colours strips the hue
+   off both lines and leaves this as the only difference between them. */
+.chart .line.base { stroke: rgb(var(--rgb-orange)); stroke-dasharray: 6 4; }
+/* The fold spread, behind everything. Light enough that a line crossing it is
+   still the thing you read. */
+.chart .ribbon { fill: rgba(var(--rgb-aqua), .13); stroke: none; }
+.chart .marker { stroke: var(--text-2); stroke-width: 1; stroke-dasharray: 3 3; }
+.marker-label { position: absolute; top: -6px; font-size: .72rem;
+                color: var(--text-2); pointer-events: none;
+                transform: translateX(-50%); white-space: nowrap; }
+.legend i.dashkey { width: 14px; height: 0; border-radius: 0;
+                    border-top: 2px dashed rgb(var(--rgb-orange)); }
+
+/* Click targets for the chart above, as a row of transparent buttons rather
+   than anything inside the SVG -- a `<rect>` cannot be a button, and a focusable
+   48-stop widget in there would be a worse version of the range in step four.
+   `aria-hidden` and `tabIndex={-1}` for the same reason: this is a shortcut for
+   a pointer, and the slider is the control. */
+.hitrow { position: absolute; inset: 4px 4px 0; display: flex; gap: 0; }
+.hitrow .hit { flex: 1 1 0; min-width: 0; height: 100%; padding: 0;
+               background: transparent; border-radius: 0; cursor: pointer; }
+/* The hover IS the crosshair: a full-height band lighting up under the pointer
+   says which horizon a click would take, and needs no second element to do it. */
+.hitrow .hit:hover { background: rgba(var(--rgb-grey), .16); }
+
+/* The 48-row table, folded away under the chart that replaced it. */
+details.more { margin: 6px 0 2px; }
+details.more > summary { font-size: var(--secondary-size); color: var(--text-2);
+                         cursor: pointer; padding: 6px 4px; border-radius: 8px;
+                         list-style-position: inside; }
+details.more > summary:hover { background: rgba(var(--rgb-grey), .12);
+                               color: var(--text); }

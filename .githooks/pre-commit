@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Refuse to commit an edit to the generated stable tree.
+#
+# `occupancy-forecast/` is produced from `occupancy-forecast-edge/` by scripts/promote.sh.
+# An edit made directly in the stable tree survives only until the next
+# promotion, which overwrites it with no warning and no trace -- so the code
+# running on the HA box would exist nowhere else and then quietly stop existing.
+#
+# CLAUDE.md says this in prose. Prose does not stop anybody at 1am. This does.
+#
+# scripts/promote.sh tells you to commit with PROMOTE=1, which is the intended
+# way through. If you are hitting this hook without having run promote.sh, the
+# fix is to make the change in occupancy-forecast-edge/ instead -- not to set the
+# variable.
+#
+# Enable with:  git config core.hooksPath .githooks
+set -euo pipefail
+
+if [[ "${PROMOTE:-}" == "1" ]]; then
+    exit 0
+fi
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- 'occupancy-forecast/*' \
+         | grep -vE '^occupancy-forecast/(config\.yaml|DOCS\.md|CHANGELOG\.md)$' || true)
+
+if [[ -n "$staged" ]]; then
+    echo "pre-commit: refusing to commit edits to the GENERATED stable tree." >&2
+    echo >&2
+    printf '  %s\n' $staged >&2
+    echo >&2
+    echo "occupancy-forecast/ is generated from occupancy-forecast-edge/ by scripts/promote.sh." >&2
+    echo "Make the change in occupancy-forecast-edge/ instead." >&2
+    echo >&2
+    echo "If this IS a promotion, promote.sh will have told you to use:" >&2
+    echo "  PROMOTE=1 git commit ..." >&2
+    exit 1
+fi
