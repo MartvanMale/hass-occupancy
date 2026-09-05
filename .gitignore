@@ -34,6 +34,15 @@ node_modules/
 # has to be the real spelling -- `claude.md` matches nothing.
 CLAUDE.md
 
+# The local demo instance (compose.yaml). `.env` holds one machine's paths and
+# LAN address, which is why `.env.example` is the tracked half. The two
+# directories are the fictional household's /data and its screenshots -- 25-odd
+# MB of archive, parquet and pickles, all of it regenerable by
+# `docker compose run --rm instance build|fit|forecasts`.
+.env
+demo-data/
+demo-shots/
+
 # NOT ignored, and deliberately: the STABLE add-on (occupancy-forecast/) is
 # generated from occupancy-forecast-edge/ by scripts/promote.sh, but it is
 # tracked in full, because it is what the HA box builds and git has to be able

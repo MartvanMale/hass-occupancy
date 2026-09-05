@@ -5,7 +5,7 @@
 #
 # `version` is bumped only by a promotion, and a promotion is Mart's decision.
 name: Occupancy Forecast
-version: "0.1.0"
+version: "0.1.1"
 slug: occupancy_forecast
 description: >-
   Forecasts who will be home, hour by hour, for the next two days -- and how

@@ -56,6 +56,12 @@ HOUSE_ENTITY = "group.household"
 # the distance TRACE, not the number, so what it needs is a closing speed that
 # looks like a commute rather than a step change.
 COMMUTE_M = {"alice": 12_400, "bob": 8_100}
+# How faithfully the phone alarm tracks the day it precedes. 0 would put it at
+# the weekday's typical hour every time -- saying exactly what the weekday median
+# already says, so worth nothing -- and 1 would make it a perfect oracle. A real
+# alarm is neither: it moves on the mornings the routine moves, and not otherwise.
+ALARM_FIDELITY = 0.8
+
 COMMUTE_MIN = 24              # door to door
 COMMUTE_STEP_MIN = 4          # points along the ramp: ~31 km/h closing
 IDLE_STEP_MIN = 120           # while parked, matching the real trace's long gaps
@@ -72,6 +78,13 @@ def settings() -> config.Settings:
                           f"sensor.home_{who}_direction_of_travel"]
             for who in PEOPLE},
         units={f"sensor.home_{who}_distance": "m" for who in PEOPLE},
+        next_alarm={PEOPLE[who]: f"sensor.phone_{who}_next_alarm"
+                    for who in PEOPLE},
+        # Decoration only -- no feature, no model, no entity. It greys out the
+        # hours nobody is expected to be awake, which is what makes a dip at
+        # 03:00 read differently from a dip at 15:00. The schedule's own history
+        # comes from demo-serve.py, which must name the same entity.
+        day_schedule="schedule.household_day",
         timezone="Europe/Amsterdam",
         country="NL",
         holiday_country="NL",
@@ -122,7 +135,7 @@ def state_events(frame: pd.DataFrame) -> dict[str, list[tuple[pd.Timestamp, str]
 
 
 def distance_rows(events: list[tuple[pd.Timestamp, str]],
-                  who: str) -> list[tuple[str, int, str]]:
+                  who: str, until: pd.Timestamp) -> list[tuple[str, int, str]]:
     """A metres-from-home trace with commute-shaped ramps between episodes.
 
     `eta.py` refuses to answer below `MIN_CLOSING_KMH`, so a trace that steps
@@ -148,7 +161,15 @@ def distance_rows(events: list[tuple[pd.Timestamp, str]],
             at(when + pd.Timedelta(minutes=step * COMMUTE_STEP_MIN),
                previous + (target - previous) * step / steps)
         # Then a sparse hold until the next change, the way a parked phone reports.
-        stop = events[index + 1][0] if index + 1 < len(events) else when + pd.Timedelta(hours=6)
+        #
+        # `until` for the LAST event, not six hours and then silence. A parked
+        # phone keeps reporting; it does not stop because its owner stopped
+        # moving. Stopping made the archive fall quiet for however long it was
+        # between the final state change and now -- and `features.observability`
+        # rightly refuses anything inside a silence longer than
+        # `config.MAX_SILENCE_H`, so those slots never became backtest origins
+        # and the verification card could score barely half its window.
+        stop = events[index + 1][0] if index + 1 < len(events) else until
         cursor = when + pd.Timedelta(minutes=COMMUTE_MIN + IDLE_STEP_MIN)
         while cursor < stop:
             at(cursor, target)
@@ -156,7 +177,103 @@ def distance_rows(events: list[tuple[pd.Timestamp, str]],
     return rows
 
 
-def build(out: Path, days: int, seed: int) -> None:
+def zone_rows(events: dict[str, list[tuple[pd.Timestamp, str]]],
+              until: pd.Timestamp) -> list[tuple[str, int, str]]:
+    """Each tracked zone's own history: how many people are in it.
+
+    Home Assistant writes a zone entity's state as a COUNT of the persons
+    currently inside it, and the collector archives it because
+    `runtime.tracked_entities` includes the zones. Nothing in the model reads it
+    -- `features._resolve_zone_events` takes the zone from the PERSON's state
+    string, which is the only per-person zone signal history contains -- but the
+    Data view lists every tracked entity and flagged both zones as "never
+    produced a row", which on a real install would mean a genuinely broken zone.
+    """
+    moments = sorted({when for stream in events.values() for when, _ in stream})
+    state: dict[str, str] = {}
+    per_person = {who: dict(stream) for who, stream in events.items()}
+    rows: list[tuple[str, int, str]] = []
+    last: dict[str, str] = {}
+    for when in moments:
+        for who in per_person:
+            if when in per_person[who]:
+                state[who] = per_person[who][when]
+        for entity, name in ZONES.values():
+            count = str(sum(1 for v in state.values() if v == name))
+            if last.get(entity) != count:
+                rows.append((entity, _ms(when), count))
+                last[entity] = count
+    return rows
+
+
+def direction_rows(distances: list[tuple[str, int, str]],
+                   who: str) -> list[tuple[str, int, str]]:
+    """`towards` / `away_from` / `stationary`, from the sign of the distance trace.
+
+    The Proximity integration publishes this alongside the distance and
+    `features._add_proximity` prefers it, falling back to the sign of the
+    distance delta only when the entity is absent. The demo's settings have
+    always NAMED a direction entity, so without these rows that preference
+    resolved to an entity with no history -- the fallback never ran and
+    `dir_towards` / `dir_away` came out empty rather than derived.
+    """
+    entity = f"sensor.home_{who}_direction_of_travel"
+    rows: list[tuple[str, int, str]] = []
+    previous: float | None = None
+    last = ""
+    for _, when, value in distances:
+        metres = float(value)
+        if previous is not None:
+            if metres <= 0.0 < previous:
+                state = "arrived"
+            elif metres < previous - 50:
+                state = "towards"
+            elif metres > previous + 50:
+                state = "away_from"
+            else:
+                state = "stationary"
+            # Only on change: the real sensor is event-driven, and writing a row
+            # per sample would triple the archive for no extra information.
+            if state != last:
+                rows.append((entity, when, state))
+                last = state
+        previous = metres
+    return rows
+
+
+def alarm_rows(frame: pd.DataFrame, who: str) -> list[tuple[str, int, str]]:
+    """The phone's next-alarm sensor: an ISO timestamp while set, `absent` after.
+
+    `synthetic.household(alarm_fidelity=...)` already emits `next_alarm_h` --
+    hours from each slot until the alarm, NaN when none is set -- in exactly the
+    shape `features._add_next_alarm` produces from the real archive. This turns
+    that column back into the EVENTS the companion app actually writes, which is
+    what the store holds.
+
+    The literal `absent` matters: `_add_next_alarm` carries the last value
+    forward, so a cancelled alarm that is merely omitted would be carried
+    forever rather than cleared.
+    """
+    entity = f"sensor.phone_{who}_next_alarm"
+    person = frame[frame["subject"] == who].sort_values("time")
+    if "next_alarm_h" not in person.columns:
+        return []
+    rows: list[tuple[str, int, str]] = []
+    last = ""
+    for when, ahead in zip(person["time"], person["next_alarm_h"]):
+        if pd.isna(ahead):
+            value = "absent"
+        else:
+            # Quantised to the minute, the way a phone reports a set alarm.
+            value = (when + pd.Timedelta(hours=float(ahead))
+                     ).floor("min").tz_convert("UTC").isoformat()
+        if value != last:
+            rows.append((entity, _ms(when), value))
+            last = value
+    return rows
+
+
+def build(out: Path, days: int, seed: int, irregular: bool = True) -> None:
     out.mkdir(parents=True, exist_ok=True)
     conf = settings()
     config.configure(conf)
@@ -166,17 +283,32 @@ def build(out: Path, days: int, seed: int) -> None:
     # last 48 hours and the verification card has something recent to score.
     end = pd.Timestamp.now(tz="UTC").normalize()
     start = (end - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-    frame = synthetic.household(days=days, seed=seed, realistic=True, start=start)
+    # `irregular`: errands, household trips and a rota kept loosely. Without it
+    # this household is a timetable, the per-weekday lookup is the optimal
+    # predictor by construction, and the trained model ships 5 of 48 horizons --
+    # so the panel's headline number is a picture of the generator rather than
+    # of the add-on. See the measured comparison in synthetic.py.
+    frame = synthetic.household(days=days, seed=seed, realistic=True,
+                                start=start, irregular=irregular,
+                                alarm_fidelity=ALARM_FIDELITY)
     print(f"generated {len(frame)} slot-rows for {frame['subject'].nunique()} people "
-          f"from {start} over {days} days")
+          f"from {start} over {days} days"
+          f"{'' if irregular else ' (timetable household)'}")
 
     events = state_events(frame)
     rows: list[tuple[str, int, str]] = []
     for who, stream in events.items():
         entity = PEOPLE[who]
         rows += [(entity, _ms(when), state) for when, state in stream]
-        rows += distance_rows(stream, who)
+        # Right up to the present, so the newest slots are observable and the
+        # panel has a live "right now" rather than a three-day-old one.
+        distances = distance_rows(stream, who, pd.Timestamp.now(tz="UTC"))
+        rows += distances
+        rows += direction_rows(distances, who)
+        rows += alarm_rows(frame, who)
         print(f"  {who}: {len(stream)} state changes")
+
+    rows += zone_rows(events, pd.Timestamp.now(tz="UTC"))
 
     # The house group, so `group.household` has a history of its own rather than
     # only being inferred. Anyone home -> home.
@@ -220,7 +352,13 @@ def fit(out: Path, n_jobs: int) -> None:
     store = HistoryStore(out / "history.db")
 
     began = dt.datetime.now()
-    table = features.build(store)
+    # The span explicitly. `features.history_start` looks for `source.store` --
+    # a StoreSource wrapping a HistoryStore -- and this passes the HistoryStore
+    # itself, so it finds no span and falls back to a generous 400-day floor.
+    # That was invisible while the demo generated 400 days and it is not at 180:
+    # the grid stayed 400 days wide, 55% of it had nothing to label, and the
+    # trainer saw 26,013 usable rows in a 57,600-row table.
+    table = features.build(store, start=store.span()["first"])
     features.write(table, out / "features.parquet")
     labelled = int(table["home_frac"].notna().sum())
     print(f"features: {len(table)} rows, {labelled} labelled "
@@ -306,14 +444,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("step", choices=["build", "fit", "forecasts"])
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--days", type=int, default=400,
+    # 180, not 400, and the reason is the ship gate rather than taste. Folds
+    # scale with history: 400 days is 51 of them, and at 51 the sign test can
+    # PROVE a minority fold record, so a horizon with real average skill is
+    # refused. 175 days is 19 folds -- which is what the real archive has, and
+    # why it ships 43 of 48. Fewer days also starve the per-horizon fits at long
+    # range, which is the only condition under which the POOLED family wins:
+    # measured at 400 days it lost every horizon by ~0.02 Brier.
+    parser.add_argument("--days", type=int, default=180,
                         help="history to generate (build) / to backtest (forecasts)")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--n-jobs", type=int, default=6,
                         help="joblib workers; pair with OMP_NUM_THREADS=1")
+    parser.add_argument("--irregular", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="a household rather than a timetable (build only)")
     args = parser.parse_args()
     if args.step == "build":
-        build(args.out, args.days, args.seed)
+        build(args.out, args.days, args.seed, args.irregular)
     elif args.step == "fit":
         fit(args.out, args.n_jobs)
     else:

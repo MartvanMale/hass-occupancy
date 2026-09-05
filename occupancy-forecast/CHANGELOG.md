@@ -21,6 +21,52 @@ The Edge add-on keeps no release history. Its `CHANGELOG.md` is the queue of wha
 has landed on edge and has not been promoted yet; `scripts/promote.sh` is the
 moment those entries move into this file under a version number.
 
+## 0.1.1 - 2026-09-05
+
+### Fixed
+
+- The add-on built and then died at startup on a Raspberry Pi 4, logging
+  `Illegal instruction (core dumped)` and no traceback. `pyarrow==21.0.0`'s
+  aarch64 wheel bundles mimalloc compiled with ARMv8.1 LSE atomics, inlined as
+  far as `mi_thread_init`, and a Pi 4's Cortex-A72 is ARMv8.0 — so the process
+  died while loading the library, before `faulthandler` could say anything. It
+  took `import pandas` and `import sklearn` with it, since pandas imports
+  pyarrow at import time, which is why the crash reached an add-on that only
+  touches parquet in `train.py` and `explore.py`. Pinned to `pyarrow==22.0.0`,
+  the first release carrying the upstream fix (apache/arrow#47766). Reported in
+  #1, with the disassembly and a QEMU `-cpu cortex-a72` reproduction that needs
+  no Pi.
+
+- Installing the add-on from the repository URL failed to build. The Ingress
+  panel's compiled bundle was gitignored, so Supervisor's clone contained no
+  `panel/dist` and the image build died at the `COPY` with a Docker checksum
+  error that named neither the panel nor the cause. The bundle is now committed,
+  which is the only way an add-on that is built from a clone and compiles no
+  frontend on the box can have one.
+
+### Added
+
+- A third arm in the synthetic household, `irregular=True`: errands drawn from a
+  heavy tail with a clustering rate, multi-day trips taken by the whole
+  household at once, and a rota kept loosely. The two existing worlds are a
+  timetable — one departure a day, away exactly eight hours, home by midnight —
+  which is anti-correlated at half a day, so `persistence` carries no
+  information and the per-weekday lookup is unbeatable by construction. Measured
+  against a real 175-day archive, the timetable had 8 h autocorrelation of
+  −0.21 against the real +0.43, no absence longer than 11.5 h against a real
+  526 h, and a model trained on 400 days of it shipped **5 of 48 horizons**
+  where the same code on the real archive shipped 43. The new arm is additive
+  and draws from its own random stream, so `realistic=False` and
+  `realistic=True` are unchanged bit for bit and the leak detector still means
+  what it meant.
+
+- `scripts/check-panel.sh` and `scripts/panel-source-hash.sh`, and a stamp file
+  `panel/dist/.source-hash` written by `scripts/build-panel.sh`. A committed
+  artifact can be stale, and a stale panel is silent — it installs cleanly and
+  serves old code. `scripts/promote.sh` now rebuilds **both** add-ons' bundles,
+  edge's before the rsync and stable's after, so a promotion cannot carry a
+  stale one.
+
 ## 0.1.0 - 2026-09-05
 
 First release. Everything is under `### Added`: there is no earlier published

@@ -1,0 +1,145 @@
+# The add-on's real image, on a development machine, against a household that
+# does not exist.
+#
+# Every screenshot of this add-on is a picture of somebody's home -- the Config
+# view renders `person.*` and `zone.*` ids verbatim and the Data view lists every
+# archived series -- so captures are taken against a generated household instead
+# of a real one. `scripts/demo-instance.py` builds that household's `/data` and
+# `scripts/demo-serve.py` serves the real FastAPI app against it with the Home
+# Assistant client stubbed out.
+#
+# Those two scripts already ran on a host venv. What this file adds is the IMAGE:
+# same base, same pinned dependencies, same committed panel bundle as the thing
+# Supervisor builds, so what you are looking at is the add-on and not an
+# approximation of it. Nothing under `occupancy-forecast-edge/` is modified to
+# make this work -- the demo lives entirely in the entrypoint and the mounts.
+#
+#     cp .env.example .env && $EDITOR .env
+#     docker compose run --rm instance build     --out /data
+#     docker compose run --rm instance fit       --out /data
+#     docker compose run --rm instance forecasts --out /data
+#     docker compose up -d demo
+#     docker compose run --rm capture
+#
+# Deliberately not in either add-on directory: `promote.sh` and both deploy
+# scripts run `rsync --delete` between those trees, so a file that lives in only
+# one of them is removed on the next run.
+
+x-addon: &addon
+  image: occupancy-forecast:demo
+  build:
+    context: ./occupancy-forecast-edge
+    args:
+      # The Dockerfile is `ARG BUILD_FROM` / `FROM $BUILD_FROM`, and it is
+      # Supervisor that normally fills that in from `build.yaml`. There is no
+      # Supervisor here, so the tag is repeated -- amd64 only, because this is a
+      # development box rather than the multi-arch build the store does.
+      BUILD_FROM: ghcr.io/home-assistant/amd64-base-debian:trixie
+
+  # The Home Assistant base sets `ENTRYPOINT ["/init"]` (s6-overlay) and the
+  # Dockerfile's CMD is `/run.sh`, a bashio script whose whole job is reading
+  # add-on options out of a Supervisor that does not exist here. Clearing the
+  # entrypoint is what makes the image runnable outside one.
+  #
+  # This is the only part of the image the demo does not exercise, and it cannot
+  # be: bashio has nothing to read.
+  entrypoint: []
+
+  environment:
+    # `/app` is the WORKDIR but not `sys.path[0]`, because these scripts are
+    # invoked by absolute path from the read-only mount below. Both of them also
+    # insert the source tree's path themselves, which resolves to nothing in
+    # here and is harmlessly ignored -- this is the line that actually finds the
+    # package, and it is why neither script needed editing.
+    PYTHONPATH: /app
+    TZ: ${TZ:-Etc/UTC}
+    # No OMP_NUM_THREADS / MKL_NUM_THREADS pin, and that is on purpose.
+    # `demo-instance.py fit` runs `train.train_all(n_jobs=...)`, a joblib
+    # fan-out, and the container's CPU count is the host's rather than this
+    # container's share of it. Pinning inner threads underneath a fan-out
+    # multiplies the two. `--n-jobs` is the knob; leave these alone.
+
+  # So that everything written into the bind-mounted /data -- a 1.5 MB SQLite
+  # archive, a parquet, 22 MB of pickles -- is owned by the user who will read,
+  # diff and eventually delete it, rather than by root.
+  user: "${DEMO_UID:-1000}:${DEMO_GID:-1000}"
+
+  volumes:
+    - ./scripts:/scripts:ro
+    # The real path, not a redirect: `config.DATA_DIR` is `/data` and several
+    # modules snapshot paths derived from it at import time. Mounting the demo
+    # data there means none of that has to be worked around.
+    - ${DEMO_DATA:-./demo-data}:/data
+
+services:
+  # The panel, served from whatever is in /data. No Home Assistant, no broker.
+  demo:
+    <<: *addon
+    command: ["python", "/scripts/demo-serve.py", "--data", "/data", "--port", "8099"]
+    ports:
+      # 8099 inside, because that is the add-on's port. Outside it is
+      # configurable and defaults to 8100: a development box is exactly the kind
+      # of machine that already has something on 8099.
+      - "${DEMO_BIND:-127.0.0.1}:${DEMO_PORT:-8100}:8099"
+    healthcheck:
+      # The add-on's own liveness route, via the venv python that is already on
+      # PATH -- the base image carries no curl and there is no reason to add one.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # Build and fit the fictional household. One-shot, so it stays out of
+  # `docker compose up` behind a profile:
+  #
+  #     docker compose run --rm instance build     --out /data --days 400
+  #     docker compose run --rm instance fit       --out /data --n-jobs 6
+  #     docker compose run --rm instance forecasts --out /data
+  #
+  # `fit` and `forecasts` run the REAL pipeline -- features, training, and a
+  # batched backtest written to the store's forecast table -- so the curves, the
+  # ship gate and the verification card show what the add-on actually does with
+  # that history. Only the household is invented.
+  instance:
+    <<: *addon
+    entrypoint: ["python", "/scripts/demo-instance.py"]
+    profiles: ["tools"]
+
+  # Screenshots, light and dark, desktop and mobile, all three tabs.
+  capture:
+    image: occupancy-forecast:capture
+    build:
+      # Any small directory: nothing is COPYed, and the default `.` would ship
+      # the whole repository -- panel bundle, node_modules and all -- to the
+      # daemon for a two-line build.
+      context: ./scripts
+      dockerfile_inline: |
+        # `playwright/python` is the image that carries the BROWSERS, and it has
+        # pip, but it does not carry the `playwright` Python package itself --
+        # the import fails without this line. (The shorter
+        # `mcr.microsoft.com/playwright` tag is the Node image and has neither.)
+        #
+        # The version is pinned to the tag on purpose: the package and its
+        # browser bundle are released together, and a mismatch surfaces as
+        # "Executable doesn't exist" rather than as a version complaint.
+        FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
+        RUN pip install --no-cache-dir playwright==1.56.0
+    profiles: ["tools"]
+    user: "${DEMO_UID:-1000}:${DEMO_GID:-1000}"
+    environment:
+      # The image's browsers live in /ms-playwright and are world-readable, but
+      # Chromium still wants somewhere writable to call home.
+      HOME: /tmp
+    # Chromium's default /dev/shm in a container is 64 MB, which it will exhaust
+    # and crash on a full-page screenshot. Playwright's own guidance.
+    ipc: host
+    volumes:
+      - ./scripts:/scripts:ro
+      - ${SHOTS_DIR:-./demo-shots}:/shots
+    depends_on:
+      demo:
+        condition: service_healthy
+    command: ["python", "/scripts/demo-capture.py",
+              "--url", "http://demo:8099", "--out", "/shots", "--no-sandbox"]

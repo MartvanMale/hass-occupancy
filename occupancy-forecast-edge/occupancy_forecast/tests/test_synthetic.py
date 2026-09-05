@@ -95,6 +95,115 @@ def test_the_holes_are_real_enough_to_exercise_the_observability_rule():
     assert not with_holes["candidate"].all()
 
 
+def _home(**kwargs) -> pd.DataFrame:
+    """`home_frac` as (time x subject), holes filled the way a reader sees them."""
+    frame = synthetic.household(**kwargs)
+    # `pivot_table`, not `pivot`. The generator anchors each day to its own LOCAL
+    # midnight, so on the spring-forward day 48 half-hour slots span 24 absolute
+    # hours while the next local midnight arrives after 23 -- an hour of the
+    # timeline belongs to two days and the timestamps repeat. Keeping the later
+    # value is what a reader of the real archive gets anyway.
+    wide = frame.pivot_table(index="time", columns="subject",
+                             values="home_frac", aggfunc="last")
+    return wide.ffill().bfill()
+
+
+def _away_runs(values: np.ndarray) -> np.ndarray:
+    """Lengths, in slots, of the runs where this person is out."""
+    away = values <= 0.5
+    edges = np.flatnonzero(np.diff(away.astype(int)))
+    starts = np.r_[0, edges + 1]
+    lengths = np.diff(np.r_[starts, away.size])
+    return lengths[away[starts]]
+
+
+def test_the_irregular_world_leaves_the_other_two_untouched():
+    """The whole reason it is a third arm and not a change to the second.
+
+    `realistic=True` is pinned elsewhere against the control world, and that
+    pinning is the leak detector. If adding this arm consumed a single draw from
+    the shared stream, every one of those comparisons would be answering a
+    different question than the one written down.
+    """
+    plain = synthetic.household(days=120, seed=11, realistic=True, missing=False)
+    also = synthetic.household(days=120, seed=11, realistic=True, missing=False,
+                               irregular=False)
+    pd.testing.assert_frame_equal(plain, also)
+
+    control = synthetic.household(days=120, seed=11, realistic=False, missing=False)
+    assert not control.equals(plain), "the two worlds must still differ"
+
+
+def test_the_irregular_world_is_not_a_timetable():
+    """The three properties the real archive has and a rota cannot produce.
+
+    Measured on a real 175-day archive: a median absence of 1.0-1.5 h against
+    the timetable's 8.0, a longest absence of 526 h against 11.5, and POSITIVE
+    autocorrelation at every lag against the timetable's negative one at half a
+    day. Each assertion here is one of those, loosened to leave room for the
+    seed rather than to leave room for a regression.
+    """
+    slots_per_hour = 2
+    rota = _home(days=400, seed=7, realistic=True, missing=False)
+    lived = _home(days=400, seed=7, realistic=True, missing=False, irregular=True)
+
+    for subject in lived.columns:
+        rota_runs = _away_runs(rota[subject].to_numpy())
+        runs = _away_runs(lived[subject].to_numpy())
+
+        # Short absences: errands, which a one-departure-a-day world has none of.
+        assert np.median(runs) < np.median(rota_runs), subject
+
+        # A trip. The timetable's longest absence is a single working day.
+        assert runs.max() / slots_per_hour > 24, \
+            f"{subject}: longest absence {runs.max()/slots_per_hour:.1f} h"
+
+        # And it is a real share of the away time, not a rounding error --
+        # in the real archive the one trip is half of it.
+        long = runs[runs > 24 * slots_per_hour]
+        assert long.sum() / runs.sum() > 0.10, subject
+
+        # The sign of this is the entire point: at half a day a timetable says
+        # "out now, therefore in later", which is what makes persistence useless
+        # as a baseline and the weekday lookup unbeatable.
+        series = pd.Series(lived[subject].to_numpy())
+        for lag_h in (8, 12, 24):
+            assert series.autocorr(lag=lag_h * slots_per_hour) > 0.0, \
+                f"{subject}: {lag_h} h autocorrelation is not positive"
+
+
+def test_the_household_takes_its_trips_together():
+    """One holiday, not one each.
+
+    In the real archive both people's longest absence is the same 526 hours,
+    because it is the same trip. That shared block is a large part of why one
+    person's presence predicts the other's days ahead, and drawing trips per
+    person instead would throw it away.
+    """
+    lived = _home(days=400, seed=7, realistic=True, missing=False, irregular=True)
+    alice, bob = (lived[c].to_numpy() <= 0.5 for c in ("alice", "bob"))
+    both = alice & bob
+    runs = _away_runs(1.0 - both.astype(float))
+    assert runs.max() > 24 * 2, \
+        "no absence longer than a day is shared by the whole household"
+
+
+def test_the_irregular_weekday_profile_is_not_two_flat_levels():
+    """A rota kept exactly gives a lookup table; a household does not.
+
+    The real archive's home-rate by weekday spans 0.62..0.84 with no clean
+    split. A timetable gives two levels -- work days and not -- and the gap
+    between them is exactly what per-weekday climatology needs to be optimal.
+    """
+    def spread(frame):
+        by_day = frame.groupby(pd.DatetimeIndex(frame.index).dayofweek).mean()
+        return (by_day.max() - by_day.min()).max()
+
+    rota = _home(days=400, seed=7, realistic=True, missing=False)
+    lived = _home(days=400, seed=7, realistic=True, missing=False, irregular=True)
+    assert spread(lived) < spread(rota)
+
+
 def test_the_schedule_does_not_drift_across_a_dst_transition():
     """The generator writes a schedule in LOCAL time, so each day has to be
     anchored to its own local midnight.

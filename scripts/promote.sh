@@ -25,23 +25,51 @@
 # This script does not bump the version, does not move the changelog, does not
 # commit and does not deploy. It stages the code and shows you what changed;
 # every irreversible step after that is yours.
+#
+# It does NOT require the edge tree to be committed first. The workflow is: work
+# in edge, promote when happy, then ONE commit carrying both trees. That is why
+# there is no pre-commit hook guarding occupancy-forecast/ any more -- the guard
+# assumed edge and the promotion were separate commits, and they are not.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Promote what is committed, not what is in your editor. Without this you can
-# promote a half-finished edit, and because the stable tree is generated there
-# is then no record anywhere of what stable is actually running.
-if [[ -n "$(git status --porcelain occupancy-forecast-edge/)" ]]; then
-    echo "error: occupancy-forecast-edge/ has uncommitted changes." >&2
-    echo "       Commit them first -- promote what you tested, not what is in the editor." >&2
-    git status --short occupancy-forecast-edge/ >&2
-    exit 1
+# Arguments first, before any check that can fail -- otherwise `--help` and a
+# typo'd flag both die on whatever the tree happens to look like instead of
+# saying what the flag was.
+#
+# The tests are cheap and the alternative is discovering it in production, where
+# "production" is the forecast your heating reads. So they run by default and
+# skipping them has to be typed out.
+#
+# `--no-test` is for exactly one honest case: scripts/test.sh has just been run
+# against the edge tree as it stands and nothing has been edited since. Since
+# this script promotes the WORKING tree, "as it stands" means literally the
+# files on disk -- so an edit made after that test run is an untested promotion.
+run_tests=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-test) run_tests=0 ;;
+        -h|--help) echo "usage: $(basename "$0") [--no-test]"; exit 0 ;;
+        *) echo "error: unknown argument '$arg'" >&2
+           echo "usage: $(basename "$0") [--no-test]" >&2
+           exit 2 ;;
+    esac
+done
+
+if (( run_tests )); then
+    echo "Running tests against the edge tree..."
+    scripts/test.sh
+else
+    echo "SKIPPING TESTS (--no-test) -- promoting on the strength of an earlier run."
 fi
 
-# The tests are cheap and the alternative is discovering it in production, where
-# "production" is the forecast your heating reads.
-echo "Running tests against the edge tree..."
-scripts/test.sh
+# Rebuild EDGE's bundle before promoting. The pre-commit hook used to refuse a
+# panel source edit whose committed dist/ did not match it -- that check is gone
+# with the hook, and a stale bundle is silent: it installs cleanly and serves
+# last week's panel. Since one commit now carries both trees, the honest fix is
+# to make the bundle fresh by construction here rather than to check it. Cheap
+# (sub-second) and a no-op when the source has not moved.
+scripts/build-panel.sh occupancy-forecast-edge
 
 # The panel's SOURCE is promoted; its build output is not copied. dist/ is
 # rebuilt below from the promoted source, so stable ships a bundle built from
@@ -52,10 +80,8 @@ rsync -a --delete \
   --exclude 'config.yaml' --exclude 'DOCS.md' --exclude 'CHANGELOG.md' \
   occupancy-forecast-edge/ occupancy-forecast/
 
-# Build it here rather than at deploy time, because the bundle is committed and
-# so has to be IN the promotion commit. deploy-stable.sh cannot build it: that
-# script's first act is to require occupancy-forecast/ be clean, and a build
-# would dirty the tree it just validated.
+# Build stable's bundle from stable's OWN promoted source rather than copying
+# edge's, so the two are independently reproducible from their own trees.
 scripts/build-panel.sh occupancy-forecast
 
 echo
@@ -72,7 +98,10 @@ echo "  1. Bump version: in occupancy-forecast/config.yaml (semver)."
 echo "  2. Move the ## Unreleased block from occupancy-forecast-edge/CHANGELOG.md into"
 echo "     occupancy-forecast/CHANGELOG.md under \"## <version> - $(date +%F)\", keeping the"
 echo "     ### Added/Changed/Fixed headings, and empty it."
-echo "  3. PROMOTE=1 git commit -a      (the hook rejects occupancy-forecast/ without it)"
-echo "     Stage occupancy-forecast/panel/dist/ with it -- the rebuilt bundle is"
-echo "     part of the release, and \`git commit -a\` will not pick up new files."
-echo "  4. scripts/deploy-stable.sh"
+echo "  3. git add -A && git commit       (one commit, both trees)"
+echo "     Use 'git add -A' rather than 'git commit -a' -- the rebuilt bundles"
+echo "     can contain NEW files, and -a does not pick those up."
+echo "  4. git push"
+echo "     THAT is the deploy. Stable is installed from this repository's URL,"
+echo "     so Supervisor offers the update once the pushed config.yaml version"
+echo "     moves. Do NOT run scripts/deploy-stable.sh -- see CLAUDE.md."

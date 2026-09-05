@@ -67,6 +67,94 @@ ROUTINE_SHIFT_H = 0.75          # alice starts leaving 45 minutes later
 COUPLING_H = -0.25              # bob leaves 15 minutes early when alice works
 HOLIDAYS = {(1, 1), (4, 27), (5, 5), (12, 25), (12, 26)}
 
+# --- what `irregular=True` adds, and why the first two worlds are not enough
+#
+# Both worlds above are a TIMETABLE: one departure per person-day, away for a
+# fixed eight hours, back before midnight. MEASURED 2026-09-05 against a real
+# 175-day archive of two people, resampled onto this same 30-minute grid, that
+# is not what a household looks like:
+#
+#                             real (two people)      realistic=True
+#     away episodes / day     1.42 / 0.68            0.66
+#     median away             1.0 h / 1.5 h          8.0 h
+#     longest away            526 h (BOTH people)    11.5 h
+#     away time in runs >24 h 49% / 61%              0%
+#     autocorrelation  +8 h   +0.43 / +0.55          -0.21
+#                     +12 h   +0.35 / +0.44          -0.25
+#                     +36 h   +0.34 / +0.41          -0.24
+#     days with any absence   84% / 72%              66%
+#
+# The SIGN of that autocorrelation is the whole story. A rigid eight-hour block
+# repeated daily is anti-correlated at half a day -- if you are out now you are
+# reliably in twelve hours from now -- so `persistence` and `same_slot_yesterday`
+# carry no information and the per-weekday lookup is unbeatable by construction.
+# The consequence is measurable: this generator at 400 days shipped **5 of 48
+# horizons**, while the same code on 175 days of the real archive shipped **43**,
+# and there the winning baseline was `persistence` rather than climatology.
+#
+# So this arm adds the three things a timetable structurally cannot express, and
+# they are the three the real archive actually shows:
+#
+#   * **errands** -- short, irregular, several a week, at no fixed hour. This is
+#     what makes the median absence one hour rather than eight.
+#   * **trips** -- a holiday. Rare, days long, and taken by the WHOLE household
+#     at once: in the real archive both people's longest absence is the same
+#     526 hours, which is one trip and not two. Half of all away time is in
+#     runs longer than a day, and nothing in a weekday lookup can reach it.
+#   * **a schedule that is kept loosely** -- a work day skipped, an unscheduled
+#     day worked. The real weekday profile spans 0.62..0.84, not the clean
+#     0.67 / 0.87 split of a rota, and that flatness is what stops climatology
+#     from being the optimal predictor.
+#
+# Deliberately a THIRD arm rather than a change to `realistic=True`. That world
+# is pinned by tests -- on a non-working, non-holiday day it must agree with the
+# control world exactly -- and it is the leak detector's other half. This layers
+# on top of it, from its own random stream, so both existing worlds are
+# untouched bit for bit.
+IRREGULAR_ERRANDS_PER_DAY = 1.5   # Poisson mean, per person
+IRREGULAR_ERRAND_MEDIAN_H = 1.0   # lognormal median; p90 lands near 4 h
+IRREGULAR_ERRAND_SIGMA = 1.05
+IRREGULAR_ERRAND_HOURS = (9.0, 21.0)   # when an errand can start
+
+# Errands cluster. A slow AR(1) on the daily rate gives busy stretches and quiet
+# ones, which is dependence a per-weekday lookup cannot hold: it is the reason
+# yesterday tells you something about tomorrow beyond which weekday it is.
+IRREGULAR_BUSY_RHO = 0.85
+IRREGULAR_BUSY_SIGMA = 0.8
+# ...and most of it belongs to the HOUSEHOLD rather than to one person. This is
+# the everyday version of the shared trip: a busy week is busy for both of them,
+# so one person's recent activity says something about the other's tomorrow that
+# no per-weekday, per-person lookup can hold. It is available in every fold,
+# which is what the trips are not.
+IRREGULAR_BUSY_SHARED = 0.6
+
+# Trips are the biggest single term and the easiest to get wrong in BOTH
+# directions. Sized to the real archive's 12%-of-the-record they became one
+# enormous holiday, and MEASURED 2026-09-05 that is worse than useless to the
+# ship gate: skill was positive at every horizon (9.5..27.6%) and only 9 of 48
+# horizons shipped, because the model won 18 folds of 51 -- it won hugely in the
+# two folds the holiday touched and lost narrowly everywhere else, and
+# `train.fold_record_allows` refuses exactly that. The real archive escapes the
+# same fate only because 175 days is 19 folds, where a minority that size cannot
+# be proven. So: the same share of away time, cut into many more trips, so the
+# long-range structure appears in most folds instead of two.
+IRREGULAR_TRIPS_PER_YEAR = 8.0
+IRREGULAR_TRIP_MEDIAN_DAYS = 4.5
+IRREGULAR_TRIP_SIGMA = 0.6
+IRREGULAR_TRIP_LEAVE_H = 9.0
+# Most trips start at a weekend, because that is when people go away. It also
+# makes their timing PREDICTABLE rather than uniform noise, which is what gives
+# the long horizons something learnable: a trip that can begin on any day with
+# equal probability contributes variance and no signal.
+IRREGULAR_TRIP_WEEKEND = 0.75
+IRREGULAR_WORKDAY_SKIP = 0.15     # a scheduled day not worked
+IRREGULAR_WORKDAY_EXTRA = 0.10    # an unscheduled weekday worked
+IRREGULAR_AWAY_SIGMA = 0.30       # the work day itself is not exactly 8 hours
+
+# Its own stream, so adding this arm cannot shift a single draw in the other
+# two. `_draws` is deliberately left alone for the same reason.
+IRREGULAR_STREAM = 9001
+
 # --- shifts and the alarm, for the "would a leaves-by model be feasible" study
 #
 # On a real archive the two housemates' alarms split into two cases, and the
@@ -195,9 +283,125 @@ def alarm_hour(draws: dict, subject: str, day: dt.date, left: float | None,
     return float(target - ALARM_LEAD_H + draws["alarm_noise"])
 
 
+def _keep_schedule_loosely(rng, subject: str, day: dt.date,
+                           left: float | None) -> tuple[float | None, bool]:
+    """A rota kept loosely: `(departure hour or None, was it a work day)`.
+
+    Both rolls are drawn unconditionally, for the same reason `_draws` does it:
+    a branch that consumes a different number of numbers desynchronises every
+    later day, and then a change to one constant silently rewrites the whole
+    history rather than the part it names.
+
+    This is the piece that flattens the weekday profile. The real archive's
+    home-rate by weekday spans 0.62..0.84 with no clean split; a rota kept
+    exactly gives 0.67 / 0.87, two flat levels, which is a lookup table and is
+    precisely what makes climatology unbeatable.
+    """
+    skip_roll, extra_roll = rng.random(), rng.random()
+    scheduled = day.weekday() in SCHEDULES[subject]
+    if scheduled:
+        if left is not None and skip_roll < IRREGULAR_WORKDAY_SKIP:
+            return None, False           # did not go in today
+        return left, left is not None
+    # An unscheduled weekday worked anyway. Weekends are left out of this: a
+    # Saturday shift is a different claim about the household than a busy week.
+    if (day.weekday() < 5 and left is None
+            and extra_roll < IRREGULAR_WORKDAY_EXTRA):
+        return SCHEDULES[subject][min(SCHEDULES[subject])], True
+    return left, False
+
+
+def _lognormal_slots(rng, median_h: float, sigma: float, per_hour: int,
+                     size: int) -> np.ndarray:
+    """Durations in slots, heavy-tailed, at least one slot long.
+
+    Lognormal because that is the shape the real archive has: a median of about
+    an hour with a tail that reaches a working day. A normal fitted to the same
+    mean would put almost no mass past three hours and the p90 would be wrong by
+    a factor of three.
+    """
+    hours = median_h * np.exp(sigma * rng.standard_normal(size))
+    return np.maximum(1, np.round(hours * per_hour).astype(int))
+
+
+def trip_mask(rng, days: int, slots: int, per_hour: int,
+              first_weekday: int = 0) -> np.ndarray:
+    """Slots the whole household is away for a holiday.
+
+    Household-level and not per-person on purpose. In the real archive both
+    people's single longest absence is the same 526 hours -- one trip, taken
+    together -- and that shared block is a large part of why one person's
+    presence predicts the other's days ahead. Drawn per household and applied to
+    everyone identically.
+    """
+    mask = np.zeros(days * slots, dtype=bool)
+    expected = IRREGULAR_TRIPS_PER_YEAR * days / 365.0
+    for _ in range(rng.poisson(expected)):
+        length_days = float(IRREGULAR_TRIP_MEDIAN_DAYS
+                            * np.exp(IRREGULAR_TRIP_SIGMA * rng.standard_normal()))
+        run = max(per_hour, int(round(length_days * slots)))
+        start_day = int(rng.integers(0, max(1, days)))
+        if rng.random() < IRREGULAR_TRIP_WEEKEND:
+            # Forward to the next Saturday. Trips that can start on any day with
+            # equal probability are variance without signal; a household that
+            # goes away at weekends is both truer and learnable.
+            ahead = (5 - (first_weekday + start_day) % 7) % 7
+            start_day = min(days - 1, start_day + ahead)
+        at = start_day * slots + int(IRREGULAR_TRIP_LEAVE_H * per_hour)
+        mask[at:min(at + run, mask.size)] = True
+    return mask
+
+
+def busyness(rng, days: int) -> np.ndarray:
+    """A slow AR(1) over days, standardised to unit variance.
+
+    Standardised so that changing RHO changes the CLUSTERING and nothing else.
+    Left to itself an AR(1)'s variance grows with the correlation, so the two
+    constants would fight and the household's overall rate would drift with a
+    knob that is supposed to be about timing.
+    """
+    z = np.zeros(days)
+    for index in range(1, days):
+        z[index] = IRREGULAR_BUSY_RHO * z[index - 1] + rng.standard_normal()
+    return z * np.sqrt(1.0 - IRREGULAR_BUSY_RHO ** 2)
+
+
+def errand_mask(rng, days: int, slots: int, per_hour: int,
+                shared: np.ndarray | None = None) -> np.ndarray:
+    """Slots this person is out on something short and unscheduled.
+
+    The count is Poisson per day rather than a fixed rate so that some days have
+    none and some have three, which is what makes the daily absence rate 80-odd
+    percent without making every day look the same.
+    """
+    mask = np.zeros(days * slots, dtype=bool)
+    z = busyness(rng, days)
+    if shared is not None:
+        # Blended so the result still has unit variance: turning the shared
+        # fraction up must change WHOSE busyness it is, not how much there is.
+        z = (IRREGULAR_BUSY_SHARED * shared
+             + np.sqrt(1.0 - IRREGULAR_BUSY_SHARED ** 2) * z)
+    rate = IRREGULAR_ERRANDS_PER_DAY * np.exp(
+        IRREGULAR_BUSY_SIGMA * z - IRREGULAR_BUSY_SIGMA ** 2 / 2)
+
+    counts = rng.poisson(rate)
+    total = int(counts.sum())
+    if total == 0:
+        return mask
+    lo, hi = IRREGULAR_ERRAND_HOURS
+    day_index = np.repeat(np.arange(days), counts)
+    hour = rng.uniform(lo, hi, size=total)
+    runs = _lognormal_slots(rng, IRREGULAR_ERRAND_MEDIAN_H,
+                            IRREGULAR_ERRAND_SIGMA, per_hour, total)
+    for index, at_hour, run in zip(day_index, hour, runs):
+        at = int(index) * slots + int(round(at_hour * per_hour))
+        mask[at:min(at + int(run), mask.size)] = True
+    return mask
+
+
 def household(days: int = 730, seed: int = 0, realistic: bool = True,
               start: str = "2024-01-01", missing: bool = True,
-              shifts: bool = False,
+              shifts: bool = False, irregular: bool = False,
               alarm_fidelity: float | None = None) -> pd.DataFrame:
     """`subject, time, home_frac` for two people over `days` days.
 
@@ -212,20 +416,38 @@ def household(days: int = 730, seed: int = 0, realistic: bool = True,
     slots = config.SLOTS_PER_DAY
     per_hour = 60 // config.GRID_MINUTES
     want_alarm = alarm_fidelity is not None
+    # One trip stream for the household, drawn before anyone's days so that
+    # every subject gets the SAME holiday rather than one of their own.
+    trips, shared_busy = None, None
+    if irregular:
+        house = np.random.default_rng([seed, IRREGULAR_STREAM])
+        trips = trip_mask(house, days, slots, per_hour, begin.weekday())
+        shared_busy = busyness(house, days)
     rows = []
-    for subject in SCHEDULES:
+    for position, subject in enumerate(SCHEDULES):
         home_all = np.empty(days * slots)
         zone_all = np.zeros(days * slots)
         alarm_all = np.full(days * slots, np.nan)
+        # Per-subject and independent of `rng`, so `irregular` cannot move a
+        # single draw in the control or realistic worlds.
+        odd = np.random.default_rng([seed, IRREGULAR_STREAM, position])
         for index in range(days):
             day = begin + dt.timedelta(days=index)
             draws = _draws(rng)
             left = departure_hour(draws, subject, day, index, days, realistic,
                                   shifts=shifts, seed=seed)
+            worked = left is not None and day.weekday() in SCHEDULES[subject]
+            if irregular:
+                left, worked = _keep_schedule_loosely(odd, subject, day, left)
             home = np.ones(slots)
             if left is not None:
                 out = max(0, int(round(left * per_hour)))
-                back = min(slots, out + int(AWAY_HOURS * per_hour)
+                away = AWAY_HOURS
+                if irregular:
+                    # A work day is not exactly eight hours either.
+                    away *= float(np.exp(IRREGULAR_AWAY_SIGMA
+                                         * odd.standard_normal()))
+                back = min(slots, out + int(away * per_hour)
                            + int(draws["away_jitter"]))
                 home[out:back] = 0.0
             if missing and draws["hole_roll"] < MISSING_DAY_CHANCE:
@@ -234,10 +456,11 @@ def household(days: int = 730, seed: int = 0, realistic: bool = True,
                 home[at:at + run] = np.nan
             home_all[index * slots:(index + 1) * slots] = home
             # The tracked zone, as distinct from any other reason to be out.
-            # Only a
-            # scheduled work day counts -- leisure is an absence too, and it is
-            # exactly what must not be mixed in.
-            if left is not None and day.weekday() in SCHEDULES[subject]:
+            # Only a work day counts -- leisure is an absence too, and it is
+            # exactly what must not be mixed in. Under `irregular` that means a
+            # day actually worked rather than a day the rota says to work: a
+            # skipped Monday is not a zone day, and an extra Wednesday is.
+            if worked:
                 zone_all[index * slots:(index + 1) * slots] = np.nan_to_num(
                     1.0 - home)
 
@@ -255,6 +478,27 @@ def household(days: int = 730, seed: int = 0, realistic: bool = True,
             lo, hi = max(0, set_at), min(days * slots, fires)
             for cell in range(lo, hi):
                 alarm_all[cell] = (fires - cell) / per_hour
+
+        if irregular:
+            # Applied to the whole timeline rather than day by day, because a
+            # trip does not respect midnight -- which is the entire point of it.
+            # The recorder holes are re-applied afterwards: a hole is "we do not
+            # know", and being out on an errand does not make it known.
+            unknown = np.isnan(home_all)
+            # `& was_home`: an errand that lands inside a work absence is
+            # DISCARDED rather than merged into it. Merging is what kept the
+            # median absence at five and a half hours when the real archive's is
+            # one -- the errand has to be its own short episode to count.
+            was_home = home_all > 0.5
+            errands = errand_mask(odd, days, slots, per_hour,
+                                  shared=shared_busy) & was_home
+            home_all[errands | trips] = 0.0
+            # Only the trip clears the zone. An errand that overlaps a work
+            # absence must not carve a hole in the work-zone signal -- the
+            # person is still at work -- and everywhere else the zone is already
+            # zero, because it is only ever set where `home` is.
+            zone_all[trips] = 0.0
+            home_all[unknown] = np.nan
 
         # LOCAL midnight per day, and this is the one that has already been got
         # wrong once. `features.grid` is uniform in UTC, so matching it looks

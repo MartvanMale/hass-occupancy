@@ -18,6 +18,7 @@ documented degraded paths, not special cases added for this.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import sys
 from pathlib import Path
 
@@ -41,7 +42,21 @@ ENTITIES = [
     ("sensor.home_alice_direction_of_travel", "stationary", "Alice direction of travel"),
     ("sensor.home_bob_distance", "8100", "Bob distance from home"),
     ("sensor.home_bob_direction_of_travel", "away_from", "Bob direction of travel"),
+    # The companion app's next-alarm sensors. `runtime.refresh_environment`
+    # rediscovers these from the live states on every start, so they have to be
+    # here as well as in the archive -- otherwise the Setup view reports "no
+    # companion-app next-alarm sensor found" about an entity the store is full of.
+    ("sensor.phone_alice_next_alarm", "absent", "Alice phone next alarm"),
+    ("sensor.phone_bob_next_alarm", "absent", "Bob phone next alarm"),
+    ("schedule.household_day", "on", "Household day"),
 ]
+
+# The schedule the night shading is recovered from. Must match `day_schedule` in
+# demo-instance.py's `settings()`, which is what actually lands in config.json.
+DAY_SCHEDULE = "schedule.household_day"
+WAKE_HOUR = 7.0
+WEEKEND_WAKE_HOUR = 9.0     # so the bands are not identical across all 48 hours
+SLEEP_HOUR = 23.0
 
 
 class DemoHomeAssistant:
@@ -58,8 +73,43 @@ class DemoHomeAssistant:
                 for entity, state, name in ENTITIES]
 
     def history(self, entity_ids, start, stop=None) -> list[list[dict]]:
-        # The archive is already complete and static: there is nothing to top up.
-        return []
+        """Nothing, except the day schedule the night shading is built from.
+
+        `StoreSource.collect` calls this to top up the archive, and the demo's
+        archive is complete and static -- so answering anything there would
+        write invented rows into it. The one exception is `night.night_bands`,
+        which asks for a single `schedule.*` entity and recovers the household's
+        week from its history, because Home Assistant will not say what a
+        schedule is going to do next. It is asked for on its own, which is what
+        makes the two cases safe to tell apart.
+        """
+        if list(entity_ids) != [DAY_SCHEDULE]:
+            return []
+
+        zone = config.tzinfo()
+        begin = dt.datetime.fromisoformat(start).astimezone(zone)
+        end = (dt.datetime.fromisoformat(stop) if stop
+               else dt.datetime.now(dt.timezone.utc)).astimezone(zone)
+
+        # A day either side, so the state in force at the window's first sample
+        # is a real event rather than a missing one -- `night.weekly_pattern`
+        # skips any slot it cannot resolve, and a skipped slot is unshaded.
+        changes: list[dt.datetime] = []
+        day = begin.date() - dt.timedelta(days=1)
+        while day <= end.date() + dt.timedelta(days=1):
+            wake = WEEKEND_WAKE_HOUR if day.weekday() >= 5 else WAKE_HOUR
+            midnight = dt.datetime.combine(day, dt.time(), tzinfo=zone)
+            changes.append(midnight + dt.timedelta(hours=wake))
+            changes.append(midnight + dt.timedelta(hours=SLEEP_HOUR))
+            day += dt.timedelta(days=1)
+
+        # Sorted as datetimes, not as strings: the ISO offset changes at a DST
+        # transition, so "+01:00" and "+02:00" do not sort in time order, and
+        # `night._sample` walks the list assuming they do.
+        changes.sort()
+        return [[{"state": "on" if at.hour < SLEEP_HOUR else "off",
+                  "last_changed": at.isoformat()}
+                 for at in changes]]
 
     def notify(self, *args, **kwargs) -> None:
         pass

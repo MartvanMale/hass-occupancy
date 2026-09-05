@@ -1,7 +1,15 @@
 # Pinned so a rebuild months from now reproduces the model that is running.
 pandas==2.3.3
 numpy==2.3.4
-pyarrow==21.0.0
+# Never below 22.0.0, whatever a future pin bump is trying to reproduce.
+# pyarrow 21.0.0's aarch64 wheel bundles mimalloc compiled with ARMv8.1 LSE
+# atomics, inlined as far as `mi_thread_init`, so it executes an illegal
+# instruction the moment the library loads on an ARMv8.0 core -- a Raspberry
+# Pi 4's Cortex-A72, say. It takes pandas and scikit-learn down with it, because
+# pandas imports pyarrow at import time, and the add-on dies with a bare
+# `Illegal instruction (core dumped)` and no traceback. Fixed upstream by
+# apache/arrow#47766, first released in 22.0.0.
+pyarrow==22.0.0
 scikit-learn==1.7.2
 # Already arrives with scikit-learn, pinned here because train.py imports it
 # directly to farm the 48 horizons out across processes.
