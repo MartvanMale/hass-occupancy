@@ -653,6 +653,108 @@ def test_the_notification_title_says_which_build_wrote_it(monkeypatch):
     assert config.display_name() == "Occupancy Forecast Edge"
 
 
+# How the prefix is LEARNED. A Supervisor that is still coming up when the
+# add-on starts -- a host reboot is enough -- used to leave the edge build
+# running as a second stable build on MQTT until its next restart, because the
+# default was cached on failure exactly as an answer would have been.
+
+def _unresolved(monkeypatch):
+    monkeypatch.setattr(config, "_topic_prefix", None)
+    monkeypatch.setattr(config, "_topic_prefix_error", None)
+
+
+def test_outside_an_add_on_the_default_is_the_answer(monkeypatch):
+    _unresolved(monkeypatch)
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    assert config.topic_prefix() == config.DEFAULT_TOPIC_PREFIX
+    assert config.topic_prefix_resolved(), "no Supervisor, no second instance"
+
+
+def test_a_failed_slug_lookup_is_not_remembered(monkeypatch):
+    import io
+    import urllib.request
+
+    _unresolved(monkeypatch)
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("supervisor not up yet")
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+
+    assert config.resolve_topic_prefix() is False
+    assert config.topic_prefix() == config.DEFAULT_TOPIC_PREFIX, \
+        "names can still be formed for a log line"
+    assert not config.topic_prefix_resolved(), "but nothing may be published under it"
+    assert "not up yet" in config.topic_prefix_error()
+
+    class Answer:
+        def __enter__(self):
+            return io.BytesIO(json.dumps(
+                {"data": {"slug": "local_occupancy_forecast_edge"}}).encode())
+
+        def __exit__(self, *_exc):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Answer())
+
+    assert config.resolve_topic_prefix() is True, "the next ask succeeds"
+    assert config.topic_prefix() == "occupancy_forecast_edge"
+    assert config.topic_prefix_resolved()
+    assert config.topic_prefix_error() is None
+
+
+def test_every_discovery_payload_says_who_created_it(monkeypatch):
+    """Home Assistant's MQTT discovery shows `origin` on the device page and in
+    its diagnostics, which is where a user goes when wondering where forty-odd
+    sensors came from."""
+    from occupancy_forecast import predict
+
+    _with_prefix(monkeypatch, "occupancy_forecast_edge")
+    payloads = predict._discovery_payloads("alice")
+    assert payloads
+    for _topic, payload in payloads:
+        assert payload["origin"]["name"]
+        assert payload["origin"]["sw_version"]
+        assert payload["origin"]["support_url"].startswith("https://")
+
+
+def test_retracting_a_subject_clears_every_retained_topic_it_owned(monkeypatch):
+    from occupancy_forecast import predict
+
+    _with_prefix(monkeypatch, "occupancy_forecast_edge")
+
+    class Client:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, topic, payload, retain=False, qos=0):
+            self.published.append((topic, payload, retain))
+
+    client = Client()
+    n = predict.retract("alice", client)
+    discovery = {topic for topic, _ in predict._discovery_payloads("alice")}
+    assert n == len(client.published) == len(discovery) + 2
+    assert {t for t, _, _ in client.published} == discovery | {
+        "occupancy_forecast_edge/alice/state", "occupancy_forecast_edge/alice/attributes"}
+    assert all(payload == "" and retain for _, payload, retain in client.published), \
+        "an EMPTY retained payload is how a retained message is deleted"
+
+
+def test_nothing_connects_to_mqtt_under_a_guessed_prefix(monkeypatch):
+    """`Broker.client()` is where a guessed prefix would become a client id, a
+    set of discovery topics and a pile of retained states on top of whichever
+    build owns the default. It refuses, says why, and the worker asks again."""
+    from occupancy_forecast import predict
+
+    _unresolved(monkeypatch)
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+    monkeypatch.setattr(config, "_topic_prefix_error", "supervisor not up yet")
+
+    broker = predict.Broker()
+    assert broker.client() is None
+    assert not broker.connected
+    assert "not up yet" in broker.last_error
+
+
 # A literal that ESCAPES the add-on must derive from the slug. A literal that
 # stays inside it need not: `/data` is private per add-on, so two builds writing
 # the same row key into their own SQLite files are not sharing anything. The

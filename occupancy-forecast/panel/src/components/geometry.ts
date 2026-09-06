@@ -61,3 +61,33 @@ export function bandPath(lo: (Pt | null)[], hi: (Pt | null)[]): string {
 /** Clamp, which every chart here needs and none of them should re-derive. */
 export const clamp = (v: number, min: number, max: number) =>
   Math.max(min, Math.min(max, v))
+
+/**
+ * Contiguous runs of `true`, as [start, end] index pairs, inclusive.
+ *
+ * The accumulator behind every gap band: `TimeSeries` shades unobserved slots,
+ * `Verification` shades unpublished ones, `Curves` shades hours no model
+ * forecast. Each had its own copy of this loop.
+ */
+export function runs(flags: boolean[]): [number, number][] {
+  const out: [number, number][] = []
+  flags.forEach((on, i) => {
+    if (!on) return
+    const last = out[out.length - 1]
+    if (last && last[1] === i - 1) last[1] = i
+    else out.push([i, i])
+  })
+  return out
+}
+
+/** Contiguous runs of consecutive integers in a sorted list, as [first, last]
+ *  VALUES rather than indices -- so 1..9 is one range and not nine. */
+export function integerRuns(nums: number[]): [number, number][] {
+  const out: [number, number][] = []
+  for (const n of nums) {
+    const last = out[out.length - 1]
+    if (last && n === last[1] + 1) last[1] = n
+    else out.push([n, n])
+  }
+  return out
+}

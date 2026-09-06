@@ -245,6 +245,20 @@ def test_an_hour_becomes_a_moment_on_the_local_date():
     assert local.date() == at.tz_convert(config.tzinfo()).date()
 
 
+@pytest.mark.parametrize("day", ["2026-03-29", "2026-10-25"])
+@pytest.mark.parametrize("hour", [8.0, 17.5])
+def test_an_hour_is_still_that_hour_on_a_dst_transition_day(day, hour):
+    """The two days a year the old arithmetic got wrong. `midnight + Timedelta`
+    on a tz-aware stamp is absolute time, so 8.0 rendered as 09:00 on the
+    spring-forward day and 07:00 on the fall-back day (Europe/Amsterdam, the
+    fixture's zone). The sensors carry `device_class: timestamp`; an automation
+    reading them would have fired an hour out."""
+    at = pd.Timestamp(f"{day}T12:00", tz=config.TIMEZONE).tz_convert("UTC")
+    local = pd.Timestamp(outing.at_hour(at, hour)).tz_convert(config.tzinfo())
+    assert (local.hour, local.minute) == (int(hour), int(round((hour % 1) * 60)))
+    assert str(local.date()) == day
+
+
 def test_a_routine_survives_a_round_trip_and_a_corrupt_file(tmp_path):
     routine = outing.fit_routine(_routine_days())
     outing.save_routine(routine, tmp_path)

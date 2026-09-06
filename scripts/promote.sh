@@ -15,8 +15,9 @@
 # "test it on edge before promoting" was not actually possible.
 #
 # config.yaml, DOCS.md and CHANGELOG.md are hand-written per add-on and are left
-# alone here: the versions differ, the docs differ, and the changelogs say
-# different things (edge's is the queue, stable's is the release history).
+# alone here: the versions differ, the docs differ, and the changelogs are not
+# the same file -- edge's carries a ## Unreleased queue on top of the same
+# release history stable has.
 #
 # Note the --delete: a file that exists ONLY in occupancy-forecast/ and is not excluded
 # below gets removed on the next run. Anything the stable add-on needs in its own
@@ -95,13 +96,18 @@ git diff --stat occupancy-forecast/
 echo
 echo "Not done yet. Still yours to do:"
 echo "  1. Bump version: in occupancy-forecast/config.yaml (semver)."
-echo "  2. Move the ## Unreleased block from occupancy-forecast-edge/CHANGELOG.md into"
-echo "     occupancy-forecast/CHANGELOG.md under \"## <version> - $(date +%F)\", keeping the"
-echo "     ### Added/Changed/Fixed headings, and empty it."
+echo "  2. Retitle the ## Unreleased block in occupancy-forecast-edge/CHANGELOG.md to"
+echo "     \"## <version> - $(date +%F)\", keeping the ### Added/Changed/Fixed headings,"
+echo "     and open a fresh empty ## Unreleased above it. COPY that block -- do not move"
+echo "     it -- to the top of the release history in occupancy-forecast/CHANGELOG.md."
+echo "     Edge keeps its copy: the two files must be identical from the first ## <version>"
+echo "     heading down. Check it:"
+echo "       diff <(sed -n '/^## [0-9]/,\$p' occupancy-forecast-edge/CHANGELOG.md) \\"
+echo "            <(sed -n '/^## [0-9]/,\$p' occupancy-forecast/CHANGELOG.md)"
 echo "  3. git add -A && git commit       (one commit, both trees)"
 echo "     Use 'git add -A' rather than 'git commit -a' -- the rebuilt bundles"
 echo "     can contain NEW files, and -a does not pick those up."
 echo "  4. git push"
 echo "     THAT is the deploy. Stable is installed from this repository's URL,"
 echo "     so Supervisor offers the update once the pushed config.yaml version"
-echo "     moves. Do NOT run scripts/deploy-stable.sh -- see CLAUDE.md."
+echo "     moves. There is no deploy script for stable -- see DEVELOPMENT.md."

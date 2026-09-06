@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -73,15 +74,45 @@ def _iso(ms: int) -> str:
 
 
 class HistoryStore:
+    """The archive. One SQLite file, one connection PER THREAD.
+
+    It was one connection for the whole process with `check_same_thread`
+    switched off, shared by the collector, the training thread and every
+    request handler on uvicorn's threadpool. sqlite3 serialises the calls, so
+    it did not crash -- but a `commit()` on one thread committed whatever
+    another had in flight, and a busy database had no timeout to wait on.
+    A connection per thread is the shape SQLite is designed around; WAL is a
+    property of the file and lets readers and the one writer proceed together.
+    """
+
     def __init__(self, path: Path | str = "/data/history.db"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(str(self.path), check_same_thread=False)
-        self._db.executescript(SCHEMA)
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        db = self._db
+        db.executescript(SCHEMA)
         # WAL so a long feature build reading the store does not block the
-        # collector appending to it.
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.commit()
+        # collector appending to it. Persistent in the file, so once is enough.
+        db.execute("PRAGMA journal_mode=WAL")
+        db.commit()
+
+    @property
+    def _db(self) -> sqlite3.Connection:
+        db = getattr(self._local, "db", None)
+        if db is None:
+            # `check_same_thread=False` only so that `close()` can shut every
+            # connection down from whichever thread runs the shutdown; each
+            # connection is otherwise used by its own thread alone.
+            db = sqlite3.connect(str(self.path), check_same_thread=False)
+            # Wait rather than fail when the writer holds the lock: five
+            # seconds is far longer than any single append takes.
+            db.execute("PRAGMA busy_timeout=5000")
+            self._local.db = db
+            with self._connections_lock:
+                self._connections.append(db)
+        return db
 
     # -- writing ------------------------------------------------------------
 
@@ -90,11 +121,13 @@ class HistoryStore:
         rows = list(rows)
         if not rows:
             return 0
-        before = self.count()
-        self._db.executemany(
+        # `rowcount` sums the rows an executemany actually changed, and an
+        # ignored duplicate is not a change -- so this is the insert count
+        # without the two full `COUNT(*)` scans that used to bracket it.
+        cursor = self._db.executemany(
             "INSERT OR IGNORE INTO states (entity_id, ts, value) VALUES (?, ?, ?)", rows)
         self._db.commit()
-        return self.count() - before
+        return max(0, cursor.rowcount)
 
     def append_forecasts(self, rows: Iterable[tuple[str, int, int, float]]) -> int:
         """Insert (subject, target_ts_ms, horizon_h, p). Last write wins.
@@ -240,4 +273,13 @@ class HistoryStore:
         return cur.rowcount
 
     def close(self) -> None:
-        self._db.close()
+        """Close every thread's connection. Called at shutdown, and when a
+        source is replaced -- the old store used to be dropped unclosed."""
+        with self._connections_lock:
+            connections, self._connections = self._connections, []
+        for db in connections:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+        self._local = threading.local()

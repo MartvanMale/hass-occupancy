@@ -104,7 +104,7 @@ def apply(rows: pd.DataFrame, source, at: pd.Timestamp) -> pd.DataFrame:
 
     Everything outside the origin block is left exactly as built -- the daily
     lags, the climatology, the target calendar and `coverage`. Those are
-    anchored on the slot and must stay that way; `test_predict.py` asserts they
+    anchored on the slot and must stay that way; `test_nowcast.py` asserts they
     come through byte-identical.
     """
     if rows.empty:

@@ -75,3 +75,29 @@ def test_it_is_the_speed_doing_the_work_and_not_a_lookup_failing():
 def test_somebody_already_home_still_gets_no_eta():
     """The older of the two refusals, and it must survive the new one."""
     assert eta.current_row(_distance_trace([0.2] * 21), "alice") is None
+
+
+def test_an_artifact_fitted_on_another_feature_list_is_refused_at_load(tmp_path, caplog):
+    """The artifact carries no version; its feature list IS the contract. One
+    fitted on an older `FEATURES` used to load fine and then fail inside
+    scikit-learn on every cycle, swallowed, so the sensor read `unknown`
+    forever with nothing saying why."""
+    import pickle
+
+    caplog.set_level("WARNING")
+    with (tmp_path / "eta_alice.pkl").open("wb") as fh:
+        pickle.dump({"model": object(), "subject": "alice",
+                     "features": ["distance_km", "hour"],
+                     "metrics": {"ships": True}}, fh)
+    with (tmp_path / "eta_bob.pkl").open("wb") as fh:
+        pickle.dump({"model": object(), "subject": "bob",
+                     "features": list(eta.FEATURES),
+                     "metrics": {"ships": True}}, fh)
+
+    loaded = eta.load_models(tmp_path)
+    assert "alice" not in loaded
+    assert any("eta_alice.pkl" in r.getMessage() and "retrain" in r.getMessage()
+               for r in caplog.records)
+    # Only alice has a distance entity in the fixture; bob's file is simply not
+    # a subject, and that must not be confused with a refusal.
+    assert set(loaded) <= set(eta.eta_subjects())

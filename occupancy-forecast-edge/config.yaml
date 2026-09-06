@@ -1,22 +1,15 @@
-# The development build, and THE SOURCE OF TRUTH for this repository. Every code
-# change is made here; ../occupancy-forecast is generated from this directory by
-# scripts/promote.sh when a change has earned its way into the stable add-on.
+# The development build. See DEVELOPMENT.md for how this tree relates to
+# ../occupancy-forecast and how each is deployed.
 #
-# `version` is the stable release this work is heading toward, suffixed `-dev`.
-# It is documentation, not a mechanism: these are local add-ons, so
-# scripts/deploy-edge.sh rebuilds on demand and does not need a bump. That
-# script stamps the deployed copy with the commit sha; this file keeps the plain
-# string so that every commit does not carry a version diff.
+# `version` stays the plain `-dev` string: deploy-edge.sh stamps the DEPLOYED
+# copy with the commit sha, so bumping this file would put a version diff in
+# every commit for no gain.
 #
-# This is installable ALONGSIDE the stable add-on. They keep apart automatically
-# because the MQTT topic root, client id and Home Assistant device names are all
-# derived from the add-on's own slug (see occupancy_forecast/config.py, topic_prefix),
-# so this one owns `occupancy_forecast_edge/*` and `sensor.occupancy_forecast_edge_*` while
-# stable owns `occupancy_forecast/*`. There is nothing to configure. If the slug
-# cannot be read from Supervisor the add-on logs a warning and falls back to
-# stable's prefix -- which is a collision, so do not ignore that line.
+# If the slug cannot be read from Supervisor the add-on falls back to stable's
+# prefix and logs a warning -- that is a silent MQTT collision, so do not
+# ignore the line.
 name: Occupancy Forecast Edge
-version: "0.2.0-dev"
+version: "0.3.0-dev"
 slug: occupancy_forecast_edge
 description: >-
   Development build of the Occupancy Forecast app. Runs alongside the stable one with
@@ -33,14 +26,27 @@ ingress_port: 8099
 panel_icon: mdi:home-clock-outline
 panel_title: Occupancy Edge
 
+# The development build of a public repository: shown only to users who have
+# switched advanced mode on, and badged as experimental where it is shown.
+advanced: true
+stage: experimental
+
+# Supervisor restarts the add-on when this stops answering 2xx. /health returns
+# 503 while the worker is stalled -- the failure this add-on once sat in for
+# eleven hours with every other signal green.
+watchdog: "http://[HOST]:[PORT:8099]/health"
+
 services:
   - mqtt:want
 
+# Reads history, states and config. Not read-only: it also calls exactly one
+# service, persistent_notification create/dismiss, for its own progress notice.
 homeassistant_api: true
 
 options:
   log_level: info
   source: store
+  admin_users: []
   influx_url: ""
   influx_org: ""
   influx_bucket: homeassistant
@@ -48,6 +54,14 @@ options:
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
   source: list(store|influx)
+  # HA user ids allowed to POST (save config, train, reload). EMPTY MEANS
+  # EVERYONE: ingress proves who the caller is, not whether they may retrain
+  # the house.
+  admin_users:
+    - str
+  # `str?`, not `url?`: the default is "" (the option is only read when source
+  # is influx) and Supervisor's `url` validator rejects an empty string, which
+  # made every install with the default options fail validation at start.
   influx_url: str?
   influx_org: str?
   influx_bucket: str?
