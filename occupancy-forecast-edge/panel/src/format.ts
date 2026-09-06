@@ -55,44 +55,6 @@ export function duration(seconds: number | null | undefined): string {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
 }
 
-/** Thousands separators, in the browser's locale. */
-export const count = (n: number) => n.toLocaleString()
-
-/** "12.3 kB", "1.5 MB". */
-export function bytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['kB', 'MB', 'GB']
-  let value = n / 1024
-  let i = 0
-  while (value >= 1024 && i < units.length - 1) { value /= 1024; i += 1 }
-  return `${value.toFixed(1)} ${units[i]}`
-}
-
-/** `alice` -> `Alice`. The slug is derived from the person's entity id, so it
- *  is the closest thing to a name the add-on has without asking Home Assistant. */
-export const pretty = (slug: string) => slug.charAt(0).toUpperCase() + slug.slice(1)
-
-/** A 0-1 fraction as a percentage with a fixed number of decimals. */
-export const percent = (v: number, digits = 1) => `${(v * 100).toFixed(digits)}%`
-
-/** A nullable 0-1 share: whole percents, two decimals when it is tiny but not
- *  zero (a 0.3% null fraction must not read as "0%"), "unknown" when null. */
-export const share = (frac: number | null) =>
-  frac === null ? 'unknown' : `${(frac * 100).toFixed(frac > 0 && frac < 0.01 ? 2 : 0)}%`
-
-/** The "how far back" choices the archive and feature cards offer. */
-export const DAY_OPTIONS = [
-  { value: '1', label: 'last 24 hours' },
-  { value: '7', label: 'last 7 days' },
-  { value: '30', label: 'last 30 days' },
-  { value: '90', label: 'last 90 days' },
-]
-
-/** The same list without 90 days: the forecast table is pruned to
- *  `config.FORECAST_RETENTION_DAYS` (30), so the verification card cannot
- *  honestly offer more. Derived from the list above so the two cannot drift. */
-export const DAY_OPTIONS_RECENT = DAY_OPTIONS.filter((o) => Number(o.value) <= 30)
-
 /** `last_error` is stored as `"<iso>: <message>"`. Split it so the message
  *  leads and the instant is said the way every other time on this page is.  */
 export function splitError(

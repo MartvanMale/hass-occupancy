@@ -25,29 +25,24 @@ RUN apt-get update \
  && python3 -m venv "$VIRTUAL_ENV" \
  && rm -rf /var/lib/apt/lists/*
 
-# The account the forecaster actually runs as. There is no `USER` directive
-# here on purpose: s6-overlay is PID 1 (config.yaml sets `init: false`) and has
-# to start as root, so the drop happens at the last exec in run.sh instead.
-#
-# --system, no home, no shell: nothing about this account is meant to be logged
-# into. It owns /data and nothing else -- the venv, /app and the rest of the
-# image stay root-owned and therefore read-only to the process, which is half
-# the point and the half apparmor.txt then enforces properly.
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin occupancy
-
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# The built Ingress panel, committed rather than compiled here -- DEVELOPMENT.md
-# ("The panel") says why. If this COPY fails, run scripts/build-panel.sh.
-#
-# Before the Python, not after: the bundle changes far less often than the code,
-# and Docker invalidates every layer below a changed one, so this order keeps the
-# panel layer cached across ordinary Python edits.
-COPY panel/dist ./occupancy_forecast/web/dist/
-
 COPY occupancy_forecast/ ./occupancy_forecast/
+
+# The built Ingress panel, produced by scripts/build-panel.sh on the development
+# machine and COMMITTED, so it is in the build context wherever that context
+# comes from -- an rsync from a deploy script, or a git clone Supervisor made
+# because somebody added this repository to their add-on store. Deliberately no
+# node stage: the Home Assistant box builds this image, and no other add-on on it
+# compiles a frontend locally.
+#
+# If this COPY fails, panel/dist is not in the tree. In a clone that means the
+# bundle was committed stale or not at all, which is a bug here and not
+# something the installing user can do anything about; on a development machine
+# it means `scripts/build-panel.sh <tree>` has not been run.
+COPY panel/dist ./occupancy_forecast/web/dist/
 
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { getCandidates, getSettings, getStatus, saveConfig } from './api'
 import type { Candidates, Settings, Status } from './types'
 import { Icon, Shape } from './components/Icon'
@@ -75,20 +75,9 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    let live = true
-    getCandidates()
-      .then((c) => { if (live) setCandidates(c) })
-      .catch((e: Error) => { if (live) setError(e.message) })
-    getSettings()
-      .then((s) => { if (live) applySettings(s) })
-      .catch((e: Error) => { if (live) setError(e.message) })
-    return () => { live = false }
+    getCandidates().then(setCandidates).catch((e: Error) => setError(e.message))
+    getSettings().then(applySettings).catch((e: Error) => setError(e.message))
   }, [applySettings])
-
-  // The "saved" tick's timer, so two saves inside two seconds do not race and
-  // the timer is cleared with the page.
-  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current) }, [])
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -134,8 +123,7 @@ export function App() {
         crossing_min_hours: Number(minHours),
       })
       setSaved(true)
-      if (savedTimer.current) clearTimeout(savedTimer.current)
-      savedTimer.current = setTimeout(() => setSaved(false), 2000)
+      setTimeout(() => setSaved(false), 2000)
       // Saving rebuilds the runtime from the new settings, so both of these are
       // now stale -- refetch rather than reload the page.
       getSettings().then(applySettings).catch(() => {})

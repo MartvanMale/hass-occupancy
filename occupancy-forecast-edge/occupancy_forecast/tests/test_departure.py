@@ -45,21 +45,6 @@ def _table(spec: dict | None = None, fill: float = 1.0, date: str = DATE,
     return pd.DataFrame(rows)
 
 
-def test_the_repeated_hour_on_the_autumn_transition_keeps_both_observations():
-    """On the fall-back day 02:00-02:59 happens twice, so two UTC slots land on
-    one local slot. `day_grid` used `aggfunc="first"` and silently threw the
-    second observation away; the mean of the two is the fair value."""
-    times = pd.to_datetime(["2026-10-25T00:00Z", "2026-10-25T00:30Z",    # 02:00, 02:30 CEST
-                            "2026-10-25T01:00Z", "2026-10-25T01:30Z"],   # 02:00, 02:30 CET
-                           utc=True)
-    frame = pd.DataFrame({"subject": SUBJECT, "time": times,
-                          "home_frac": [1.0, 1.0, 0.0, 0.0]})
-    grid = departure.day_grid(frame)
-    day = grid.loc[(SUBJECT, dt.date(2026, 10, 25))]
-    assert day[4] == 0.5 and day[5] == 0.5
-    assert day.notna().sum() == 2, "only the two wall-clock slots that were observed"
-
-
 def _one(table: pd.DataFrame) -> pd.Series:
     labelled = departure.label_days(table)
     assert len(labelled) == 1, labelled

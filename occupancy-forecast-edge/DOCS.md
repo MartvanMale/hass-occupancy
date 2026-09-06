@@ -28,8 +28,7 @@ Whatever has not been promoted yet. This directory is where the code is written;
 change is judged ready. So edge is stable plus the queue, and `CHANGELOG.md`'s
 `## Unreleased` section is that queue written down. **Read it to know what this
 build has that stable does not** — an empty section means the two are the same
-code at different version strings. Everything below that section has already
-shipped to stable.
+code at different version strings.
 
 ## Running both
 

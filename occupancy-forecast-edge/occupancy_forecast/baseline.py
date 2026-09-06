@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -111,7 +110,8 @@ def _target_calendar(table: pd.DataFrame, horizon: int) -> pd.DataFrame:
     local = (table["time"] + pd.Timedelta(hours=horizon)).dt.tz_convert(config.TIMEZONE)
     return pd.DataFrame({
         "_dow": local.dt.dayofweek,
-        "_slot": features.slot_of_day(local),
+        "_slot": local.dt.hour * (60 // config.GRID_MINUTES)
+                 + local.dt.minute // config.GRID_MINUTES,
         "subject": table["subject"].to_numpy(),
     }, index=table.index)
 
@@ -207,8 +207,7 @@ def columns_for(horizon: int) -> list[str]:
 
 
 def run(table: pd.DataFrame, horizon: int, geometry: dict | None = None,
-        windows: list | None = None,
-        required: Iterable[str] = ()) -> dict[str, dict]:
+        windows: list | None = None) -> dict[str, dict]:
     """Score every rung on the same folds a model would be scored on.
 
     `geometry` comes from the caller so the ladder and the model are cut on
@@ -223,16 +222,8 @@ def run(table: pd.DataFrame, horizon: int, geometry: dict | None = None,
     model's -- which is only correct if both cut the same calendar windows.
     Passing them in makes that an argument rather than a coincidence of two
     frames happening to start on the same day.
-
-    `required` closes the other half of the same gap, the ROWS. The model
-    drops any row missing a required origin feature; this dropped on the
-    target alone, so its Brier was a mean over a superset of the model's rows
-    and the gate compared two denominators. `train.required_origin_columns`
-    is what the fits use, and `train_all` passes it here.
     """
-    required = [c for c in required if c in table.columns]
-    frame = (table.dropna(subset=[f"y_{horizon}h", *required])
-             .sort_values("time").reset_index(drop=True))
+    frame = table.dropna(subset=[f"y_{horizon}h"]).sort_values("time").reset_index(drop=True)
     if geometry is None:
         geometry = evaluate.fold_geometry(frame["time"])
 

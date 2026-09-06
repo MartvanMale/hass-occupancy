@@ -21,7 +21,6 @@ anything; the only writes are MQTT sensor states and persistent notifications.
 from __future__ import annotations
 
 import contextlib
-import copy
 import datetime as dt
 import hashlib
 import json
@@ -33,8 +32,8 @@ import time
 from pathlib import Path
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import HTMLResponse
 
 from . import (config, departure, discover, eta as eta_mod, evaluate, explore,
                features, listen, log, night)
@@ -71,15 +70,11 @@ TRAIN_HOUR = 4
 # `last_predict` quietly ageing, and the outage was found days later by looking
 # at a chart and wondering why the line was flat.
 #
-# Three cycles, so a slow-but-moving box is never called stalled. A retrain
-# gets its OWN deadline rather than an exemption: it legitimately takes
-# minutes, so the cycle threshold cannot span it, but an exemption meant a
-# train that hung -- a worker pool that never returns -- was the one failure
-# the watchdog could not see, and it is the in-cycle train that holds the
-# worker thread. An hour is twenty times the measured ~190 s and still a
-# bound. Measured from the moment the lock was taken, whichever thread took it.
+# Three cycles, so a slow-but-moving box is never called stalled. A retrain is
+# exempt outright (`training_in_progress`) rather than covered by a larger
+# number -- it legitimately takes minutes, and picking a threshold that spans it
+# would mean picking one that cannot see a stall during it either.
 STALL_SECONDS = COLLECT_MINUTES * 60 * 3
-TRAIN_STALL_SECONDS = 60 * 60
 WATCHDOG_SECONDS = 60
 
 # How often the add-on says it is alive when nothing has changed.
@@ -147,14 +142,6 @@ _state: dict = {
 }
 _broker = predict_mod.Broker()
 _train_lock = threading.Lock()
-# When `_train_lock` was last taken, so the watchdog can measure a train
-# against TRAIN_STALL_SECONDS. Stamped by `_take_train_lock`, which is the only
-# way the lock is meant to be acquired.
-_train_started = {"at": 0.0}
-# Whether `last_error` was written by the five-minute cycle, as opposed to a
-# train. A later good cycle clears its own error and leaves a train's alone:
-# a failed 04:00 train is worth seeing at breakfast, a hiccup at 04:05 is not.
-_cycle_failed = False
 # The worker's pulse: when it last STARTED a phase, and which one. Written by
 # the worker, read by the watchdog thread -- which has to be a separate thread,
 # because the failure being watched for is the worker being unable to run.
@@ -183,7 +170,7 @@ def _load_models() -> None:
 def _history_days() -> float:
     source = _state["source"]
     store = getattr(source, "store", None)
-    return _span(store)["days"] if store else float("inf")
+    return store.span()["days"] if store else float("inf")
 
 
 def do_collect() -> dict:
@@ -341,10 +328,9 @@ def _next_train(now: dt.datetime, days: float) -> str | None:
     is something to put on a page. They share the constants, which is what keeps
     them honest -- change TRAIN_HOUR and both move.
 
-    Local time, because the schedule is: the worker compares against
-    `datetime.now(config.tzinfo())`, the household's zone. The offset travels
-    with the string so the browser renders it in the same clock the user's
-    house runs on.
+    Local time, because the schedule is: the worker compares against a naive
+    `datetime.now()`. The offset travels with the string so the browser renders
+    it in the same clock the user's house runs on.
     """
     if days < MIN_DAYS_TO_TRAIN:
         return None
@@ -374,7 +360,7 @@ def _start_background_train() -> None:
     refusal = _too_little_history()
     if refusal is not None:
         raise refusal
-    if not _take_train_lock():
+    if not _train_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="a train is already running")
 
     def run() -> None:
@@ -384,41 +370,12 @@ def _start_background_train() -> None:
             # minutes for the next cycle, exactly as the worker does.
             do_predict()
         except Exception as err:  # noqa: BLE001
-            _record_error(err, from_cycle=False)
+            _state["last_error"] = f"{dt.datetime.now(dt.timezone.utc).isoformat()}: {err}"
             _log.error("train failed: %s", err)
         finally:
             _train_lock.release()
 
-    try:
-        threading.Thread(target=run, name="occupancy-train", daemon=True).start()
-    except Exception:
-        # A thread that never started never reaches the `finally` above, and a
-        # lock held by nobody is a 409 forever plus a watchdog measuring a
-        # train that does not exist.
-        _train_lock.release()
-        raise
-
-
-def _take_train_lock() -> bool:
-    """Acquire `_train_lock` without blocking, stamping when. False if held."""
-    if not _train_lock.acquire(blocking=False):
-        return False
-    _train_started["at"] = time.monotonic()
-    return True
-
-
-def _record_error(err: Exception, from_cycle: bool) -> None:
-    global _cycle_failed
-    _state["last_error"] = f"{dt.datetime.now(dt.timezone.utc).isoformat()}: {err}"
-    _cycle_failed = from_cycle
-
-
-def _clear_cycle_error() -> None:
-    """A good cycle clears the error a bad cycle left, and only that one."""
-    global _cycle_failed
-    if _cycle_failed:
-        _state["last_error"] = None
-        _cycle_failed = False
+    threading.Thread(target=run, name="occupancy-train", daemon=True).start()
 
 
 def _shipping_horizons() -> int:
@@ -427,43 +384,21 @@ def _shipping_horizons() -> int:
                if a.get("metrics", {}).get("ships"))
 
 
-_notify_error: str | None = None
-# What the notification last said, so it is sent on a TRANSITION and not every
-# five minutes. Re-creating it each cycle replaced it each cycle, so a user
-# who dismissed it had it back within five minutes, for up to seven weeks.
-_notified: tuple | None = None
-
-
 def _notify_progress() -> None:
     """Tell the user why nothing is published yet, once, and clear it later."""
-    global _notify_error, _notified
-    # Both the id and the title carry the add-on's own name, so that stable and
-    # edge raise two separate notifications and the reader can tell them apart
-    # -- which means neither may be raised under a GUESSED name. See
-    # config.resolve_topic_prefix.
-    if not config.topic_prefix_resolved():
-        return
     ha, days = _state["ha"], _history_days()
+    # Both the id and the title carry the add-on's own name, so that stable and
+    # edge raise two separate notifications and the reader can tell them apart.
     notify_id, name = notify_collecting_id(), config.display_name()
-    if days < MIN_DAYS_TO_TRAIN:
-        # The day count is in the text, so a new day is a new message; that
-        # is once a day, which is the cadence a progress note deserves.
-        state: tuple = ("collecting", int(days))
-    elif not _shipping_horizons():
-        state = ("training",)
-    else:
-        state = ("published",)
-    if state == _notified:
-        return
     try:
-        if state[0] == "collecting":
+        if days < MIN_DAYS_TO_TRAIN:
             ha.notify(
                 f"{name} is still learning",
                 f"Collected **{days:.0f} of {MIN_DAYS_TO_TRAIN} days** of history. "
                 f"No forecast is published yet -- the sensors exist and read "
                 f"unknown until a model has earned a horizon.",
                 notify_id)
-        elif state[0] == "training":
+        elif not _shipping_horizons():
             # Training now, but nothing has beaten its baseline yet. Say so
             # rather than going quiet -- silence here reads as "broken".
             ha.notify(
@@ -474,15 +409,8 @@ def _notify_progress() -> None:
                 notify_id)
         else:
             ha.dismiss(notify_id)
-        _notified = state
-        _notify_error = None
-    except Exception as err:  # noqa: BLE001
-        # Never worth failing a cycle for, but worth one line per distinct
-        # failure: a token or proxy that has stopped working is otherwise
-        # invisible here, and this is the same token every other HA call uses.
-        if str(err) != _notify_error:
-            _log.warning("could not update the progress notification: %s", err)
-        _notify_error = str(err)
+    except Exception:  # noqa: BLE001
+        pass  # a notification is never worth failing a cycle for
 
 
 def _wait_for_work(since: float) -> None:
@@ -540,25 +468,24 @@ def check_stall(now: float | None = None, dump=None) -> bool:
     waiting on a real clock; `now` is a `time.monotonic()` reading and `dump`
     is the stack dumper, injected for the same reason.
 
-    A retrain is measured against its own deadline, TRAIN_STALL_SECONDS, from
-    the moment `_train_lock` was taken -- by the worker at 04:00 or by the
-    Train button's thread, it makes no difference. It used to be EXEMPT while
-    the lock was held (and before that the exemption read
-    `_state["training_in_progress"]`, a key nothing ever wrote, so it was
-    dead). An exemption meant the one failure this watchdog exists for -- a
-    thread that never comes back -- was invisible for exactly as long as a
-    train held the lock, which for a wedged worker pool is forever.
+    A retrain is exempt. It legitimately runs for minutes and holds the worker
+    the whole time, and a threshold wide enough to span one would be too wide
+    to catch anything else. The exemption reads `_train_lock`, which is where
+    that fact actually lives: it used to read `_state["training_in_progress"]`,
+    a key **nothing ever writes** -- `/api/status` derives the same name from
+    the lock -- so the exemption had quietly been dead. It has never fired only
+    because a train takes about three minutes against `STALL_SECONDS`; a slower
+    box or a longer history would have dumped every thread's stack and dropped
+    the MQTT client in the middle of a perfectly healthy retrain.
 
     Reports the transition, never the state: one report per episode, and one
     when it recovers. A watchdog that logs every minute for eleven hours is a
     watchdog nobody reads.
     """
-    now = time.monotonic() if now is None else now
     if _train_lock.locked():
-        late, limit, phase = now - _train_started["at"], TRAIN_STALL_SECONDS, "train"
-    else:
-        late, limit, phase = stall_seconds(now), STALL_SECONDS, _heartbeat["phase"]
-    if late < limit:
+        return False
+    late = stall_seconds(now)
+    if late < STALL_SECONDS:
         if _stall["since"] is not None:
             _log.warning("worker recovered; it was stuck in %s", _stall["phase"])
             _stall.update(since=None, phase=None, acted=False)
@@ -567,13 +494,12 @@ def check_stall(now: float | None = None, dump=None) -> bool:
     if not _stall["acted"]:
         _stall["count"] += 1
         _stall["since"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-        _stall["phase"] = phase
+        _stall["phase"] = _heartbeat["phase"]
         _stall["acted"] = True
         _log.critical(
             "worker STALLED in %s for %.0fs after %d cycles. Thread stacks "
-            "follow -- the frame at the top of occupancy-worker (or "
-            "occupancy-train) is where it is stuck.",
-            phase, late, _heartbeat["cycles"])
+            "follow -- the frame at the top of occupancy-worker is where it "
+            "is stuck.", _heartbeat["phase"], late, _heartbeat["cycles"])
         try:
             (dump or _dump_stacks)()
         except Exception as err:  # noqa: BLE001
@@ -639,10 +565,6 @@ def _worker() -> None:
     while not _stop.is_set():
         started = time.monotonic()
         try:
-            # Keep asking until Supervisor answers. Nothing publishes and no
-            # notification is raised until it does; see config.resolve_topic_prefix.
-            if not config.topic_prefix_resolved():
-                config.resolve_topic_prefix()
             beat("collect")
             do_collect()
             # No `if models` guard: with none trained, predict still publishes
@@ -655,10 +577,7 @@ def _worker() -> None:
             beat("notify")
             _notify_progress()
 
-            # The household's clock, not the container's: TRAIN_HOUR is a
-            # local hour. Supervisor happens to inject TZ, which is what made
-            # a naive `now()` work; this stops depending on that.
-            now = dt.datetime.now(config.tzinfo())
+            now = dt.datetime.now()
             days = _history_days()
             # Daily while the history is still growing fast, weekly once it is
             # mature and a retrain has little left to change.
@@ -666,16 +585,14 @@ def _worker() -> None:
                    and (days < FULL_HISTORY_DAYS or now.weekday() == TRAIN_WEEKDAY))
             if due and last_train_day != now.date() and days >= MIN_DAYS_TO_TRAIN:
                 last_train_day = now.date()
-                if _take_train_lock():
-                    beat("train")
+                if _train_lock.acquire(blocking=False):
                     try:
                         do_train()
                         do_predict()
                     finally:
                         _train_lock.release()
-            _clear_cycle_error()
         except Exception as err:  # noqa: BLE001
-            _record_error(err, from_cycle=True)
+            _state["last_error"] = f"{dt.datetime.now(dt.timezone.utc).isoformat()}: {err}"
             _log.error("cycle failed: %s", err)
         _heartbeat["cycles"] += 1
         _log.debug("cycle %d done in %.1fs; %d horizon(s) shipping, "
@@ -698,24 +615,9 @@ async def lifespan(_: FastAPI):
     # First, so that bootstrap's own warnings land in the configured format
     # rather than being the one thing that still prints raw.
     log.configure()
-    # Who this add-on is on MQTT, asked of Supervisor BEFORE anything is named.
-    # A few tries with a pause, because the usual reason for a miss is a host
-    # that is still booting; if it still fails, the worker keeps asking every
-    # cycle and nothing is published in the meantime. It used to be asked once,
-    # at import, and a miss was remembered for the life of the process.
-    config.resolve_topic_prefix(attempts=5, delay=3.0)
-    try:
-        settings, ha, source = runtime.bootstrap()
-        configured = True
-    except Exception as err:  # noqa: BLE001
-        settings, ha, source = _degraded_bootstrap(err)
-        configured = False
+    settings, ha, source = runtime.bootstrap()
     _state.update({"settings": settings, "ha": ha, "source": source})
-    try:
-        _load_models()
-    except Exception as err:  # noqa: BLE001
-        _record_error(err, from_cycle=False)
-        _log.error("could not load the models: %s -- serving nothing until a retrain", err)
+    _load_models()
 
     # When the models on disk were trained. In memory only, this reset on every
     # restart and the panel said the add-on had never trained while sitting on a
@@ -724,118 +626,30 @@ async def lifespan(_: FastAPI):
     if trained:
         _state["last_train"] = trained["trained_at"]
         _state["last_train_seconds"] = trained["duration_s"]
-    if configured:
-        _start_worker_threads(settings)
+    worker = threading.Thread(target=_worker, name="occupancy-worker", daemon=True)
+    worker.start()
+    threading.Thread(target=_watchdog, name="occupancy-watchdog",
+                     daemon=True).start()
 
-    _log.info("ready: %d model(s), %d person(s), source=%s, log level %s%s",
+    # Event-driven wake-ups, if Home Assistant will have us. `start` never
+    # raises: a listener that cannot connect is a slower forecast, not a
+    # broken add-on, and the reason lands on the status page.
+    _listener = listen.Listener(runtime.trigger_entities(settings), _nudge.set)
+    _listener.start()
+
+    _log.info("ready: %d model(s), %d person(s), source=%s, log level %s",
               len(_state["models"]), len(settings.people), settings.source,
-              logging.getLevelName(logging.getLogger().level).lower(),
-              "" if configured else " -- NOT RUNNING: fix the configuration on the panel")
+              logging.getLevelName(logging.getLogger().level).lower())
     yield
     _stop.set()
     if _listener is not None:
         _listener.stop()
     _broker.close()
-    store = getattr(_state.get("source"), "store", None)
-    if store is not None:
-        store.close()
 
 
-def _degraded_bootstrap(err: Exception) -> tuple:
-    """What to run with when `runtime.bootstrap` refuses.
-
-    It refuses for three reasons -- no people configured (a fresh install
-    before its first `person.*` exists), a `config.json` that cannot be read,
-    Home Assistant unreachable -- and every one of them used to exit the
-    process, taking down the panel that is the tool for fixing the first two.
-    Now the app starts with the worker idle, the reason in `last_error`, and
-    the Setup tab serving; a successful save starts the worker.
-    """
-    _record_error(err, from_cycle=False)
-    _log.error("start-up failed: %s. The panel is up so this can be fixed "
-               "there; nothing is collected or published until a configuration "
-               "is saved.", err)
-    try:
-        ha = runtime.home_assistant()
-    except Exception:  # noqa: BLE001
-        ha = None
-    settings = None
-    try:
-        settings = (runtime.load_settings(ha) if ha is not None
-                    else config.Settings.load())
-    except Exception as load_err:  # noqa: BLE001
-        _log.error("could not read the saved configuration (%s); starting "
-                   "from a blank one", load_err)
-    return settings or config.Settings(), ha, None
-
-
-_threads_started = False
-
-
-def _start_worker_threads(settings) -> None:
-    """Start the worker, the watchdog and the listener. Once, ever."""
-    global _threads_started, _listener
-    if _threads_started:
-        return
-    _threads_started = True
-    threading.Thread(target=_worker, name="occupancy-worker", daemon=True).start()
-    threading.Thread(target=_watchdog, name="occupancy-watchdog",
-                     daemon=True).start()
-    # Event-driven wake-ups, if Home Assistant will have us. `start` never
-    # raises: a listener that cannot connect is a slower forecast, not a
-    # broken add-on, and the reason lands on the status page.
-    if _listener is None:
-        _listener = listen.Listener(runtime.trigger_entities(settings), _nudge.set)
-        _listener.start()
-
-
-# A literal, on purpose. The title is only ever read by the generated OpenAPI
-# page, and `config.display_name()` here put a Supervisor round trip in the
-# import graph -- before `log.configure()`, before `lifespan` had a chance to
-# retry it, and with the failure remembered for the life of the process.
-# Everything a user sees derives from the slug in `lifespan` and later.
-app = FastAPI(title="Occupancy Forecast", version=train_mod.MODEL_VERSION,
+app = FastAPI(title=config.display_name(), version=train_mod.MODEL_VERSION,
               lifespan=lifespan)
 web.mount(app)
-
-
-# The header Supervisor's Ingress proxy sets, and strips from the incoming
-# request first so a browser cannot supply its own. See config.admin_users().
-REMOTE_USER_HEADER = "X-Remote-User-Id"
-
-
-def require_admin(request: Request) -> str | None:
-    """Guard the endpoints that change something. Returns the caller's user id.
-
-    Read the allowlist per request rather than caching it: the option can change
-    while the add-on is running, and a gate that only reflects the value it saw
-    at import time is a gate that quietly stops matching what the Configuration
-    tab says.
-
-    A request with no header and an empty allowlist is the ordinary case
-    (unrestricted, and outside Ingress there is no header to have). A request
-    with no header and a NON-empty allowlist is refused: the only ways to arrive
-    without one are to bypass Ingress or to be Supervisor talking to a proxy
-    that never set it, and neither is a user we can name.
-    """
-    allowed = config.admin_users()
-    if not allowed:
-        return None
-    user = request.headers.get(REMOTE_USER_HEADER)
-    if user is None or user not in allowed:
-        _log.warning("refused %s %s from user %r: not in admin_users",
-                     request.method, request.url.path, user)
-        raise HTTPException(
-            status_code=403,
-            detail="not permitted: add this Home Assistant user id to the "
-                   "add-on's admin_users option")
-    return user
-
-
-# Applied to the POSTs and to nothing else. The GETs stay open because the panel
-# needs them on load and none of them change state; /health stays open because a
-# watchdog is not a logged-in user.
-admin_only = [Depends(require_admin)]
 
 
 def _status() -> dict:
@@ -863,7 +677,7 @@ def _status() -> dict:
         "display_name": config.display_name(),
         "model_version": train_mod.MODEL_VERSION,
         "source": settings.source if settings else None,
-        "history": _span(store) if store else {"note": "influx"},
+        "history": store.span() if store else {"note": "influx"},
         "days_until_training": max(0, round(MIN_DAYS_TO_TRAIN - days, 1)),
         "horizons_shipping": _shipping_horizons(),
         "people": [s.slug for s in config.PEOPLE] if settings else [],
@@ -913,7 +727,7 @@ def _status() -> dict:
         "loaded_at": _state["loaded_at"], "last_collect": _state["last_collect"],
         "last_predict": _state["last_predict"], "last_train": _state["last_train"],
         "last_train_seconds": _state["last_train_seconds"],
-        "next_train": _next_train(dt.datetime.now(config.tzinfo()), days),
+        "next_train": _next_train(dt.datetime.now().astimezone(), days),
         # Which schedule that came off. The panel should not have to infer the
         # policy from the gap between two timestamps.
         "train_cadence": "weekly" if days >= FULL_HISTORY_DAYS else "daily",
@@ -993,46 +807,14 @@ def _unmatched_zone_states() -> dict[str, int]:
     now = time.time()
     if computed_at is not None and now - computed_at < UNMATCHED_TTL_S:
         return cached
-    # One scan at a time. The status page polls every few seconds and the scan
-    # reads every person's whole history; without this, every poll that landed
-    # during a scan started another one on its own threadpool thread.
-    if not _unmatched_lock.acquire(blocking=False):
-        return cached
     try:
         source = _state["source"]
         found = features.unmatched_away_states(
             source, features.history_start(source), None)
-        _state["unmatched_zones"] = (now, found)
-    except Exception as err:  # noqa: BLE001
-        # Keep the old answer, but retry in a minute rather than a quarter
-        # hour: a transient read error is not worth a stale diagnostic for
-        # that long.
-        _log.debug("unmatched-zone scan failed: %s", err)
+    except Exception:
         found = cached
-        _state["unmatched_zones"] = (now - UNMATCHED_TTL_S + 60, cached)
-    finally:
-        _unmatched_lock.release()
+    _state["unmatched_zones"] = (now, found)
     return found
-
-
-_unmatched_lock = threading.Lock()
-
-# `store.span()` is a MIN/MAX/COUNT over the whole archive, and `_status` ran
-# it twice per status poll -- once directly and once through `_history_days`.
-# The collector appends every five minutes, so thirty seconds of staleness on
-# the status page is invisible and saves a full scan every ten seconds.
-SPAN_TTL_S = 30
-_span_cache: dict = {"store": None, "at": 0.0, "span": None}
-
-
-def _span(store) -> dict:
-    now = time.monotonic()
-    if (_span_cache["store"] is store and _span_cache["span"] is not None
-            and now - _span_cache["at"] < SPAN_TTL_S):
-        return _span_cache["span"]
-    span = store.span()
-    _span_cache.update(store=store, at=now, span=span)
-    return span
 
 
 def _holiday_signal(settings) -> dict:
@@ -1055,18 +837,8 @@ def _holiday_signal(settings) -> dict:
 
 
 @app.get("/health")
-def health() -> JSONResponse:
-    """The same page as /api/status, with a status code Supervisor can act on.
-
-    503 while the worker is stalled, or while Home Assistant could not be
-    reached at start-up and the worker never started. `watchdog:` in
-    config.yaml points Supervisor here, and a non-2xx is what makes it
-    restart the add-on -- which is the standard answer to a hung thread that
-    this add-on had never used, because this always said 200.
-    """
-    body = _status()
-    unhealthy = _stall["since"] is not None or _state.get("ha") is None
-    return JSONResponse(content=body, status_code=503 if unhealthy else 200)
+def health() -> dict:
+    return _status()
 
 
 @app.get("/api/status")
@@ -1214,67 +986,7 @@ def crossing_patch(payload: dict, current: config.Settings) -> dict:
     return out
 
 
-def _entity_list(value, key: str, domain: str) -> list[str]:
-    """A list of `<domain>.*` entity ids out of a config patch, or a 400.
-
-    The endpoint takes `payload: dict`, which is the whole of its schema, so
-    `{"people": "person.alice"}` used to reach `config.configure` as a string
-    -- which iterated it and minted twelve one-letter subjects, one with an
-    empty slug. Every list field goes through here.
-    """
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{key} must be a list of entity ids, not {value!r}.")
-    wrong = [v for v in value if not v.startswith(f"{domain}.")]
-    if wrong:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{key} must be {domain}.* entities: {', '.join(wrong)}")
-    return list(value)
-
-
-def _optional_str(value, key: str) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise HTTPException(
-            status_code=400, detail=f"{key} must be text or null, not {value!r}.")
-    return value or None
-
-
-def typed_patch(payload: dict) -> dict:
-    """The identity fields of a config patch, type-checked. Or a 400.
-
-    Shapes only; whether an entity exists is the endpoint's question, because
-    that needs Home Assistant. Separate so it is testable without one.
-    """
-    out: dict = {}
-    if "people" in payload:
-        out["people"] = _entity_list(payload["people"], "people", "person")
-    if "zones" in payload:
-        out["zones"] = _entity_list(payload["zones"], "zones", "zone")
-    for key in ("house_entity", "holiday_country", "day_schedule"):
-        if key in payload:
-            out[key] = _optional_str(payload[key], key)
-    if "source" in payload:
-        if payload["source"] not in ("store", "influx"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"source must be 'store' or 'influx', not {payload['source']!r}.")
-        out["source"] = payload["source"]
-    for key in ("proximity", "next_alarm"):
-        if key in payload:
-            value = payload[key]
-            if value is not None and not (
-                    isinstance(value, dict)
-                    and all(isinstance(k, str) for k in value)):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{key} must be a mapping keyed by person entity, not {value!r}.")
-            out[key] = value
-    return out
-
-
-@app.post("/api/config", dependencies=admin_only)
+@app.post("/api/config")
 def api_save_config(payload: dict) -> dict:
     """Replace the configuration and rebuild from it.
 
@@ -1282,55 +994,42 @@ def api_save_config(payload: dict) -> dict:
     feature table contains, so the models are now about a different house. They
     are left in place rather than deleted -- a wrong model that says so beats no
     forecast at all -- but the next scheduled train replaces them.
-
-    EVERYTHING is validated on a COPY, and the live settings are swapped only
-    once `config.configure` has accepted the copy. The version before this
-    assigned onto the live object first and validated second, so a rejected
-    save left the process running on values that never reached disk. For a
-    typo'd zone that was latent; for an empty people list it was not: the 400
-    from `configure` arrived after `settings.people` was already `[]`, so from
-    the next cycle the collector fetched nobody's history while the forecasts
-    carried on from the old `config.PEOPLE` -- an archive quietly going hollow
-    behind a working-looking add-on, until a restart re-read the file.
     """
-    live_settings = _state["settings"]
-    if _state.get("ha") is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Home Assistant was unreachable when the add-on started; "
-                   "restart the add-on once it is up.")
-    slugs_before = {s.slug for s in config.PEOPLE}
+    settings = _state["settings"]
 
-    # Both validators run before anything is touched, and neither needs HA.
-    crossing = crossing_patch(payload, live_settings)
-    typed = typed_patch(payload)
+    # Validated BEFORE anything is assigned, unlike the zone and holiday checks
+    # below. `settings` is the live object the five-minute predict cycle reads,
+    # so assigning first and rejecting second leaves the process serving values
+    # that never reached disk. Latent for zones -- nothing reads them until the
+    # next feature build -- but immediately visible for a cut, which the very
+    # next cycle publishes from.
+    crossing = crossing_patch(payload, settings)
 
-    candidate = copy.deepcopy(live_settings)
-    for key, value in {**typed, **crossing}.items():
-        setattr(candidate, key, value)
+    for key in ("people", "zones", "house_entity", "proximity", "source",
+                "holiday_country", "next_alarm", "day_schedule"):
+        if key in payload:
+            setattr(settings, key, payload[key])
+    # Not in the tuple above: these are validated and coerced by
+    # `crossing_patch`, so the tuple is not the complete list of writable keys.
+    for key, value in crossing.items():
+        setattr(settings, key, value)
 
     # Rejected rather than absorbed, like the holiday country below. A typo here
     # used to be accepted silently and then spend a week producing an all-zero
     # column, because nothing downstream distinguishes "zone nobody visited"
-    # from "zone that does not exist". People get the same rule now: the
-    # collector would spend forever asking for a person's history that Home
-    # Assistant has no entity for.
+    # from "zone that does not exist".
     live = {s["entity_id"] for s in _state["ha"].states()}
-    missing = [p for p in candidate.people if p not in live]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"not people Home Assistant knows about: {', '.join(missing)}")
     # Same rule as the zones: rejected rather than absorbed. A schedule that
     # does not exist would leave the chart unshaded with no explanation, and
     # "the setting is saved but does nothing" is the state this add-on keeps
     # having to design its way out of.
-    schedule = candidate.day_schedule
+    schedule = settings.day_schedule
     if schedule and (not schedule.startswith("schedule.") or schedule not in live):
         raise HTTPException(
             status_code=400,
             detail=f"{schedule!r} is not a schedule entity that exists here.")
-    unknown = [z for z in candidate.zones if z not in live]
+    unknown = [z for z in settings.zones
+               if not z.startswith("zone.") or z not in live]
     if unknown:
         raise HTTPException(
             status_code=400,
@@ -1340,61 +1039,29 @@ def api_save_config(payload: dict) -> dict:
     # country to an all-zero column, which is right for a feature build that
     # must not abort but wrong here: it would leave the user looking at a
     # calendar setting that says "IND" and does nothing.
-    chosen = candidate.holiday_country
+    chosen = settings.holiday_country
     if chosen and not discover.is_supported_country(chosen):
         raise HTTPException(
             status_code=400,
             detail=f"no holiday calendar for {chosen!r}. Pick one of the "
                    f"countries offered, or none at all.")
 
-    settings = runtime.refresh_environment(candidate, _state["ha"])
+    settings = runtime.refresh_environment(settings, _state["ha"])
     try:
-        # Raises before it assigns anything, so a refusal here leaves the
-        # module globals on the previous, accepted configuration.
         config.configure(settings)
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err)) from err
     settings.save()
     _state["settings"] = settings
-    old_store = getattr(_state["source"], "store", None)
-    _state["source"] = runtime.build_source(settings, _state["ha"], old_store)
-    if old_store is not None and getattr(_state["source"], "store", None) is not old_store:
-        old_store.close()
+    _state["source"] = runtime.build_source(settings, _state["ha"],
+                                            getattr(_state["source"], "store", None))
     # Who to listen to changed with who to track. Without this, a person added
     # here is not subscribed to until the next restart -- and nothing says so,
     # because the add-on carries on publishing perfectly good five-minute
     # forecasts for them.
     if _listener is not None:
         _listener.update_entities(runtime.trigger_entities(settings))
-    # A save is also how a start-up that refused (no people yet, say) gets
-    # going: the worker was never started, and this is the first good
-    # configuration. No-op on an add-on that is already running.
-    _start_worker_threads(settings)
-
-    # Somebody removed: clear their retained entities, or Home Assistant keeps
-    # them forever with the last forecast under a `predicted_at` that never
-    # moves. Somebody added or removed at all: the models on disk are about a
-    # different house, so retrain now rather than at the next scheduled 04:00,
-    # which on a mature install can be a week away.
-    slugs_after = {s.slug for s in config.PEOPLE}
-    removed = slugs_before - slugs_after
-    if removed:
-        client = _broker.client()
-        if client is not None:
-            for slug in sorted(removed):
-                cleared = predict_mod.retract(slug, client)
-                _log.info("cleared %d retained topic(s) for removed person %s", cleared, slug)
-        else:
-            _log.warning("no MQTT client; the retained entities for %s stay until "
-                         "the broker is back", ", ".join(sorted(removed)))
-    if (candidate.people != live_settings.people
-            or candidate.zones != live_settings.zones):
-        try:
-            _start_background_train()
-            _log.info("retraining now: the people or zones changed")
-        except HTTPException as err:
-            _log.info("not retraining yet after the configuration change: %s", err.detail)
-    return {"saved": True, "people": sorted(slugs_after)}
+    return {"saved": True, "people": [s.slug for s in config.PEOPLE]}
 
 
 # --- the Data tab ---------------------------------------------------------
@@ -1451,26 +1118,14 @@ def api_explore_features() -> dict:
                    lambda: explore.feature_inventory(config.FEATURES_PATH))
 
 
-def _known_horizon(horizon: int) -> int:
-    """A horizon on the grid, or a 404. `/horizon/999` used to be answered."""
-    if horizon not in config.HORIZONS_H:
-        raise HTTPException(
-            status_code=404,
-            detail=f"+{horizon} h is not a forecast horizon; the grid is "
-                   f"+{min(config.HORIZONS_H)} h to +{max(config.HORIZONS_H)} h.")
-    return horizon
-
-
 @app.get("/api/explore/feature-series")
 def api_explore_feature_series(subject: str, column: str, days: int = 30) -> dict:
-    # Clamped like every other `days` here; this one arrived unclamped.
-    return explore.feature_series(config.FEATURES_PATH, subject, column,
-                                  explore._clamp_days(days))
+    return explore.feature_series(config.FEATURES_PATH, subject, column, days)
 
 
 @app.get("/api/explore/horizon/{horizon}")
 def api_explore_horizon(horizon: int) -> dict:
-    return explore.horizon_recipe(_known_horizon(horizon), _state["models"])
+    return explore.horizon_recipe(horizon, _state["models"])
 
 
 # Uncached, for the same reason `entity_series` is: it reads the archive and
@@ -1493,21 +1148,20 @@ def api_explore_metrics() -> dict:
 
 @app.get("/api/explore/metrics/{horizon}")
 def api_explore_metrics_detail(horizon: int) -> dict:
-    return explore.metrics_detail(config.MODELS_DIR, _known_horizon(horizon),
-                                  _state["models"])
+    return explore.metrics_detail(config.MODELS_DIR, horizon, _state["models"])
 
 
-@app.post("/collect", dependencies=admin_only)
+@app.post("/collect")
 def run_collect() -> dict:
     return do_collect()
 
 
-@app.post("/predict", dependencies=admin_only)
+@app.post("/predict")
 def run_predict() -> dict:
     try:
         results = do_predict()
     except Exception as err:  # noqa: BLE001
-        _record_error(err, from_cycle=True)
+        _state["last_error"] = f"{dt.datetime.now(dt.timezone.utc).isoformat()}: {err}"
         raise HTTPException(status_code=500, detail=str(err)) from err
     return {"predicted_at": _state["last_predict"],
             "subjects": [{k: r[k] for k in ("subject", "current", "curve",
@@ -1515,7 +1169,7 @@ def run_predict() -> dict:
                                             "eta_minutes")} for r in results]}
 
 
-@app.post("/train", dependencies=admin_only)
+@app.post("/train")
 def run_train(response: Response, background: bool = False) -> dict:
     """Train now. `?background=1` starts it and returns; the panel uses that.
 
@@ -1527,21 +1181,21 @@ def run_train(response: Response, background: bool = False) -> dict:
         response.status_code = 202
         return {"started": True}
 
-    if not _take_train_lock():
+    if not _train_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="a train is already running")
     try:
         summary = do_train()
     except HTTPException:
         raise
     except Exception as err:  # noqa: BLE001
-        _record_error(err, from_cycle=False)
+        _state["last_error"] = f"{dt.datetime.now(dt.timezone.utc).isoformat()}: {err}"
         raise HTTPException(status_code=500, detail=str(err)) from err
     finally:
         _train_lock.release()
     return {"finished_at": _state["last_train"], **summary}
 
 
-@app.post("/reload", dependencies=admin_only)
+@app.post("/reload")
 def reload_models() -> dict:
     _load_models()
     return {"loaded_at": _state["loaded_at"], "horizons": sorted(_state["models"])}

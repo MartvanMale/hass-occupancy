@@ -24,6 +24,8 @@ holidays==0.68
 # asyncio client would mean a second event loop beside uvicorn's for no gain.
 # Pure Python, no compiled dependency.
 #
-# Deliberately crosses the stdlib-only note in sources/ha.py: that note is about
-# four urllib requests a minute, not about hand-rolling a reconnecting WebSocket.
+# This is the one place that crosses the stdlib-only note in sources/ha.py.
+# That note is about making four urllib requests a minute, where pulling in an
+# HTTP stack really would be silly; a persistent, authenticated, reconnecting
+# WebSocket is not something to hand-roll on a raw socket.
 websockets==15.0.1

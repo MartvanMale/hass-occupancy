@@ -7,7 +7,7 @@
 # hash in the filename is over the OUTPUT, so a source edit that happens to
 # minify to the same bytes keeps the same name. So: hash the inputs, write the
 # result into dist/ at build time (scripts/build-panel.sh), and compare it back
-# (scripts/check-panel.sh).
+# (scripts/check-panel.sh, .githooks/pre-commit).
 #
 # `sha256sum` hashes the path as well as the contents, so a rename or a deleted
 # file moves the digest -- which a hash of concatenated contents would not. The

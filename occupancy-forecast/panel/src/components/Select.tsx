@@ -73,13 +73,6 @@ export function Select({
 
   // Opening resets the filter and points the cursor at what is already chosen,
   // so Enter twice is a no-op rather than a silent change to the first option.
-  //
-  // Keyed on `open` ALONE, deliberately. Every caller builds `options` as an
-  // array literal in render, so listing it here re-ran this on every parent
-  // render -- and the parent re-renders on every status poll, so an open
-  // picker had its search box wiped and re-focused every ten seconds while
-  // the user was typing into it. The values read inside are the ones current
-  // at the moment of opening, which is what "opening resets" means.
   useEffect(() => {
     if (!open) return
     setQuery('')
@@ -90,8 +83,7 @@ export function Select({
     if (rect) setFlip(window.innerHeight - rect.bottom < POPUP_H && rect.top > POPUP_H)
 
     search.current?.focus()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
+  }, [open, options, value])
 
   // Keep the cursor visible while arrowing through 159 countries.
   useEffect(() => {

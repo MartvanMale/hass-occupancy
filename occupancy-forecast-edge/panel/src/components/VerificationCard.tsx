@@ -7,7 +7,7 @@ import { Row } from './Row'
 import { Select } from './Select'
 import { Verification } from './Verification'
 import { useDebounced } from '../hooks'
-import { absoluteTime, DAY_OPTIONS_RECENT, pretty } from '../format'
+import { absoluteTime } from '../format'
 
 /**
  * "Was it right?" -- the same card on both tabs, each owning its own controls.
@@ -29,6 +29,14 @@ import { absoluteTime, DAY_OPTIONS_RECENT, pretty } from '../format'
  * forecast says, then what happened last time it said it. On Data it closes
  * step five, whose subtitle already asks the question.
  */
+
+const DAY_OPTIONS = [
+  { value: '1', label: 'last 24 hours' },
+  { value: '7', label: 'last 7 days' },
+  { value: '30', label: 'last 30 days' },
+]
+
+const pretty = (slug: string) => slug.charAt(0).toUpperCase() + slug.slice(1)
 
 export function VerificationCard({ status, defaultHorizon = 6 }: {
   status: Status | null
@@ -53,9 +61,6 @@ export function VerificationCard({ status, defaultHorizon = 6 }: {
     if (!chosen) return
     let live = true
     setData(null)
-    // Cleared per fetch, or one transient failure while dragging the slider
-    // pinned this card on its message until the page was reloaded.
-    setError(null)
     getVerification(chosen, horizon, Number(days))
       .then((v) => { if (live) setData(v) })
       .catch((e: Error) => { if (live) setError(e.message) })
@@ -112,7 +117,7 @@ export function VerificationCard({ status, defaultHorizon = 6 }: {
         secondary={`Kept for ${data?.available ? data.retention_days : 30} days.`}
         trailing={
           <Select label="Time window" value={days} onChange={setDays}
-                  options={DAY_OPTIONS_RECENT} />
+                  options={DAY_OPTIONS} />
         }
       />
 
