@@ -119,6 +119,21 @@ profile occupancy_forecast flags=(attach_disconnected,mediate_deleted) {
   # evidence here. What caught it was the train time. Compare that number after
   # touching these rules -- `training finished in Ns` in the add-on log -- and do
   # not trust silence.
+  # /data ITSELF, not only its contents. `/data/**` does not match `/data`, and
+  # run.sh chowns that exact path on first start to hand the archive to the
+  # unprivileged user. 0.2.0 shipped without these two lines and the chown was
+  # denied on every installation whose /data was still root-owned -- which is
+  # every installation except the one development box where it had already been
+  # chowned under a complain-mode profile, so the guard in run.sh skipped it and
+  # the enforcing exercise never attempted the write at all. Both spellings,
+  # because AppArmor presents a directory with and without the trailing slash
+  # depending on the operation and this is not worth being clever about twice.
+  #
+  # AppArmor logged NO denial for it, exactly as it logs none for a refused
+  # link. What named it was the add-on's own log: `chown: changing ownership of
+  # '/data': Permission denied` from a process running as uid 0.
+  /data rwkl,
+  /data/ rwkl,
   /data/** rwkl,
   /tmp/** rwkl,
   /run/** rwkl,

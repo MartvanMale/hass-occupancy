@@ -65,9 +65,20 @@ bashio::log.info "Starting ${addon_name:-Occupancy Forecast} (source: $(bashio::
 # Supervisor creates it as root on new ones -- so it is handed over once, and
 # then not again, because the test is cheaper than a recursive chown over an
 # archive that only grows.
+#
+# The failure is guarded for the same reason the s6-setuidgid drop below is:
+# under `set -e` a refused chown kills the container before the forecaster ever
+# starts, and that is a worse outcome than running as root. 0.2.0 shipped an
+# AppArmor profile whose write rules covered `/data/**` but not `/data`, so this
+# chown was denied on every installation whose /data was still root-owned and
+# the add-on would not start at all. The profile is fixed; this is the belt, so
+# that a future gap in it degrades the add-on instead of stopping it.
 if [ "$(stat -c %u /data)" != "$(id -u occupancy)" ]; then
     bashio::log.info "Handing /data to the unprivileged user"
-    chown -R occupancy:occupancy /data
+    if ! chown -R occupancy:occupancy /data; then
+        bashio::log.warning "Could not take ownership of /data -- running as root"
+        exec python -m occupancy_forecast.server
+    fi
 fi
 
 # Guarded, because if a future base image drops s6-overlay's command directory

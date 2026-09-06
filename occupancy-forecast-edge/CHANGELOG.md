@@ -15,6 +15,18 @@ rejected go in the commit message instead.
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-06
+
+### Fixed
+
+- **0.2.0 would not start.** It logged `chown: changing ownership of '/data':
+  Permission denied` and stopped, on every installation whose data directory was
+  still owned by root — which is every fresh install, and every upgrade from
+  0.1.x. The AppArmor profile added in 0.2.0 allowed writes inside the data
+  directory but not to the directory itself, so handing it to the unprivileged
+  user was refused. If a future version cannot take ownership it now logs that
+  and carries on as root rather than refusing to start.
+
 ## 0.2.0 - 2026-09-06
 
 ### Added

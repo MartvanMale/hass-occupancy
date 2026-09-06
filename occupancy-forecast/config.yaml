@@ -5,7 +5,7 @@
 # `version` moves only on a promotion -- that bump is what offers the update to
 # everyone installed from this repository.
 name: Occupancy Forecast
-version: "0.2.0"
+version: "0.2.1"
 slug: occupancy_forecast
 description: >-
   Forecasts who will be home, hour by hour, for the next two days -- and how
