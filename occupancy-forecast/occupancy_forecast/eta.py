@@ -371,12 +371,30 @@ def save(model, metrics: EtaMetrics, models_dir: Path = MODELS_DIR) -> Path:
 
 
 def load_models(models_dir: Path = MODELS_DIR) -> dict[str, dict]:
+    """The ETA artifacts this build can serve.
+
+    The feature list travels in the artifact and is the contract: an artifact
+    fitted on a different `FEATURES` is refused here, with a line saying so,
+    rather than handed to scikit-learn to fail inside `predict_minutes` on
+    every cycle -- which used to be swallowed, so the sensor read `unknown`
+    forever and nothing said why.
+    """
     out = {}
+    stale = []
     for subject in eta_subjects():
         path = models_dir / f"eta_{subject}.pkl"
-        if path.exists():
-            with path.open("rb") as fh:
-                out[subject] = pickle.load(fh)
+        if not path.exists():
+            continue
+        with path.open("rb") as fh:
+            artifact = pickle.load(fh)
+        if list(artifact.get("features") or ()) != FEATURES:
+            stale.append(path.name)
+            continue
+        out[subject] = artifact
+    if stale:
+        _log.warning("ignoring %d ETA artifact(s) fitted on a different feature "
+                     "list (%s); retrain to serve an arrival ETA again",
+                     len(stale), ", ".join(stale))
     return out
 
 

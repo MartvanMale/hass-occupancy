@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
 # Build the Ingress panel into <tree>/panel/dist.
 #
-# The panel is a React app and Vite compiles it, but NOT on the Home Assistant
-# box. Every third-party add-on installed there reports `build=False`: Supervisor
-# pulls an image somebody else already built. Zigbee2MQTT and Music Assistant
-# both ship substantial frontends and neither is compiled on the user's
-# hardware -- they are bundled in CI and baked into a published image, and Home
-# Assistant's own frontend goes further and ships as a PyPI package containing
-# compiled JS. A multi-stage node Dockerfile is ordinary in CI and odd on a
-# target box, so this repo's stand-in for CI is the deploy scripts, and this is
-# the step they run first. The add-on's Dockerfile only COPYs the result.
+# The panel is a React app and Vite compiles it, but never on the Home Assistant
+# box, and the result is committed. DEVELOPMENT.md ("The panel") is the one place
+# that argument is written out. This repo's stand-in for CI is the deploy
+# scripts, and this is the step they run first; the Dockerfile only COPYs it.
 #
-# The result is also COMMITTED, which is the other half of the same argument: an
-# add-on installed from this repository's URL is a git clone and nothing more, so
-# a bundle that exists only on this machine is an add-on nobody else can install.
-# That is why this script finishes by stamping dist/ with a hash of its inputs --
-# see scripts/panel-source-hash.sh.
+# The script finishes by stamping dist/ with a hash of its inputs, so a stale
+# bundle can be detected later -- see scripts/panel-source-hash.sh.
 #
 # In a container rather than a local node, for the same reason scripts/test.sh
 # runs pytest in one: the toolchain is pinned by package-lock.json and nothing

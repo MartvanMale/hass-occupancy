@@ -1,11 +1,11 @@
 # The stable build. This file, DOCS.md and CHANGELOG.md are hand-written; every
-# other file in this directory is GENERATED from ../occupancy-forecast-edge by
-# scripts/promote.sh. Do not edit those copies here -- edit the originals under
-# occupancy-forecast-edge/, and an edit made here is destroyed by the next promotion.
+# other file here is GENERATED from ../occupancy-forecast-edge by promote.sh, and
+# an edit to one of those is destroyed by the next promotion. Edit the originals.
 #
-# `version` is bumped only by a promotion, and a promotion is Mart's decision.
+# `version` moves only on a promotion -- that bump is what offers the update to
+# everyone installed from this repository.
 name: Occupancy Forecast
-version: "0.1.1"
+version: "0.2.0"
 slug: occupancy_forecast
 description: >-
   Forecasts who will be home, hour by hour, for the next two days -- and how
@@ -36,12 +36,14 @@ panel_title: Occupancy
 services:
   - mqtt:want
 
-# Read-only access to Home Assistant's own API, for history and current states.
+# Reads history, states and config. Not read-only: it also calls exactly one
+# service, persistent_notification create/dismiss, for its own progress notice.
 homeassistant_api: true
 
 options:
   log_level: info
   source: store
+  admin_users: []
   influx_url: ""
   influx_org: ""
   influx_bucket: homeassistant
@@ -52,6 +54,11 @@ schema:
   # `influx` is for installs that already archive HA and would otherwise throw
   # months of history away and start again from ten days.
   source: list(store|influx)
+  # HA user ids allowed to POST (save config, train, reload). EMPTY MEANS
+  # EVERYONE: ingress proves who the caller is, not whether they may retrain
+  # the house.
+  admin_users:
+    - str
   influx_url: str?
   influx_org: str?
   influx_bucket: str?

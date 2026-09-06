@@ -1,0 +1,146 @@
+# AppArmor profile for the Occupancy Forecast add-on. Reads the world, writes
+# only to /data, /tmp and /run. Also takes Supervisor's security rating to its
+# cap of 8, which is a side effect and not the point.
+#
+# The profile name below is a PLACEHOLDER. Supervisor's adjust_profile() rewrites
+# it to the add-on's INSTALLED slug before loading, which is what lets one file
+# serve both add-ons from one tree -- a hardcoded name would be wrong for at
+# least one of them. The one hard requirement: exactly ONE line matching
+# `^profile `, or get_profile_name() raises.
+#
+# A profile reloads on install and update, NEVER on rebuild -- App.rebuild() does
+# not call install_apparmor(). So `ha addons rebuild` ships new code under the old
+# profile, silently. scripts/deploy-edge.sh routes through `ha addons update` for
+# this reason; route round it and this file stops tracking the tree.
+#
+# THIS PROFILE ENFORCES. A rule that is wrong here does not degrade the add-on,
+# it stops it -- on every installation, not just this one. That is the accepted
+# trade: an add-on that refuses to start is a better outcome than one that can
+# write outside its own data directory on somebody else's Home Assistant.
+#
+# It was developed in `complain` mode, which logs what the profile WOULD have
+# blocked and then allows it, and that is the only honest way to change it.
+# Before touching a rule below, put `complain` back in the flags, deploy,
+# exercise the add-on properly -- a cold start, a collect, a predict and a full
+# `POST /train`, because startup exercises almost none of the write rules -- and
+# then on the HA box:
+#
+#     ha host logs | grep 'apparmor=' | grep local_occupancy_forecast_edge
+#
+# Read the PROFILE NAME in those records before the paths. A subject of
+# `local_occupancy_forecast_edge` is this profile talking. A subject containing
+# `//null-` is not: that is AppArmor's learning profile, which it substitutes
+# when an exec has no matching rule, and it denies everything, so the paths it
+# names tell you nothing except which exec fell through. That distinction is not
+# academic -- it is exactly what the enumerated exec list above got wrong, and
+# `0` records under the bare name looked like success while nothing had ever run
+# under these rules at all.
+#
+# The bar for dropping `complain` again is zero records under the bare profile
+# name after that full exercise. It was met before this flag came off.
+#
+# If enforcing ever does break startup: add `complain` back and deploy. Do NOT
+# uninstall to recover -- App.uninstall() calls unload(), which removes /data,
+# and /data is the history archive and the models.
+
+#include <tunables/global>
+
+profile occupancy_forecast flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # The add-on talks to Supervisor (history, states, config, the Core
+  # websocket), to the MQTT broker, and optionally to InfluxDB.
+  # abstractions/base does not grant this on its own.
+  network,
+
+  # Docker's default capability set already grants these; AppArmor has to agree
+  # separately. setuid/setgid are for the s6-setuidgid drop in run.sh, and
+  # chown/fowner/fsetid/dac_override are for the `chown -R` that hands /data to
+  # the unprivileged user before that drop.
+  capability setuid,
+  capability setgid,
+  capability chown,
+  capability fowner,
+  capability fsetid,
+  capability dac_override,
+  capability kill,
+
+  # s6 supervises; it signals its children.
+  signal (send,receive),
+
+  # Read anything. The confinement here is about writes and execution, not
+  # about hiding the filesystem from a process that already ships with the
+  # image it is reading.
+  /** r,
+
+  # Execute anything in the image, inheriting this profile (ix) rather than
+  # transitioning out of it. NOT Ux or Px: nothing escapes to unconfined.
+  #
+  # This used to enumerate the interpreters -- /init, /bin/**, /usr/bin/**,
+  # /command/**, /package/**, /opt/venv/bin/**, /run.sh -- and the enumeration
+  # was wrong. The first exec after the profile attaches is
+  # `/run/s6/basedir/bin/init`, a path s6-overlay materialises at RUNTIME and
+  # which that list did not cover, so AppArmor put the process in a `//null-`
+  # learning profile that denies everything, and every exec after it nested
+  # another one. Complain mode caught it: nothing had ever run under the real
+  # rules, and enforcing would have refused that first exec and left the add-on
+  # dead at startup on every installation.
+  #
+  # Enumerating cannot be made safe here. The rest of the chain is
+  # /package/admin/s6-linux-init-1.2.0.1, /package/admin/execline-2.9.9.0,
+  # /package/admin/s6-2.15.0.0 -- version numbers baked into the Home Assistant
+  # base image, so every base bump is another chance to ship a profile that
+  # stops somebody's add-on from starting. That failure mode is worth more than
+  # the enumeration was: `ix` keeps every child inside this profile, the process
+  # can already read /** and cannot write outside /data, /tmp and /run, so all
+  # it can exec is what shipped in the image -- which Python could invoke
+  # anyway. The teeth of this profile are the write rules below.
+  /** ix,
+
+  # Write only where this add-on owns state. /data is the archive, the parquet
+  # and the models; /tmp is HOME and MPLCONFIGDIR (see the Dockerfile); /run is
+  # s6's scratch space.
+  #
+  # `l` IS LOAD-BEARING AND ITS ABSENCE IS SILENT. Without it these were `rwk`,
+  # and training ran 3.4x slower -- 565s against 166s -- with one warning:
+  #
+  #     UserWarning: joblib backend 'loky' is not available on your system,
+  #     falling back to threading.
+  #
+  # glibc's sem_open() creates a POSIX semaphore by writing a temporary file and
+  # then hard-LINKING it into place, so `multiprocessing.Semaphore` raises
+  # PermissionError without `l`, joblib concludes the machine cannot do process
+  # parallelism, and every fit that should have been fanned out runs threaded
+  # instead. Nothing failed. The add-on started, trained, published, and reported
+  # no error.
+  #
+  # And the kernel logged NOTHING: `ha host logs` shows no DENIED record for a
+  # refused link, which is why a clean audit log is necessary but not sufficient
+  # evidence here. What caught it was the train time. Compare that number after
+  # touching these rules -- `training finished in Ns` in the add-on log -- and do
+  # not trust silence.
+  /data/** rwkl,
+  /tmp/** rwkl,
+  /run/** rwkl,
+  /var/run/** rwkl,
+  /dev/null rw,
+  /dev/zero rw,
+  /dev/full rw,
+  /dev/random rw,
+  /dev/urandom rw,
+  /dev/tty rw,
+  /dev/shm/** rwkl,
+
+  # And nowhere else. The image is the deployment artifact: anything that wants
+  # to modify it at runtime is either a bug or an intruder. PYTHONDONTWRITE-
+  # BYTECODE=1 in the Dockerfile is what keeps CPython from tripping the /app
+  # and /opt rules with .pyc files.
+  deny /etc/** w,
+  deny /usr/** w,
+  deny /bin/** w,
+  deny /sbin/** w,
+  deny /lib/** w,
+  deny /opt/** w,
+  deny /app/** w,
+  deny /root/** rw,
+}

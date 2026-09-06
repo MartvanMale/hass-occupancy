@@ -107,11 +107,10 @@ def label_out_days(table: pd.DataFrame, days: pd.DataFrame) -> pd.DataFrame:
     # two halves of a day cannot drift apart. Same-day only: a return after
     # midnight yields no hour rather than wrapping to 00:30, which is exactly
     # what one Sunday in the first artifact did.
-    per_hour = 60 // config.GRID_MINUTES
+    per_hour = features.slots_per_hour()
     keyed = keyed.assign(_in=present)
     local_all = keyed["time"].dt.tz_convert(config.tzinfo())
-    keyed = keyed.assign(
-        _slot=local_all.dt.hour * per_hour + local_all.dt.minute // config.GRID_MINUTES)
+    keyed = keyed.assign(_slot=features.slot_of_day(local_all))
 
     returns = []
     for (subject, date), day in keyed.groupby(["subject", "_date"], sort=False):
@@ -202,9 +201,8 @@ def feature_columns() -> list[str]:
 def feature_frame(days: pd.DataFrame) -> pd.DataFrame:
     """Labelled days plus the features, one row per person-day."""
     days = _partner(_causal(days))
-    dates = pd.DatetimeIndex(days["date"])
-    days["is_weekend"] = (days["dow"] >= 5).astype(float)
-    days["is_holiday"] = departure._holiday_flags(dates)
+    days["is_weekend"] = features.is_weekend(days["dow"])
+    days["is_holiday"] = features.holiday_flags(pd.DatetimeIndex(days["date"]))
     return days
 
 
@@ -507,6 +505,15 @@ def at_hour(at: pd.Timestamp, hour: float | None) -> str | None:
     """
     if hour is None:
         return None
-    local = at.tz_convert(config.tzinfo())
-    midnight = local.normalize()
-    return (midnight + pd.Timedelta(minutes=round(hour * 60))).isoformat()
+    tz = config.tzinfo()
+    local = at.tz_convert(tz)
+    # WALL-CLOCK arithmetic, then localise. `midnight + Timedelta` is absolute
+    # arithmetic on a tz-aware stamp, so on the spring-forward day 8.0 rendered
+    # as 09:00 and on the fall-back day as 07:00 -- an hour wrong on exactly two
+    # days a year, on the three sensors an automation would act on. Build the
+    # naive local time first and let the zone say what instant it is.
+    minutes = int(round(hour * 60))
+    wall = (pd.Timestamp(local.date()) + pd.Timedelta(minutes=minutes))
+    # A time inside the skipped hour lands on the far side of it; a time inside
+    # the repeated hour takes its first occurrence.
+    return wall.tz_localize(tz, ambiguous=True, nonexistent="shift_forward").isoformat()

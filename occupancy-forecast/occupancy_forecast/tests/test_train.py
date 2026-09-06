@@ -5,8 +5,8 @@ cannot drift from the feature list. The signal is planted, so the assertions are
 not tautological: the model is asked to recover something we put there.
 
 Runnable two ways:
-    pytest app/tests/test_train.py
-    python3 app/tests/test_train.py
+    pytest occupancy_forecast/tests/test_train.py
+    python3 occupancy_forecast/tests/test_train.py
 """
 
 import json
@@ -382,6 +382,95 @@ def test_every_horizon_gets_a_verdict_from_one_model(tmp_path):
         assert isinstance(m["ships"], bool)
         # Either a family won it, or nothing is published and none may claim it.
         assert (m["kind"] in ("dedicated", "pooled")) == m["ships"]
+
+
+def test_a_dedicated_artifact_from_an_earlier_train_does_not_survive_a_failed_horizon(
+        tmp_path, monkeypatch):
+    """Workers write a dedicated pickle only on success and the write phase
+    used to skip a missing file and never delete a present one -- so a horizon
+    that failed THIS train kept last train's model and last train's verdict,
+    passed the version check, and was served while metrics.json said it had no
+    candidate."""
+    path = _fitted()["path"]
+    failing = TEST_HORIZONS[0]
+    stale = tmp_path / train.DEDICATED_NAME.format(horizon=failing)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with stale.open("wb") as fh:
+        pickle.dump({"model": object(), "version": train.MODEL_VERSION, "kind": "dedicated",
+                     "metrics": {failing: {"ships": True, "kind": "dedicated"}},
+                     "features": []}, fh)
+
+    real = train.train_dedicated
+
+    def flaky(path_, horizon, windows):
+        if horizon == failing:
+            raise RuntimeError("simulated: this horizon did not fit")
+        return real(path_, horizon, windows)
+    monkeypatch.setattr(train, "train_dedicated", flaky)
+
+    summary = train.train_all(path, tmp_path, horizons=TEST_HORIZONS, n_jobs=1)
+    assert not stale.exists(), "last train's pickle for the failed horizon is gone"
+    assert f"{failing}h dedicated" in train.last_summary(tmp_path)["failed"]
+    # The others were written by this run and rewritten with their verdicts.
+    for horizon in TEST_HORIZONS[1:]:
+        assert (tmp_path / train.DEDICATED_NAME.format(horizon=horizon)).exists()
+        assert str(horizon) in summary
+
+
+def test_the_served_extras_are_nan_allowed_for_the_dedicated_family_too(monkeypatch):
+    """The pooled side's bug, one family over: `features_for` names the
+    served extras, `nan_allowed_for` did not, so `load_for` REQUIRED them and
+    dropped the dedicated arm's warm-up rows -- a comparison of two different
+    row sets, hidden because `SHIPPED_EXTRAS` has been empty."""
+    horizon = HORIZON
+    baseline_required = {c for c in train.features_for(horizon)
+                         if c not in train.nan_allowed_for(horizon)}
+    monkeypatch.setattr(features, "SHIPPED_EXTRAS", ("wclim_wide", "wclim_slope"))
+    with_extras = {c for c in train.features_for(horizon)
+                   if c not in train.nan_allowed_for(horizon)}
+    assert with_extras == baseline_required, \
+        f"an extra became required: {sorted(with_extras - baseline_required)}"
+    assert set(features.extra_target_columns(horizon)) <= train.nan_allowed_for(horizon)
+
+
+def test_an_empty_fold_is_not_a_lost_fold():
+    """`_scores_by_fold` pads an empty fold with NaN to keep the positional walk
+    aligned; the sign test and the fold record used to count that padding as
+    a trial the model lost. Three of four is p=0.625, three of three p=0.25."""
+    rungs = {"persistence": {"brier": 0.25,
+                             "per_fold": [{"brier": 0.25}] * 4}}
+    scored = pd.DataFrame({
+        "subject": ["alice"] * 30,
+        "time": pd.date_range("2026-01-01", periods=30, freq="30min", tz="UTC"),
+        "fold": [0] * 10 + [1] * 10 + [2] * 10,            # fold 3 never scored
+        f"y_{HORIZON}h": ([1.0, 0.0] * 15),
+        "p": ([0.9, 0.1] * 15),
+    })
+    wide = pd.DataFrame({f"y_{HORIZON}h": [1.0, 0.0] * 15,
+                         train.RESIDUAL_BASE: [0.9, 0.1] * 15})
+    metrics = train._candidate(HORIZON, "dedicated", scored, f"y_{HORIZON}h",
+                               4, 30, rungs, wide)
+    assert len(metrics.per_fold) == 4, "the padded entry is still there for the walk"
+    assert metrics.n_folds == 3, "but only the scored folds are trials"
+    assert metrics.folds_beating_best_baseline == 3
+    assert metrics.sign_test_p == pytest.approx(evaluate.sign_test(3, 3))
+
+
+def test_the_ladder_is_scored_on_the_rows_the_model_is_scored_on():
+    """`baseline.run` dropped on the target alone; the model drops any row
+    missing a required origin feature. Passing `required` makes the two
+    denominators the same."""
+    wide, windows = _fitted()["wide"], _fitted()["windows"]
+    holed = wide.copy()
+    holed.loc[holed.index[::7], "coverage"] = np.nan     # coverage is required
+    whole = baseline.run(holed, HORIZON, windows=windows)
+    same_rows = baseline.run(holed, HORIZON, windows=windows,
+                             required=train.required_origin_columns())
+    assert "coverage" in train.required_origin_columns()
+    assert same_rows["persistence"]["n"] < whole["persistence"]["n"]
+    assert same_rows["persistence"]["n"] == int(
+        holed.dropna(subset=[f"y_{HORIZON}h", *train.required_origin_columns()])
+        .pipe(lambda f: sum(((f["time"] >= s) & (f["time"] < e)).sum() for s, e in windows)))
 
 
 def test_a_stale_artifact_is_refused_rather_than_unpickled(tmp_path):
