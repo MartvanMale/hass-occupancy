@@ -8,8 +8,8 @@ direct descendants of that bug: they exist because the per-person zone columns
 are keyed on a friendly name, and a rename has to be loud.
 
 Runnable two ways:
-    pytest occupancy_forecast/tests/test_features.py
-    python3 occupancy_forecast/tests/test_features.py
+    pytest app/tests/test_features.py
+    python3 app/tests/test_features.py
 """
 
 import sys
@@ -318,23 +318,6 @@ def test_a_shorter_window_is_the_same_arithmetic():
 # ---------------------------------------------------------------------------
 # Cyclical encodings
 # ---------------------------------------------------------------------------
-
-def test_the_calendar_helpers_are_the_one_spelling_of_the_calendar():
-    """`slot_of_day`, `is_weekend` and `holiday_flags` replaced six copies of
-    the slot arithmetic and two `_holiday_flags` with different exception
-    handling. Pinned on both input shapes callers use."""
-    times = pd.Series(pd.date_range("2026-04-25T06:00", periods=5, freq="30min",
-                                    tz=config.TIMEZONE))            # a Saturday
-    assert list(features.slot_of_day(times)) == [12, 13, 14, 15, 16]
-    assert list(features.is_weekend(times.dt.dayofweek)) == [1.0] * 5
-    assert list(features.is_weekend([0, 4, 5, 6])) == [0.0, 0.0, 1.0, 1.0]
-
-    # Koningsdag 2026 is Monday 27 April; the fixture's calendar is NL.
-    days = pd.DatetimeIndex(["2026-04-27", "2026-04-28"], tz=config.TIMEZONE)
-    assert list(features.holiday_flags(days)) == [1.0, 0.0]
-    assert list(features.holiday_flags(pd.Series(days))) == [1.0, 0.0]
-    assert list(features.holiday_flags(pd.DatetimeIndex([]))) == []
-
 
 def test_midnight_wraps():
     """23:30 and 00:00 must be neighbours, which a raw hour column cannot say."""

@@ -522,32 +522,25 @@ export interface ReliabilityBin {
   observed: number
 }
 
-/** The scalars, for the list. Everything bulky arrives with the detail.
- *
- *  Every float is nullable, for the same reason `FoldScore`'s are: the server
- *  writes `metrics.json` with NaN where a score is undefined -- no baseline
- *  rung ran, a fold had one class -- and `explore._json_safe` turns each of
- *  those into null at the API boundary rather than letting FastAPI refuse the
- *  whole response. A field missing from an older artifact arrives as null too.
- *  Counts and the horizon are always written. */
+/** The scalars, for the list. Everything bulky arrives with the detail. */
 export interface HorizonMetrics {
   horizon_h: number
-  brier: number | null
-  log_loss: number | null
-  auc: number | null
-  mae_frac: number | null
-  base_rate: number | null
+  brier: number
+  log_loss: number
+  auc: number
+  mae_frac: number
+  base_rate: number
   n_folds: number
   n_scored: number
   n_train_final: number
   best_baseline: string
-  best_baseline_brier: number | null
-  skill_vs_best_baseline_pct: number | null
+  best_baseline_brier: number
+  skill_vs_best_baseline_pct: number
   folds_beating_best_baseline: number
-  sign_test_p: number | null
+  sign_test_p: number
   ships: boolean
-  brier_fold_min: number | null
-  brier_fold_max: number | null
+  brier_fold_min: number
+  brier_fold_max: number
   /** Which family won this horizon, or null when a baseline did. */
   kind: ModelKind | null
   /** The losing family's Brier and name, so the crossover between the two is

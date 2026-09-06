@@ -4,7 +4,7 @@ import type {
 import { Chip } from '../../components/Chip'
 import { Row } from '../../components/Row'
 import { TimeSeries, type Point } from '../../components/TimeSeries'
-import { absoluteTime, bytes, count, relativeTime, share } from '../../format'
+import { absoluteTime, relativeTime } from '../../format'
 
 /**
  * The feature table, in the only three ways it can usefully be looked at.
@@ -19,6 +19,20 @@ import { absoluteTime, bytes, count, relativeTime, share } from '../../format'
  * candidate families landed and 1,230 after -- and a literal in this file is a
  * number that goes quietly wrong on somebody else's commit.
  */
+
+const count = (n: number) => n.toLocaleString()
+
+const bytes = (n: number) => {
+  if (n < 1024) return `${n} B`
+  const units = ['kB', 'MB', 'GB']
+  let value = n / 1024
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) { value /= 1024; i += 1 }
+  return `${value.toFixed(1)} ${units[i]}`
+}
+
+const percent = (frac: number | null) =>
+  frac === null ? 'unknown' : `${(frac * 100).toFixed(frac > 0 && frac < 0.01 ? 2 : 0)}%`
 
 export function FeatureTableCard({ inventory }: { inventory: FeatureInventory | null }) {
   if (!inventory) return <p className="empty">Loading…</p>
@@ -75,7 +89,7 @@ function FamilyRow({ family: f, max }: { family: FeatureFamily; max: number }) {
     <div className={`famrow${none ? ' off' : ''}`}>
       <div>
         <b>{f.family.replace(/_/g, ' ')}</b>
-        <span>{f.words}. {share(f.null_frac)} missing.</span>
+        <span>{f.words}. {percent(f.null_frac)} missing.</span>
       </div>
       <div className="amt">
         <em className="num">{count(f.columns)}</em>

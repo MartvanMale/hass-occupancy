@@ -324,34 +324,14 @@ def features_for(horizon: int) -> list[str]:
 
 
 def nan_allowed_for(horizon: int) -> set[str]:
-    """Everything target-relative for one horizon. The dedicated family's.
-
-    Includes the served extras, for the reason `nan_allowed()` spells out: a
-    candidate that IS being served is as target-relative as the rest and NaN
-    through its own warm-up. This set used to omit them, so the moment
-    `SHIPPED_EXTRAS` named one, `load_for` REQUIRED it and dropped the
-    dedicated arm's warm-up rows -- the pooled side's bug, one family over,
-    latent only because the switch has been empty.
-    """
+    """Everything target-relative for one horizon. The dedicated family's."""
     return {
         *may_be_nan(),
-        *features.extra_target_columns(horizon),
         *(f"tgt{horizon}h_lag{days}d" for days in features.safe_daily_lags(horizon)),
         *features.cross_subject_lag_columns(horizon),
         features.climatology_column(horizon),
         features.slot_climatology_column(horizon),
     }
-
-
-def required_origin_columns() -> list[str]:
-    """The origin columns a row must carry to be fitted at all.
-
-    One set for both families AND for the baseline ladder. The ladder used to
-    drop on the target alone, so it was scored on a superset of the rows the
-    model was scored on -- every low-coverage slot the model never saw -- and
-    the gate compared two means over two denominators.
-    """
-    return [c for c in origin_features() if c not in may_be_nan()]
 
 
 def columns_for(horizon: int) -> list[str]:
@@ -704,22 +684,15 @@ def _candidate(horizon: int, kind: str, scored: pd.DataFrame, target: str,
         1 for i, score in enumerate(fold_scores)
         if not np.isnan(score.brier)
         and score.brier < best.get("per_fold", [{}] * len(fold_scores))[i].get("brier", np.inf))
-    # Trials are the folds the model actually SCORED. `_scores_by_fold` pads an
-    # empty fold with NaN so the positional walk above stays aligned, but a
-    # padded fold is not a fold the model lost: counting it as one biased the
-    # sign test and the fold record toward refusal exactly where history is
-    # thinnest -- three wins of four "trials" is p=0.625 where three of three is
-    # p=0.25.
-    trials = sum(1 for score in fold_scores if not np.isnan(score.brier))
-    p_value = evaluate.sign_test(beat, trials)
+    p_value = evaluate.sign_test(beat, len(fold_scores))
 
     # Ship only where the model earns its place: a real effect, and a fold
     # record that has not been shown to be worse than a coin flip.
     ships = bool(
         pooled["brier"] < best["brier"]
-        and fold_record_allows(beat, trials)
+        and fold_record_allows(beat, len(fold_scores))
         and 100.0 * (1.0 - pooled["brier"] / best["brier"])
-        >= min_ship_skill_pct(trials)
+        >= min_ship_skill_pct(len(fold_scores))
     )
 
     # How the ladder's winner was calibrated: which column it reads and the
@@ -758,9 +731,7 @@ def _candidate(horizon: int, kind: str, scored: pd.DataFrame, target: str,
         evaluation=EVALUATION,
         kind=kind,
         brier_by_subject=by_subject,
-        # Scored folds, so "won 3 of 3" is what the sign test saw; `per_fold`
-        # still carries one entry per window, padded, for the positional walk.
-        n_folds=trials,
+        n_folds=n_folds,
         n_scored=pooled["n"],
         n_train_final=n_train,
         base_rate=pooled["base_rate"],
@@ -873,8 +844,7 @@ def _one_ladder(frame: pd.DataFrame, horizon: int, geometry: dict, windows: list
     if settings is not None:
         config.configure(settings)
     started = time.perf_counter()
-    rungs = baseline.run(frame, horizon, geometry=geometry, windows=windows,
-                         required=required_origin_columns())
+    rungs = baseline.run(frame, horizon, geometry=geometry, windows=windows)
     return horizon, rungs, time.perf_counter() - started
 
 
@@ -1227,9 +1197,8 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
             *(delayed(_dedicated_and_save)(path, h, windows, models_dir,
                                            settings, extras)
               for h in horizons),
-            *(delayed(_one_ladder)(
-                wide[sorted({*baseline.columns_for(h), *required_origin_columns()})],
-                h, geometry, windows, settings)
+            *(delayed(_one_ladder)(wide[baseline.columns_for(h)], h, geometry,
+                                   windows, settings)
               for h in horizons),
         ])
     results, ladders = answers[:len(horizons)], answers[len(horizons):]
@@ -1270,26 +1239,18 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
     # happened to load, which is a silent inconsistency rather than an error.
     #
     # The workers wrote the dedicated pickles with empty metrics before the gate
-    # had spoken; they are rewritten here -- but only the ones THIS run wrote.
-    # A dedicated file for a horizon that failed this time is last run's model
-    # under last run's verdict, and it passes the version check: left on disk
-    # it would be served, while metrics.json said the horizon had no candidate.
+    # had spoken; they are rewritten here.
     with phases("write"):
         if pooled_scored is not None:
             save(estimator, chosen, models_dir, POOLED_NAME,
                  base_features(), kind="pooled")
-        for horizon in horizons:
+        for horizon, winner in chosen.items():
             name = DEDICATED_NAME.format(horizon=horizon)
-            path_h = models_dir / name
-            if horizon not in dedicated or horizon not in chosen:
-                if path_h.exists():
-                    path_h.unlink()
-                    _log.warning("+%sh dedicated: removed a stale artifact from an "
-                                 "earlier train; this run produced none", horizon)
+            if not (models_dir / name).exists():
                 continue
-            with path_h.open("rb") as fh:
+            with (models_dir / name).open("rb") as fh:
                 artifact = pickle.load(fh)
-            save(artifact["model"], {horizon: chosen[horizon]}, models_dir, name,
+            save(artifact["model"], {horizon: winner}, models_dir, name,
                  artifact["features"], kind="dedicated")
 
     _log.info("train_all: %s", phases.line())

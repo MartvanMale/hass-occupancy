@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Deploy the edge add-on to the Home Assistant box and rebuild it.
 #
-# Edge is a LOCAL add-on -- it lives in `ha:/addons/occupancy_forecast_edge/` and
-# Supervisor builds it from that directory. It is not installed from GitHub, so
+# These are LOCAL add-ons -- they live in `ha:/addons/<slug>/` and Supervisor
+# builds them from that directory. They are not installed from GitHub, so
 # deploying is a file copy plus a rebuild: no version bump needed, no push
-# needed, nothing published. That is why the edge loop can be this short.
+# needed, nothing published. `ha addons rebuild` rebuilds unconditionally,
+# which is why the edge loop can be this short.
 #
-# Run it as often as you like. It only ever touches occupancy_forecast_edge.
-# Stable is not deployed by any script: it installs from this repository's URL,
-# so a version bump and a push are its trigger. See DEVELOPMENT.md.
+# (An add-on installed from a repository URL updates only when config.yaml's
+# `version:` changes. If this repo is ever published and installed that way,
+# that becomes the trigger instead and this script stops being the whole story.)
+#
+# Run it as often as you like. It only ever touches occupancy_forecast_edge; the
+# stable add-on is deployed by deploy-stable.sh and by nothing else.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,37 +33,17 @@ SLUG=local_occupancy_forecast_edge
 scripts/build-panel.sh occupancy-forecast-edge
 
 sha=$(git rev-parse --short HEAD)
+dirty=""
+if [[ -n "$(git status --porcelain occupancy-forecast-edge/)" ]]; then
+    dirty=".dirty"
+    echo "note: deploying uncommitted changes; version will be marked .dirty"
+fi
 
 stamped=$(mktemp -d)
 trap 'rm -rf "$stamped"' EXIT
 # rsync, not `cp -a`: node_modules is 60-odd MB of toolchain that has no
 # business being staged, let alone stamped and diffed.
 rsync -a --exclude 'node_modules' occupancy-forecast-edge/ "$stamped/"
-
-# The dirty marker carries a hash of the staged tree, not the bare word
-# ".dirty". Two different uncommitted trees at the same commit used to stamp
-# the SAME version string, and the update/rebuild branch below keys off exactly
-# that string: identical version means `update_available: false` means
-# `ha addons rebuild`. Rebuild is fine for code -- but Supervisor reloads the
-# AppArmor profile from install_apparmor(), which App.install() and App.update()
-# call and App.rebuild() does not. So an edit to apparmor.txt on a tree that was
-# already dirty at this commit deployed the new file and kept enforcing the old
-# profile, with nothing anywhere saying so. Hashing the tree makes every
-# distinct deploy a distinct version, which puts it back on the update path.
-#
-# Hashed before the stamp is written, so the hash is of the source and not of
-# itself.
-dirty=""
-if [[ -n "$(git status --porcelain occupancy-forecast-edge/)" ]]; then
-    # Relative paths, from inside the staging directory: `find "$stamped"` puts
-    # mktemp's random directory name into every line of sha1sum's output, so the
-    # hash would change on every run and the point -- a stable identity for an
-    # unchanged tree -- would be lost.
-    dirty=".dirty$( (cd "$stamped" && find . -type f -print0 | sort -z \
-                     | xargs -0 sha1sum) | sha1sum | cut -c1-7)"
-    echo "note: deploying uncommitted changes; version will be marked ${dirty#.}"
-fi
-
 sed -i -E "s/^version: \"([^\"]+)\"/version: \"\1.${sha}${dirty}\"/" "$stamped/config.yaml"
 grep '^version:' "$stamped/config.yaml"
 
@@ -80,13 +64,6 @@ rsync -a --delete \
 # while running the new code -- which defeats the point of stamping it. An update
 # does both. It is only offered when the version actually changed, so fall back
 # to a rebuild for the case where nothing moved (a redeploy of the same commit).
-#
-# The second reason, and the one with teeth: `update` reloads apparmor.txt and
-# `rebuild` does not. Supervisor calls install_apparmor() from App.install() and
-# App.update() only. The version stamp above now hashes a dirty tree, so any real
-# edit lands on the update path -- but the rebuild branch survives for the
-# redeploy-the-same-thing case, and it says out loud that the profile is
-# whatever was loaded last.
 #
 # And `install` first, for a box that has never seen this add-on -- which is the
 # case on a fresh machine and, less obviously, the first deploy after the slug
@@ -109,7 +86,6 @@ ssh "$HOST" "
         ha addons update $SLUG
     else
         ha addons rebuild $SLUG
-        echo 'note: rebuilt, not updated -- the AppArmor profile was NOT reloaded'
     fi
 "
 

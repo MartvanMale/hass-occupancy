@@ -16,11 +16,7 @@ import { relativeTime } from '../../format'
  * happens. Nothing new is computed to draw any of it.
  */
 
-/** Every score can be null -- see `HorizonMetrics` -- and a null rendered as
- *  a dash is a card that loads, where a `.toFixed` on null was a Data tab that
- *  did not. */
-const num = (n: number | null, digits = 3) => (n === null ? '—' : n.toFixed(digits))
-const pct = (n: number | null) => (n === null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`)
+const pct = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`
 
 /**
  * How the shipping horizons divide between the two families.
@@ -91,9 +87,9 @@ export function QualityCard({ metrics, current, onPick }: {
             {metrics.horizons.map((h) => (
               <tr key={h.horizon_h} className={h.ships ? '' : 'off'}>
                 <td className="num">+{h.horizon_h} h</td>
-                <td className="num">{num(h.brier)}</td>
+                <td className="num">{h.brier.toFixed(3)}</td>
                 <td className="num" title={h.best_baseline}>
-                  {num(h.best_baseline_brier)}
+                  {h.best_baseline_brier.toFixed(3)}
                 </td>
                 <td className="num">{pct(h.skill_vs_best_baseline_pct)}</td>
                 <td className="num">
@@ -105,7 +101,7 @@ export function QualityCard({ metrics, current, onPick }: {
                   {h.ships ? `model (${h.kind ?? '?'})` : '—'}
                 </td>
                 <td className="num" title={h.rival_kind ?? undefined}>
-                  {num(h.rival_brier)}
+                  {h.rival_brier === null ? '—' : h.rival_brier.toFixed(3)}
                 </td>
               </tr>
             ))}
@@ -152,12 +148,12 @@ export function HorizonQualityCard({ detail }: { detail: MetricsDetail | null })
           ? `The ${detail.kind ?? ''} model serves +${detail.horizon_h} h`.replace('  ', ' ')
           : `Nothing is published for +${detail.horizon_h} h`}
         secondary={detail.ships
-          ? `Brier ${num(detail.brier)} against ${detail.best_baseline} at ${
-              num(detail.best_baseline_brier)} — ${pct(detail.skill_vs_best_baseline_pct)},
+          ? `Brier ${detail.brier.toFixed(3)} against ${detail.best_baseline} at ${
+              detail.best_baseline_brier.toFixed(3)} — ${pct(detail.skill_vs_best_baseline_pct)},
               winning ${detail.folds_beating_best_baseline} of ${detail.n_folds} folds
-              (sign test p=${num(detail.sign_test_p)}).${rivalClause(detail)}`
-          : `It scored ${num(detail.brier)} and ${detail.best_baseline} scored ${
-              num(detail.best_baseline_brier)}, so nothing is published for it.${
+              (sign test p=${detail.sign_test_p.toFixed(3)}).${rivalClause(detail)}`
+          : `It scored ${detail.brier.toFixed(3)} and ${detail.best_baseline} scored ${
+              detail.best_baseline_brier.toFixed(3)}, so nothing is published for it.${
               rivalClause(detail)}`}
         trailing={
           <Chip label={detail.ships ? 'model' : 'not served'}
@@ -190,7 +186,7 @@ export function HorizonQualityCard({ detail }: { detail: MetricsDetail | null })
             ))}
             <tr>
               <td>the model</td>
-              <td className="num">{num(detail.brier)}</td>
+              <td className="num">{detail.brier.toFixed(3)}</td>
             </tr>
           </tbody>
         </table>

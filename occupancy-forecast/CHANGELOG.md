@@ -3,7 +3,9 @@
 All notable changes to the Occupancy Forecast add-on are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and versions are [semantic](https://semver.org/spec/v2.0.0.html): `X.Y.Z`.
+and versions are [semantic](https://semver.org/spec/v2.0.0.html): `X.Y.Z`. There
+is no upstream project whose version this tracks — the add-on and the
+`occupancy_forecast` package are the same thing, released together.
 
 - **MAJOR** — something you have to act on: a renamed or removed MQTT topic,
   entity or `unique_id`; a removed or renamed option in `config.yaml`; a
@@ -12,204 +14,152 @@ and versions are [semantic](https://semver.org/spec/v2.0.0.html): `X.Y.Z`.
   new signal the forecast can use.
 - **PATCH** — fixes and internals, with no change to any surface above.
 
-## 0.2.0 - 2026-09-06
+`version:` in `config.yaml` moves only on a promotion, so every promotion adds a
+section here and nothing else does.
 
-### Added
-
-- An AppArmor profile confining the add-on's writes to its own data directory,
-  which also takes Supervisor's security rating to its cap of 8. It enforces
-  rather than warns: the add-on refuses to start if the profile is wrong, which
-  is the intended trade.
-- **`admin_users`** — the Home Assistant users allowed to change the
-  configuration or start a retrain. Ingress proved who the caller was and
-  nothing then decided whether they were allowed to retrain the house. Empty by
-  default, which is exactly how every existing install behaves today.
-- Supervisor now restarts the add-on if its worker gets stuck or it could not
-  reach Home Assistant at start-up. It used to report itself healthy in both
-  cases.
-- The device page in Home Assistant now shows the add-on's name, version and
-  support link.
-- The options on the Configuration tab have proper names and descriptions
-  instead of raw keys.
-- Edge is marked advanced and experimental, so it is only offered to users who
-  have switched advanced mode on.
-- README sections on what the add-on stores — and that it travels in your
-  backups — and on giving it a read-only, bucket-scoped InfluxDB token.
-
-### Changed
-
-- The add-on no longer runs as root.
-- `scripts/test.sh` now checks that the committed panel bundle was built from
-  the source beside it. Nothing on any path a person actually took verified that
-  pair before.
-- `scripts/deploy-edge.sh` stamps an uncommitted tree with a hash of its
-  contents, so two different edits can no longer deploy under the same version
-  string.
-- `scripts/deploy-stable.sh` is removed. It targeted a local stable add-on that
-  no longer exists, and created a directory on the box that collided with the
-  store-installed one before failing. Stable deploys by `git push`.
-- Internal tidying, with no change to any published surface: one shared spelling
-  of the slot-of-day calendar, one of the panel's number formatting, and one of
-  the run-length accumulator its charts use.
-- `departure.py` keeps its unshipped model half, now headed with what it
-  measured and why it did not ship, so the record travels with the code.
-- The Dockerfile copies the panel bundle before the Python, so ordinary code
-  edits no longer rebuild the panel layer.
-
-### Fixed
-
-- `config.yaml` described the add-on's Home Assistant access as read-only. It
-  never has been: the add-on creates and dismisses its own progress
-  notification.
-- The panel's per-horizon quality card failed to load for some horizons and
-  showed an error instead. A figure that does not exist for a horizon now shows
-  as a dash.
-- A configuration save that is rejected no longer changes anything. A save with
-  nobody ticked was refused, but had already emptied the list of people — so the
-  add-on collected nobody's history from the next cycle until it was restarted.
-- If Supervisor could not be asked which add-on this is at start-up — still
-  booting after a host restart, say — the edge build fell back to stable's
-  entity names and MQTT topics and kept them until it was restarted, which is
-  precisely the collision that fallback warns about. It now keeps retrying, and
-  publishes nothing until it knows.
-- The stall watchdog could not see a training run that had itself hung; a train
-  now has its own one-hour deadline. The status page also reports the MQTT
-  connection accurately, and a good cycle clears the error a bad one left
-  behind.
-- `out_departure`, `out_return` and `next_change_at` were an hour out on the two
-  clock-change days.
-- One of the two 02:xx observations on the autumn clock-change day was thrown
-  away rather than averaged.
-- Removing a person no longer breaks the forecasts until the next scheduled
-  train, which could be a week away. Changing the people or zones now starts a
-  retrain straight away, and a removed person's entities leave Home Assistant
-  instead of holding their last forecast forever.
-- The add-on asked Home Assistant for far more history than it needed on every
-  five-minute cycle — up to 400 days of it in the worst case. Each entity is now
-  asked only for the stretch it is actually missing.
-- A horizon could be served by a leftover model from an earlier training run
-  after the latest run had dropped it.
-- A model trained before a configuration change is now refused at load, with a
-  line saying to retrain, instead of failing silently on every cycle.
-- A latent bug in the dedicated model family that would have discarded its
-  warm-up rows as soon as a new published field was added.
-- The decision to serve a horizon is now a fair comparison. The model and its
-  baselines were scored on slightly different sets of rows, and a fold the model
-  could not score at all counted as a fold it lost.
-- The add-on no longer refuses to start when there is nothing to forecast yet —
-  no `person` entity, or Home Assistant unreachable. It starts idle with the
-  reason on the Setup tab, which is the page you need in order to fix it. Its
-  configuration file is also written safely, so a power cut cannot leave an
-  empty one behind.
-- The history archive is no longer read and written through one shared database
-  connection that was never closed.
-- The "still learning" notification came back within five minutes of being
-  dismissed, for as long as seven weeks. It is now sent only when something has
-  actually changed: once a day while collecting, once when training starts, and
-  dismissed once something ships.
-- A TLS-only MQTT broker works now. Supervisor says whether the broker wants
-  TLS and the add-on ignored it, connecting in plaintext.
-- In the panel, the dropdown no longer clears what you have typed every ten
-  seconds while it is open, and the "was it right?" and entity cards recover
-  from an error without a page reload.
-- A configuration change now takes effect on the live trigger subscription
-  instead of waiting for a restart.
-- A clean shutdown waits for the "offline" message to be sent, so the entities
-  cannot be left showing as available under stale values.
-- The training schedule is read on your household's clock rather than the
-  container's, and a timezone the add-on cannot use is logged once instead of
-  being quietly treated as UTC.
-- The status page's zone scan no longer starts a second scan on every poll that
-  lands during the first, and retries a failed one after a minute rather than a
-  quarter of an hour.
-- The explore endpoints clamp their day range consistently, and return a proper
-  404 for a horizon that does not exist.
-- A partially built panel no longer crashes start-up; it is skipped with a
-  warning.
-- Appending to the history archive no longer runs two full table scans per
-  insert.
-- Four API fields the panel reads were missing from the contract test.
+The Edge add-on keeps no release history. Its `CHANGELOG.md` is the queue of what
+has landed on edge and has not been promoted yet; `scripts/promote.sh` is the
+moment those entries move into this file under a version number.
 
 ## 0.1.1 - 2026-09-05
 
-### Added
-
-- A third household in the test data, which comes and goes far less tidily than
-  the two before it. Test-suite only; nothing the add-on does changes.
-- A build check that catches a stale Ingress panel before it can ship.
-
 ### Fixed
 
-- The add-on installed but would not start on a Raspberry Pi 4, dying
-  immediately with `Illegal instruction` and no other explanation. A dependency
-  shipped an ARM build that a Pi 4's processor cannot run; it is updated. (#1)
+- The add-on built and then died at startup on a Raspberry Pi 4, logging
+  `Illegal instruction (core dumped)` and no traceback. `pyarrow==21.0.0`'s
+  aarch64 wheel bundles mimalloc compiled with ARMv8.1 LSE atomics, inlined as
+  far as `mi_thread_init`, and a Pi 4's Cortex-A72 is ARMv8.0 — so the process
+  died while loading the library, before `faulthandler` could say anything. It
+  took `import pandas` and `import sklearn` with it, since pandas imports
+  pyarrow at import time, which is why the crash reached an add-on that only
+  touches parquet in `train.py` and `explore.py`. Pinned to `pyarrow==22.0.0`,
+  the first release carrying the upstream fix (apache/arrow#47766). Reported in
+  #1, with the disassembly and a QEMU `-cpu cortex-a72` reproduction that needs
+  no Pi.
 
-- Installing the add-on from the repository URL failed to build, with a Docker
-  error that named neither the cause nor the file. The Ingress panel's compiled
-  bundle was missing from the repository and is now included.
+- Installing the add-on from the repository URL failed to build. The Ingress
+  panel's compiled bundle was gitignored, so Supervisor's clone contained no
+  `panel/dist` and the image build died at the `COPY` with a Docker checksum
+  error that named neither the panel nor the cause. The bundle is now committed,
+  which is the only way an add-on that is built from a clone and compiles no
+  frontend on the box can have one.
+
+### Added
+
+- A third arm in the synthetic household, `irregular=True`: errands drawn from a
+  heavy tail with a clustering rate, multi-day trips taken by the whole
+  household at once, and a rota kept loosely. The two existing worlds are a
+  timetable — one departure a day, away exactly eight hours, home by midnight —
+  which is anti-correlated at half a day, so `persistence` carries no
+  information and the per-weekday lookup is unbeatable by construction. Measured
+  against a real 175-day archive, the timetable had 8 h autocorrelation of
+  −0.21 against the real +0.43, no absence longer than 11.5 h against a real
+  526 h, and a model trained on 400 days of it shipped **5 of 48 horizons**
+  where the same code on the real archive shipped 43. The new arm is additive
+  and draws from its own random stream, so `realistic=False` and
+  `realistic=True` are unchanged bit for bit and the leak detector still means
+  what it meant.
+
+- `scripts/check-panel.sh` and `scripts/panel-source-hash.sh`, and a stamp file
+  `panel/dist/.source-hash` written by `scripts/build-panel.sh`. A committed
+  artifact can be stale, and a stale panel is silent — it installs cleanly and
+  serves old code. `scripts/promote.sh` now rebuilds **both** add-ons' bundles,
+  edge's before the rsync and stable's after, so a promotion cannot carry a
+  stale one.
 
 ## 0.1.0 - 2026-09-05
 
-First release, so everything is listed as added.
+First release. Everything is under `### Added`: there is no earlier published
+version for anything to be a change to, and describing the add-on as it stands is
+more use to a reader than the order it was built in.
 
 ### Added
 
 - **A 48-hour occupancy forecast, per person and for the house.** One
-  `sensor.*_home_probability` carries the whole curve in its attributes, plus a
-  flat sensor per horizon at +1, 2, 3, 6, 12, 24, 36 and 48 h. They arrive over
-  MQTT discovery as ordinary Home Assistant entities — renameable, grouped into
-  a device, usable anywhere. There is no custom integration to install.
+  `sensor.*_home_probability` carrying the whole curve in its attributes, plus a
+  flat sensor per horizon at +1, 2, 3, 6, 12, 24, 36 and 48 h. Published over
+  MQTT discovery, so they are ordinary Home Assistant entities — renameable,
+  grouped into a device, usable anywhere. There is no custom integration.
 
-- **A horizon publishes only where the forecast was measured to beat a simple
-  baseline.** Where nothing beat it, the sensor reads `unknown` instead of
-  guessing. A horizon can also be handed back later, because the baselines get
-  better as your history grows — `served_by` on the status page says which
-  horizons the model is currently serving.
+- **A horizon is served by a model only where the model was measured to beat
+  that horizon's own baseline, and otherwise publishes nothing.** The ladder
+  (persistence, same-slot-yesterday, a weekday-by-slot climatology) is scored on
+  the same rolling-origin folds as the model, per horizon, and the sensor reads
+  `unknown` where nothing cleared the bar. A horizon can also be handed back:
+  the baselines improve with history, so one the model won at two weeks may lose
+  at two months. `served_by` on the status page says which is which.
 
 - **`hours_until_away` and `hours_until_home`** — when the curve is expected to
-  cross in either direction.
+  cross in either direction, from the shipped reduction rule rather than a
+  second model.
 
-- **`next_change_at`** — the same answer as a timestamp rather than a wait, so
-  an automation can act on it without doing the arithmetic itself.
+- **`next_change_at`** — the same verdict as a moment rather than a wait: the
+  model says a change is coming and the routine times it. A timestamp because an
+  automation cannot act on "in 3 h" without doing that arithmetic itself.
 
-- **`minutes_until_home`, while somebody is actually travelling.** A separate
-  and much sharper model, accurate to about 5 minutes while somebody is closing
-  in. It stays `unknown` when the person is stationary or moving away: that
-  means "not travelling", not broken. `hours_until_home` is the one that answers
-  all day.
+- **`minutes_until_home`, and only while somebody is actually travelling.** A
+  separate model over the raw proximity trace, far sharper than the hourly curve
+  can be — MAE around 5 minutes while closing. It is silent when the person is
+  stationary or moving away, because its training window cannot represent a wait
+  longer than three hours and answering anyway produced confident nonsense for
+  somebody sitting at a desk. `unknown` here means "not travelling", not broken;
+  `hours_until_home` is the one that answers all day.
 
 - **`out_today`, `out_departure` and `out_return`** — how often this person goes
-  out on this weekday, and the hours they usually leave and come back, as
-  timestamps. A weekday they have never once gone out on publishes no hour at
-  all rather than inventing an average one.
+  out to a tracked zone on this weekday, and the hours they usually leave and
+  come back, as timestamps. Plain causal arithmetic over their own history, not
+  a model. A weekday they have been observed on and never once gone out on
+  publishes no hour at all rather than falling back to an overall median: "we
+  know they do not" and "we cannot say" are different answers, and only the
+  second justifies a fallback.
 
 - **An Ingress panel.** Overview is who is home, what is expected to change and
   the 48-hour curves; Data walks through what the add-on has collected and what
   it built from it; Setup is where people, zones and the history source are
-  ticked. Everything is served by the add-on itself — no CDN, no font service,
-  nothing fetched from outside your house. The panel states the numbers and
-  `DOCS.md` explains them, under `## Reading the panel`.
+  ticked. Everything is served from the add-on itself — no CDN, no font service,
+  nothing fetched from outside the container.
+
+  The panel **states** numbers and `DOCS.md` explains them. A page you leave
+  open should not argue for its own figures every time you glance at it, so
+  cards carry a timestamp, a count or a percentage and little else, and the
+  reasoning — the ship gate, the two model families, how a crossing time is
+  arrived at, the training cadence, what night shading does and does not do —
+  lives in a `## Reading the panel` section instead. Empty and error states are
+  the deliberate exception and keep their sentence of why, because that is the
+  moment somebody is deciding whether the add-on is broken.
+
+  Every chart carries two descriptions, not one: a short printed caption and a
+  full `aria-label`. They were a single string, which meant shortening the
+  visible text would silently have shortened the only description available to
+  the one reader who cannot fall back on the marks.
 
 - **Forecast verification.** Every published forecast is recorded and later
   scored against what actually happened, kept for 30 days and charted in the
   panel. It is the only thing that will tell you the add-on has quietly stopped
   working.
 
-- **A watchdog that can see a stuck worker.** If the add-on stops producing
-  forecasts without raising an error, it now says so — on the status page, in
-  the panel and in the log. An early outage published nothing for eleven hours
-  with every health signal green.
+- **A watchdog that can see a blocked worker.** The serve loop marks each phase,
+  and three missed cycles dumps every thread's stack to the log, drops the MQTT
+  client and raises `worker.stalled` on `/api/status` and in the panel. It exists
+  because `except Exception` around a cycle plus a `last_error` field cannot see
+  a thread that is not raising but waiting — a real outage published nothing for
+  11.5 hours with every health signal green. A retrain is exempt, since a train
+  legitimately holds the loop for minutes.
 
 - **Its own history archive.** Home Assistant's recorder keeps about ten days
-  and long-term statistics do not cover presence at all, so the add-on keeps its
-  own archive under `/data` from the moment it is installed — about 2 MB a year,
-  never purged. Training starts at ten days. If you already archive to
-  **InfluxDB**, `source: influx` trains from that history instead and is
-  properly trained on the very first run.
+  and long-term statistics do not cover presence at all, so the add-on appends
+  its own SQLite archive under `/data` from the moment it is installed — about
+  2 MB a year, never purged. Training starts at ten days. If you already archive
+  to **InfluxDB**, `source: influx` trains from that history instead and is
+  properly trained on the first run.
 
-- **Training is scheduled.** Daily while your history is short, weekly once more
-  history has stopped changing the answer. A train takes a few minutes and
-  forecasting carries on while it runs.
+- **Training is scheduled, parallel and accounted for.** Daily while the history
+  is short, weekly once it has stopped changing the answer. The fold fan-out,
+  the baseline ladder and the final pooled refit share one pool with the longest
+  tasks queued first, and `metrics.json` records elapsed seconds per phase — so
+  where the time goes is measured rather than assumed. It was assumed wrong
+  once: the ~1,900 pandas joins that build the horizon columns look like the
+  expensive part and are about 8 s of a 180 s train.
 
 - **Optional night shading** on the forecast chart, driven by a `schedule.*`
   entity you already keep, so a dip at 03:00 reads differently from a dip at
@@ -217,23 +167,28 @@ First release, so everything is listed as added.
 
 - **It runs on a `person` entity alone.** Proximity, tracked zones, a person
   group, a phone alarm and a country set in Home Assistant each add something
-  and none of them is required. A missing signal is never an error, and the
-  status page shows which ones are active.
+  and none is required; a missing signal is an empty column, never an error, and
+  the status page shows which are active.
 
-- **Two add-ons, installable side by side.** Stable and Edge take their entity
-  names and MQTT topics from their own add-on slug, so they never collide and
-  there is nothing to configure.
+- **Two add-ons, installable side by side.** Stable and Edge derive their MQTT
+  topic root, MQTT client id and Home Assistant device names from their own
+  add-on slug, so they never collide and there is nothing to configure. If the
+  slug cannot be read from Supervisor the add-on falls back to stable's prefix
+  and logs a warning — which is itself the collision, so that line matters.
 
 - **`log_level`**, from `trace` to `fatal`. At `info` the add-on logs
-  transitions and one heartbeat an hour, so silence for longer than an hour
-  means it is not working.
+  transitions and one heartbeat an hour, so silence longer than an hour means it
+  is not working. Chatty protocol libraries are pinned at `WARNING` at every
+  setting: `websockets` logs every frame at DEBUG, and the first frame of a
+  connection is the authentication handshake.
 
 - **Advisory only.** Nothing here changes anything in your house. It publishes
   sensors and, at most, a persistent notification. If you wire the forecast to
   your heating, check `predicted_at` and ignore a stale one, so that an outage
   degrades to your previous behaviour rather than to a cold house.
 
-- `aarch64` and `amd64`. A 32-bit Pi is not supported: one of the add-on's
-  dependencies has no 32-bit ARM build, so it would compile for forty minutes
-  and then fail. The add-on builds from source on install, so the first install
-  takes several minutes and a few hundred MB.
+- `aarch64` and `amd64`. scikit-learn publishes no armv7 wheels, so on a 32-bit
+  Pi the add-on would compile for forty minutes and then fail; better not to
+  offer it. It builds from source on install — pandas, numpy, pyarrow,
+  scikit-learn — so the first install takes several minutes and a few hundred
+  MB.

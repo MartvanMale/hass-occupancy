@@ -73,7 +73,7 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
   // below line up with the points above them.
   const X = (h: number) => ((h - lo) + 0.5) / n * W
   const Y = (v: number) => H - (v / top) * H
-  const at = (h: number, pick: (m: HorizonMetrics) => number | null): Pt | null => {
+  const at = (h: number, pick: (m: HorizonMetrics) => number): Pt | null => {
     const m = byHour.get(h)
     if (!m) return null
     const v = pick(m)

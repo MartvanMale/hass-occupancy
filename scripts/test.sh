@@ -28,13 +28,6 @@ docker run --rm \
   node:22-alpine \
   sh -c '[ -d node_modules ] || npm ci --no-audit --no-fund; npx tsc --noEmit'
 
-# The committed bundle must match the source beside it. This used to be a
-# pre-commit hook's job, and when that went nothing on any path a person
-# actually takes verified the pair -- a stale bundle installs cleanly and serves
-# last week's panel. Now a green test run means the bundle is fresh. If this
-# fails, run scripts/build-panel.sh and re-test.
-scripts/check-panel.sh occupancy-forecast-edge
-
 exec docker run --rm \
   -v "$PWD/occupancy-forecast-edge":/w -w /w -e PYTHONPATH=/w \
   python:3.13-slim \

@@ -2,7 +2,6 @@ import type { CSSProperties } from 'react'
 import { Row } from './Row'
 import { Chip } from './Chip'
 import type { Accent } from './Icon'
-import { integerRuns } from './geometry'
 import type { ModelKind, ServedBy } from '../types'
 
 /**
@@ -43,7 +42,15 @@ import type { ModelKind, ServedBy } from '../types'
 type Range = [number, number]
 
 /** Contiguous runs, so 1..9 is one range and not nine. */
-const runs = (nums: number[]): Range[] => integerRuns(nums)
+function runs(nums: number[]): Range[] {
+  const out: Range[] = []
+  for (const n of nums) {
+    const last = out[out.length - 1]
+    if (last && n === last[1] + 1) last[1] = n
+    else out.push([n, n])
+  }
+  return out
+}
 
 const rangeLabel = ([a, b]: Range) => (a === b ? `+${a} h` : `+${a} h to +${b} h`)
 

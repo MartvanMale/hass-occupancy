@@ -206,16 +206,9 @@ class Listener:
         from websockets.sync.client import connect
 
         with connect(self.url, open_timeout=30, close_timeout=5) as socket:
-            # Published BEFORE the handshake, so that an `update_entities`
-            # landing during it can drop this socket: the handshake then fails,
-            # the run loop reconnects, and the new session subscribes to the
-            # new set. Assigned after the subscribe, a change in that window
-            # found nothing to drop and the old subscription ran on.
-            self._socket = socket
             self._authenticate(socket)
             self._subscribe(socket)
-            if self._socket is not socket:
-                return                          # reconfigured mid-handshake
+            self._socket = socket
             # Transitions only: a reconnect after a drop is worth a line, the
             # first connect at boot is worth one, and a socket that simply
             # stays up is worth none.

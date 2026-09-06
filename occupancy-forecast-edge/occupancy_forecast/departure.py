@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from . import baseline, config, evaluate, features, log
+from . import baseline, config, evaluate, log
 
 _log = log.get(__name__)
 
@@ -95,12 +95,16 @@ MIN_OBSERVED_SLOTS = 36
 MAX_MORNING_GAP_SLOTS = 2
 
 
+def _slots_per_hour() -> int:
+    return 60 // config.GRID_MINUTES
+
+
 def origin_slot() -> int:
-    return ORIGIN_HOUR * features.slots_per_hour()
+    return ORIGIN_HOUR * _slots_per_hour()
 
 
 def last_departure_slot() -> int:
-    return LAST_DEPARTURE_HOUR * features.slots_per_hour()
+    return LAST_DEPARTURE_HOUR * _slots_per_hour()
 
 
 def label_embargo() -> pd.Timedelta:
@@ -123,16 +127,13 @@ def day_grid(table: pd.DataFrame) -> pd.DataFrame:
     what is wanted here is what happened, not what a model was fed.
     """
     local = table["time"].dt.tz_convert(config.tzinfo())
-    keyed = table[["subject", "home_frac"]].assign(
+    keyed = table.assign(
         _date=local.dt.date,
-        _slot=features.slot_of_day(local),
+        _slot=(local.dt.hour * _slots_per_hour()
+               + local.dt.minute // config.GRID_MINUTES),
     )
-    # `mean`, not `first`: on the autumn transition day two UTC slots land on
-    # one local slot, and `first` silently threw the second observation away.
-    # The mean of two real observations of the same wall-clock half hour is a
-    # fair value for it; NaN is skipped, so one blanked slot does not blank both.
     grid = keyed.pivot_table(index=["subject", "_date"], columns="_slot",
-                             values="home_frac", aggfunc="mean")
+                             values="home_frac", aggfunc="first")
     return grid.reindex(columns=range(config.SLOTS_PER_DAY))
 
 
@@ -191,7 +192,7 @@ def label_days(table: pd.DataFrame) -> pd.DataFrame:
             "left_today": bool(candidate and departure is not None),
             "departure_slot": departure,
             "departure_hour": (None if departure is None
-                               else departure / features.slots_per_hour()),
+                               else departure / _slots_per_hour()),
         })
     return pd.DataFrame(rows).sort_values(["subject", "date"]).reset_index(drop=True)
 
@@ -321,42 +322,29 @@ def feature_frame(days: pd.DataFrame) -> pd.DataFrame:
     """
     days = _partner(_causal(days))
     days["baseline_hour"] = anchor_hour(days)
-    days["is_weekend"] = features.is_weekend(days["dow"])
-    days["is_holiday"] = features.holiday_flags(pd.DatetimeIndex(days["date"]))
+    dates = pd.DatetimeIndex(days["date"])
+    days["is_weekend"] = (days["dow"] >= 5).astype(float)
+    days["is_holiday"] = _holiday_flags(dates)
     return days
 
 
+def _holiday_flags(dates: pd.DatetimeIndex) -> np.ndarray:
+    """Public holidays, or zeros where the calendar is unknown.
+
+    The same tolerance `features._holiday_flags` shows: an unsupported country
+    is a reason for the column to be flat, never a reason to fail a build.
+    """
+    try:
+        import holidays
+
+        calendar = holidays.country_holidays(config.HOLIDAY_COUNTRY)
+        return np.array([float(d.date() in calendar) for d in dates])
+    except Exception:  # noqa: BLE001
+        return np.zeros(len(dates))
+
+
 # ---------------------------------------------------------------------------
-# The two halves -- BUILT, MEASURED, NOT SHIPPED. Kept on purpose.
-#
-# Everything below this line is the model half of the departure question:
-# estimator A ("will they leave today"), estimator B ("how late, given they
-# leave"), the prequential harness and the ship gate for both. None of it is
-# wired into the add-on and none of it is imported anywhere else. It stays
-# because it is the record of what was tried, and because the prequential
-# harness is the reusable piece of it.
-#
-# What it measured, on the real archive and on the synthetic household
-# (`tests/synthetic.py`), 2026-09-02/03:
-#
-#   * A as a correction on a causal weekday-median lookup: -3.5% to -2.3% in
-#     the control world (the lookup is provably optimal there, so losing is the
-#     leak check passing) and +3.1% / +4.2% / +3.6% at 180 / 365 / 730 days in
-#     the realistic world. A plateau at 3-4% against a 15% ship bar; more
-#     history does not rescue it.
-#   * A lambda sweep on the correction went monotonically to +0.0% at
-#     lambda=0 with within-1h best there too: the correction is noise. The
-#     failure is the FEATURE SET -- every feature is derived from the same
-#     presence history that builds the baseline it must beat -- not the model
-#     class, and no estimator or loss fixes that.
-#   * The day-level ship gate itself is not safe at these sample sizes: a
-#     permutation null fired it on 4-12% of RANDOM label sets.
-#
-# What shipped instead is `outing.py`: the per-weekday rate and median as plain
-# arithmetic, which scores +29%/+32% on "is today an office day" and 0.45-0.54 h
-# MAE on the hour. If this half is ever revisited, the one lead the notes leave
-# open is a signal that knows about TOMORROW rather than typical weekdays --
-# `next_alarm_h` -- which had no history to price when this was measured.
+# The two halves
 # ---------------------------------------------------------------------------
 
 # Days of history before the first prediction is attempted. Below this a fit has

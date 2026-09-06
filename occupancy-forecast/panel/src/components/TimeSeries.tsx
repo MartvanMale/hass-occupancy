@@ -2,7 +2,6 @@ import type { CSSProperties } from 'react'
 
 import type { Accent } from './Icon'
 import { ChartTip, TipRow } from './ChartTip'
-import { runs as contiguous } from './geometry'
 import { useChartPointer } from './useChartPointer'
 
 /**
@@ -50,6 +49,18 @@ function pathFor(points: Point[], lo: number, hi: number): string {
   return out.join(' ')
 }
 
+/** Contiguous runs of unobserved slots, as [startIndex, endIndex] inclusive. */
+function gaps(points: Point[]): [number, number][] {
+  const out: [number, number][] = []
+  points.forEach((p, i) => {
+    if (p.v !== null) return
+    const last = out[out.length - 1]
+    if (last && last[1] === i - 1) last[1] = i
+    else out.push([i, i])
+  })
+  return out
+}
+
 export interface TimeSeriesProps {
   points: Point[]
   /** The full sentence a screen reader gets. Never let the encoding rest on the
@@ -89,8 +100,7 @@ export function TimeSeries({
 
   const [lo, hi] = domain ?? [Math.min(...values, 0), Math.max(...values)]
   const span = hi - lo || 1
-  // Contiguous runs of unobserved slots, as [startIndex, endIndex] inclusive.
-  const runs = contiguous(points.map((p) => p.v === null))
+  const runs = gaps(points)
   const n = points.length
   const height = compact ? 48 : H
 

@@ -257,38 +257,12 @@ def _is_distance(entity_id: str, settings) -> bool:
 
 
 def _num(value) -> float | None:
-    """NaN out to JSON as null. `float('nan')` is not valid JSON, and FastAPI
-    does not emit it: its response class renders with `allow_nan=False`, so a
-    NaN that reaches a handler's return value is a 500, not a bare `NaN`."""
+    """NaN out to JSON as null. `float('nan')` is not valid JSON and FastAPI
+    will happily emit a bare `NaN` that `JSON.parse` then rejects."""
     if value is None:
         return None
     value = float(value)
     return None if np.isnan(value) else round(value, 4)
-
-
-def _json_safe(value):
-    """`value` with every NaN (and infinity) replaced by None, recursively.
-
-    `metrics.json` is written with `json.dumps` at its default `allow_nan=True`,
-    so a fold with one class (`auc` undefined), a horizon where no baseline
-    rung ran (`best_baseline_brier`), or an empty fold pads its per-fold entry
-    with a literal `NaN`, which `json.loads` reads back as a float. Anything
-    that then returns it through FastAPI is a 500 for the whole endpoint --
-    measured on a synthetic household's own artifact, where four horizons'
-    quality cards could not load. Applied at this boundary rather than fixed
-    at the writer, so an artifact already on disk is served rather than
-    retrained.
-
-    Numbers are passed through untouched otherwise: this rounds nothing, so a
-    value the panel formats itself arrives as it was written.
-    """
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, float) and not np.isfinite(value):
-        return None
-    return value
 
 
 # --- the feature table ----------------------------------------------------
@@ -518,7 +492,7 @@ def horizon_recipe(horizon: int, models: dict) -> dict:
     winner to describe, and the pooled list is the honest default -- it is the
     one the melt this card explains is built from.
     """
-    from . import train as train_mod
+    from . import evaluate, train as train_mod
 
     if horizon not in config.HORIZONS_H:
         return unavailable(f"+{horizon} h is not one of the horizons this add-on serves")
@@ -747,7 +721,7 @@ def metrics_summary(models_dir, models: dict | None = None) -> dict:
     for key, metrics in sorted(summary.get("horizons", {}).items(), key=lambda kv: int(kv[0])):
         if not metrics:
             continue
-        row = _json_safe({name: metrics.get(name) for name in SCALARS})
+        row = {name: metrics.get(name) for name in SCALARS}
         row["horizon_h"] = int(row["horizon_h"] or key)
         rows.append(row)
 
@@ -786,9 +760,7 @@ def metrics_detail(models_dir, horizon: int, models: dict | None = None) -> dict
     if not metrics:
         return unavailable(f"+{horizon} h has not been trained yet")
 
-    # `per_fold` is the usual carrier: an empty fold is padded with NaN scores
-    # by design (see test_an_empty_fold_reaches_the_panel_as_a_null_and_not_a_zero).
-    return {"available": True, "horizon_h": horizon, **_json_safe(metrics)}
+    return {"available": True, "horizon_h": horizon, **metrics}
 
 
 def _summarise(values: np.ndarray) -> dict:

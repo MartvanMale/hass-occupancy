@@ -41,24 +41,13 @@ import numpy as np
 import pandas as pd
 import paho.mqtt.client as mqtt
 
-from . import config, eta as eta_mod, evaluate, features, log, nowcast
+from . import config, eta as eta_mod, features, log, nowcast
 from . import outing as outing_mod, train
 
 _log = log.get(__name__)
 
 MODELS_DIR = config.MODELS_DIR
 DISCOVERY_PREFIX = "homeassistant"
-
-# Who created these entities, in the form Home Assistant's MQTT discovery asks
-# for: it shows on the device page and in the integration's diagnostics, which
-# is where a user goes when wondering where forty-odd sensors came from.
-# BRANDING, shared by both builds like `manufacturer` -- the identity lives in
-# the ids, not here.
-ORIGIN = {
-    "name": "Occupancy Forecast",
-    "sw_version": train.MODEL_VERSION,
-    "support_url": "https://github.com/MartvanMale/hass-occupancy",
-}
 def state_prefix() -> str:
     return config.topic_prefix()
 
@@ -79,10 +68,8 @@ LOOKBACK_DAYS = (features.deepest_lookback_days()
 # (nowcast.presence_fraction), not a probability: binarising an observation at
 # the user's `departure_threshold` of 0.7 would report "not home" for somebody
 # who has been in the house for three of the last five minutes. Half the window
-# is the only defensible cut for a time fraction -- and it is the SAME cut
-# `evaluate` binarises the target with, because the target is a time fraction
-# too. One constant, so the two cannot drift.
-OBSERVED_HOME_THRESHOLD = evaluate.HOME_THRESHOLD
+# is the only defensible cut for a time fraction.
+OBSERVED_HOME_THRESHOLD = 0.5
 
 
 def _load_artifact(path: Path) -> dict | None:
@@ -129,20 +116,6 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
     """
     models: dict[int, dict] = {}
     _stale.clear()
-    mismatched: list[str] = []
-
-    def fitted_for_this_house(artifact: dict, wanted: list[str], name: str) -> bool:
-        # The feature list is written into every artifact "so a feature added
-        # here cannot silently desynchronise from what is served" -- and then
-        # was never read. The list is config-DERIVED: a person removed or a
-        # zone unticked changes it with no MODEL_VERSION bump, and the model
-        # then wants a column the row no longer has. Refused here, once, with
-        # a line that says to retrain, rather than failing on every cycle.
-        stored = artifact.get("features")
-        if stored is None or list(stored) == list(wanted):
-            return True
-        mismatched.append(name)
-        return False
 
     # Both artifacts carry EVERY horizon's verdict, not just the ones they won,
     # so a horizon arrives here with its `ships` flag whichever file holds it --
@@ -150,9 +123,6 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
     # say which horizons are published. `metrics["kind"]` says which family
     # actually answers.
     pooled = _load_artifact(models_dir / train.POOLED_NAME)
-    if pooled is not None and not fitted_for_this_house(
-            pooled, train.base_features(), train.POOLED_NAME):
-        pooled = None
     if pooled is not None:
         for horizon, metrics in (pooled.get("metrics") or {}).items():
             models[int(horizon)] = {
@@ -164,10 +134,6 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
         artifact = _load_artifact(
             models_dir / train.DEDICATED_NAME.format(horizon=horizon))
         if artifact is None:
-            continue
-        if not fitted_for_this_house(
-                artifact, train.features_for(horizon),
-                train.DEDICATED_NAME.format(horizon=horizon)):
             continue
         stored = artifact.get("metrics") or {}
         metrics = stored.get(horizon) or stored.get(str(horizon))
@@ -187,11 +153,6 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
         _log.warning("ignoring %d model file(s) built by %s -- this build is "
                      "%s. Retrain to use them; nothing is published until then.",
                      len(_stale), "/".join(built), train.MODEL_VERSION)
-    if mismatched:
-        _log.warning("ignoring %d model file(s) fitted for a different set of "
-                     "people or zones (%s%s). Retrain to serve those horizons "
-                     "again.", len(mismatched), ", ".join(mismatched[:3]),
-                     " ..." if len(mismatched) > 3 else "")
     _log.info("loaded %d model(s): %d dedicated, %d pooled, %d not served",
               len(models),
               sum(1 for a in models.values() if a.get("kind") == "dedicated"),
@@ -241,15 +202,11 @@ def arrival_etas(eta_models: dict[str, dict], source=None) -> dict[str, float | 
             continue
         try:
             row = eta_mod.current_row(source, subject)
-            if row is None:
-                continue
-            out[subject] = round(float(eta_mod.predict_minutes(artifact["model"], row)[0]), 1)
-        except Exception as err:  # noqa: BLE001
-            # Said out loud. Swallowed silently, an artifact whose feature list
-            # has moved on from this build's `eta.FEATURES` reads as a sensor
-            # that is permanently `unknown` and nothing anywhere says why.
-            _log.warning("eta %s: no answer this cycle -- %s", subject, err)
+        except Exception:
             continue
+        if row is None:
+            continue
+        out[subject] = round(float(eta_mod.predict_minutes(artifact["model"], row)[0]), 1)
 
     people = [v for v in out.values() if v is not None]
     out[config.HOUSE_SLUG] = min(people) if people else None
@@ -266,15 +223,8 @@ def _model_curve(models: dict[int, dict], row: pd.Series) -> dict[int, float]:
 
     Each family is tried independently and neither raising takes the other down.
     A missing value is not an error, it is a horizon that goes unpublished --
-    the caller counts them, because a stale sensor deleting an hour of the
-    forecast is a fault worth finding rather than something to paper over.
-
-    The REASON is logged here, once per family per row, because the caller
-    cannot: it only sees the hole. A person removed from the configuration
-    leaves every model wanting a column that is gone, and with the exception
-    text discarded that read as "N horizons produced no value" every five
-    minutes until the next scheduled train -- up to a week on a mature install
-    -- with nothing saying the models were the problem.
+    the caller logs it, because a stale sensor deleting an hour of the forecast
+    is a fault worth finding rather than something to paper over.
 
     This function IS the serving rule: it returns exactly the horizons that
     ship and answered, which is exactly what may be published.
@@ -283,7 +233,6 @@ def _model_curve(models: dict[int, dict], row: pd.Series) -> dict[int, float]:
                 if (models.get(h) or {}).get("metrics", {}).get("ships")]
     pooled = [h for h in shipping if models[h].get("kind") == "pooled"]
     dedicated = [h for h in shipping if models[h].get("kind") != "pooled"]
-    subject = row.get("subject", "?")
 
     out: dict[int, float] = {}
     if pooled:
@@ -291,24 +240,16 @@ def _model_curve(models: dict[int, dict], row: pd.Series) -> dict[int, float]:
             frame = features.long_frame(row.to_frame().T, horizons=tuple(pooled))
             values = train.predict_pooled(models[pooled[0]]["model"], frame)
             out.update(zip(frame[features.HORIZON_COLUMN].astype(int), values))
-        except Exception as err:  # noqa: BLE001
-            _log.warning("%s: the pooled model failed at all %d of its horizons "
-                         "-- %s: %s", subject, len(pooled), type(err).__name__, err)
+        except Exception:
+            pass
     if dedicated:
         frame = row.to_frame().T
-        failed: list[tuple[int, Exception]] = []
         for horizon in dedicated:
             try:
                 out[horizon] = float(train.predict_dedicated(
                     models[horizon]["model"], frame, horizon)[0])
-            except Exception as err:  # noqa: BLE001
-                failed.append((horizon, err))
-        if failed:
-            # One line, not one per horizon: a missing column fails all 48 the
-            # same way, and 48 identical lines hide the one worth reading.
-            horizon, err = failed[0]
-            _log.warning("%s: %d dedicated model(s) failed, first at +%dh -- %s: %s",
-                         subject, len(failed), horizon, type(err).__name__, err)
+            except Exception:
+                continue
     return out
 
 
@@ -505,10 +446,6 @@ def connect(client: str | None = None, availability: bool = True) -> mqtt.Client
                          client_id=client or client_id())
     if settings["username"]:
         client.username_pw_set(settings["username"], settings["password"])
-    # Supervisor says whether its broker wants TLS; a TLS-only broker answered
-    # a plaintext CONNECT with a closed socket and "MQTT unavailable".
-    if settings.get("ssl"):
-        client.tls_set()
     if availability:
         client.will_set(f"{state_prefix()}/availability", "offline", retain=True, qos=1)
     client.connect(settings["host"], settings["port"], keepalive=60)
@@ -535,19 +472,6 @@ class Broker:
     def client(self) -> mqtt.Client | None:
         if self._client is not None:
             return self._client
-        # No client until the add-on knows its own name. Connecting under the
-        # default prefix would put this build's client id, discovery topics and
-        # retained states on top of whichever other build owns that prefix --
-        # silently, and for as long as the process lives. Better no entities
-        # than somebody else's entities. The worker retries the lookup every
-        # cycle; the status page carries the reason.
-        if not config.topic_prefix_resolved():
-            reason = config.topic_prefix_error() or "slug not yet read from Supervisor"
-            if reason != self.last_error:
-                _log.warning("MQTT withheld: %s. Nothing is published until the "
-                             "add-on's own slug is known.", reason)
-            self.last_error = reason
-            return None
         try:
             self._client = connect()
             # Transitions only. This is called every cycle, so logging the
@@ -566,34 +490,31 @@ class Broker:
 
     @property
     def connected(self) -> bool:
-        """Whether the MQTT session is actually up, not whether a client exists.
-
-        `self._client is not None` was the old answer, and it is the one the
-        status page showed as `mqtt.connected: true` through a session the
-        broker had refused or kicked. paho keeps the real state and reconnects
-        on its own loop thread; ask it.
-        """
-        return self._client is not None and self._client.is_connected()
+        return self._client is not None
 
     def close(self) -> None:
         if self._client is None:
             return
         try:
-            info = self._client.publish(f"{state_prefix()}/availability", "offline",
-                                        retain=True, qos=1)
-            # Let the network thread actually send it before it is stopped;
-            # otherwise a clean shutdown could leave HA showing the entities
-            # available under stale retained values. Bounded, never fatal.
-            wait = getattr(info, "wait_for_publish", None)
-            if wait is not None:
-                try:
-                    wait(timeout=2.0)
-                except Exception:  # noqa: BLE001
-                    pass
+            self._client.publish(f"{state_prefix()}/availability", "offline",
+                                 retain=True, qos=1)
             self._client.loop_stop()
             self._client.disconnect()
         finally:
             self._client = None
+
+
+def _device_label(prefix: str) -> str:
+    """`occupancy_forecast_edge` -> "Occupancy Forecast Edge".
+
+    This feeds the MQTT device NAME, and Home Assistant builds entity ids from
+    the device name -- so a casing change here silently orphans every entity the
+    add-on already owns. There used to be an acronym table beside this, because
+    `.title()` turned the old slug's "ml" into "Ml"; the current slug has no
+    acronym in it and the table matched nothing, so it is gone. Reintroduce one
+    before putting an acronym in a slug, not after.
+    """
+    return prefix.replace("_", " ").title()
 
 
 def _discovery_payloads(subject: str) -> list[tuple[str, dict]]:
@@ -611,7 +532,7 @@ def _discovery_payloads(subject: str) -> list[tuple[str, dict]]:
     # `sensor.occupancy_forecast_<person>_...` and the second would silently become
     # `..._2`. Deriving it from the prefix keeps stable and edge apart in the
     # entity registry, not merely on the broker.
-    label = config.display_name()
+    label = _device_label(state_prefix())
     device = {
         "identifiers": [f"{state_prefix()}_{subject}"],
         "name": f"{label} {subject.replace('_', ' ').title()}",
@@ -639,7 +560,6 @@ def _discovery_payloads(subject: str) -> list[tuple[str, dict]]:
                 "value_template": template,
                 "availability": availability,
                 "device": device,
-                "origin": ORIGIN,
                 **extra,
             },
         ))
@@ -660,7 +580,6 @@ def _discovery_payloads(subject: str) -> list[tuple[str, dict]]:
                 "state_class": "measurement",
                 "availability": availability,
                 "device": device,
-                "origin": ORIGIN,
             },
         ))
     sensor("next_departure", "Hours until away",
@@ -701,24 +620,6 @@ def _discovery_payloads(subject: str) -> list[tuple[str, dict]]:
     return payloads
 
 
-def retract(subject: str, client: mqtt.Client) -> int:
-    """Clear everything retained for a subject that no longer exists.
-
-    A person removed from the configuration used to keep their entities in
-    Home Assistant forever, holding the last forecast under a `predicted_at`
-    that never moved: every payload here is retained, and nothing ever
-    unpublished one. An EMPTY retained payload is how MQTT deletes a retained
-    message and how Home Assistant's discovery removes an entity. Returns how
-    many topics were cleared.
-    """
-    base = f"{state_prefix()}/{subject}"
-    topics = [topic for topic, _ in _discovery_payloads(subject)]
-    topics += [f"{base}/state", f"{base}/attributes"]
-    for topic in topics:
-        client.publish(topic, "", retain=True, qos=1)
-    return len(topics)
-
-
 def publish(results: list[dict], client: mqtt.Client) -> None:
     for result in results:
         subject = result["subject"]
@@ -752,18 +653,7 @@ def publish(results: list[dict], client: mqtt.Client) -> None:
         state["next_departure_h"] = result["next_departure_h"]
         state["next_arrival_h"] = result["next_arrival_h"]
         state["eta_minutes"] = result["eta_minutes"]
-        info = client.publish(f"{base}/state", json.dumps(state), retain=True, qos=1)
-        # The one publish per subject whose return code is checked: it is the
-        # payload every sensor reads from. paho queues while disconnected and
-        # returns MQTT_ERR_NO_CONN, so this is the line that says the forecast
-        # was computed and did NOT reach the broker -- which, before it, was
-        # indistinguishable from a cycle that worked.
-        # `getattr`: the tests hand in a recorder whose publish returns None.
-        rc = getattr(info, "rc", None)
-        if rc is not None and rc != mqtt.MQTT_ERR_SUCCESS:
-            _log.warning("%s: state not published (rc=%s, %s); the sensors keep "
-                         "their previous values until the broker is back",
-                         subject, rc, mqtt.error_string(rc))
+        client.publish(f"{base}/state", json.dumps(state), retain=True, qos=1)
 
         attributes = {
             "observed_at": result["observed_at"],

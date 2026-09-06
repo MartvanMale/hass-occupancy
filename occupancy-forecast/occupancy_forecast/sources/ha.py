@@ -21,7 +21,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,21 +54,6 @@ BOOTSTRAP_DAYS = 400
 # entity_id + ts), so overlapping is free and it means a missed poll, a restart
 # or a clock skew heals itself instead of leaving a hole.
 OVERLAP_MINUTES = 90
-
-# Entities are fetched in GROUPS by how far back their watermark reaches,
-# bucketed to this many hours, one history request per group. It used to be
-# one request for all of them from the OLDEST watermark: a work zone nobody
-# entered during a three-week trip dragged every proximity sensor's window out
-# to three weeks, every five minutes, on the box that also runs the recorder.
-# Six hours puts everything that reported today into one request and gives a
-# quiet entity its own, short one.
-WINDOW_BUCKET_HOURS = 6
-
-# An entity with NO rows at all -- excluded from the recorder, or a sensor that
-# has never reported -- asked for BOOTSTRAP_DAYS on every cycle, forever. Now
-# it is asked once, then only for the stretch since it was last asked, and no
-# more often than this.
-EMPTY_RETRY_SECONDS = 3600
 
 # What gets stored for an entity whose absence is itself a reading. Its own
 # word rather than `unavailable` or `unknown`, because Home Assistant uses both
@@ -173,8 +157,6 @@ class StoreSource:
     def __init__(self, store: HistoryStore, ha: HomeAssistant):
         self.store = store
         self.ha = ha
-        # entity -> (monotonic, wall clock) of the last ask that found nothing.
-        self._asked_empty: dict[str, tuple[float, dt.datetime]] = {}
 
     # -- Source -------------------------------------------------------------
 
@@ -211,42 +193,17 @@ class StoreSource:
             return {"added": 0, "entities": 0}
 
         now = dt.datetime.now(dt.timezone.utc)
-        mono = time.monotonic()
-        begins: dict[str, dt.datetime] = {}
+        earliest = None
         for entity_id in entity_ids:
             seen = self.store.last_seen(entity_id)
-            if seen:
-                begins[entity_id] = (dt.datetime.fromtimestamp(seen / 1000, dt.timezone.utc)
-                                     - dt.timedelta(minutes=OVERLAP_MINUTES))
-                continue
-            asked = self._asked_empty.get(entity_id)
-            if asked is not None and mono - asked[0] < EMPTY_RETRY_SECONDS:
-                continue
-            # First ask reaches back the whole bootstrap window; a later one
-            # only covers the time since the previous ask found nothing.
-            begins[entity_id] = (asked[1] - dt.timedelta(minutes=OVERLAP_MINUTES)
-                                 if asked else now - dt.timedelta(days=BOOTSTRAP_DAYS))
-            self._asked_empty[entity_id] = (mono, now)
+            begin = (dt.datetime.fromtimestamp(seen / 1000, dt.timezone.utc)
+                     - dt.timedelta(minutes=OVERLAP_MINUTES)) if seen else (
+                     now - dt.timedelta(days=BOOTSTRAP_DAYS))
+            earliest = begin if earliest is None else min(earliest, begin)
 
-        # Bucket by HOW FAR BACK a window reaches, not by where its start lands
-        # on the clock. Flooring the absolute hour splits two entities either
-        # side of a boundary -- one seen five minutes ago and one seen two hours
-        # ago land in different six-hour blocks whenever the older one happens
-        # to cross it -- so the grouping would depend on the time of day the
-        # cycle ran, and "everything that reported today" would be one request
-        # only sometimes.
-        groups: dict[int, list[str]] = {}
-        for entity_id, begin in begins.items():
-            key = int((now - begin).total_seconds()) // (WINDOW_BUCKET_HOURS * 3600)
-            groups.setdefault(key, []).append(entity_id)
-
-        series: list = []
-        stop = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        for _key, ids in sorted(groups.items(), reverse=True):   # oldest window first
-            start = min(begins[e] for e in ids)
-            series.extend(self.ha.history(ids, start.strftime("%Y-%m-%dT%H:%M:%SZ"), stop)
-                          or [])
-        earliest = min(begins.values()) if begins else now
+        series = self.ha.history(
+            entity_ids, earliest.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            now.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         keep_absence = set(absence_is_a_reading)
         rows: list[tuple[str, int, str]] = []
@@ -269,8 +226,8 @@ class StoreSource:
 
         added = self.store.append(rows)
         self.store.append([(HEARTBEAT_ENTITY, int(now.timestamp() * 1000), "ok")])
-        return {"added": added, "entities": len(series),
-                "since": earliest.isoformat(), "requests": len(groups)}
+        return {"added": added, "entities": len(series or []),
+                "since": earliest.isoformat()}
 
     def liveness_times(self, start: str, stop: str | None = None) -> list[str]:
         """When we know history was being captured.

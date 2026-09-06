@@ -11,8 +11,10 @@ other two are worth.
 
 ### A broker, first
 
-Entities are published over MQTT discovery, so the add-on wants the **Mosquitto broker** add-on — or any broker — and the **MQTT** integration, which ships with Home Assistant. There is no custom integration to install and nothing to write in YAML: the sensors arrive as ordinary Home Assistant entities.
-
+Entities are published over MQTT discovery, so the add-on wants the **Mosquitto
+broker** add-on — or any broker — and the **MQTT** integration, which ships
+with Home Assistant. There is no custom integration to install and nothing to
+write in YAML: the sensors arrive as ordinary Home Assistant entities.
 
 `mqtt:want` in the manifest is *want*, not *need*. Without a broker the add-on
 still starts, still collects history and still trains. It simply publishes
@@ -139,31 +141,7 @@ a list on this page it cannot quietly go stale.
 |---|---|
 | `log_level` | standard add-on log level; see `## The log` below |
 | `source` | `store` (default) accumulates history from Home Assistant. `influx` reads an existing InfluxDB v2 archive instead. Which to pick is `### Where the history should live` above |
-| `admin_users` | Home Assistant user ids allowed to change things. Empty (the default) means everyone; see `### Who may change something` below |
 | `influx_url` / `influx_org` / `influx_bucket` / `influx_token` | required when `source` is `influx` |
-
-### Who may change something
-
-Ingress means Home Assistant has already checked that whoever opened the panel
-is logged in. It does not check *which* user, and the panel can save the
-configuration and start a retrain — so by default every member of the household
-can do both. That is usually fine and occasionally not.
-
-`admin_users` is a list of Home Assistant user ids. Set it and the endpoints
-that change something (save configuration, collect, predict, train, reload)
-answer 403 to anyone not on the list; everything you can only look at stays
-open, so the panel still loads and still shows forecasts for everybody.
-
-Find a user id under Settings → People → the user → it is in the URL, a long
-hex string. Put your own in first, or you will lock yourself out of your own
-Configuration tab and have to empty the option again from the add-on's options
-form to get back in.
-
-    admin_users:
-      - 8f2c1e94a7b34d0e9c5f1a2b3d4e5f60
-
-Leave it empty and nothing changes — that is what every install did before this
-option existed.
 
 Everything else — which people, which zones, which group — is configured on the
 add-on's own panel, because Supervisor's options form has no entity picker and
@@ -474,9 +452,6 @@ The panel is the intended way in; these exist for debugging.
 | `POST /train` | rebuild the feature table and refit. Refuses with 409 below 10 days of history |
 | `POST /reload` | re-read the model files without retraining |
 
-Every `POST` here is subject to `admin_users` once that option is set; the
-`GET`s never are.
-
 ## Troubleshooting
 
 **No entities appear.** Check `mqtt` in `/health`. The add-on runs fine without a
@@ -497,20 +472,3 @@ recorded journeys before it will ship at all.
 line is hourly, so silence older than that means the worker has stopped. The
 watchdog dumps every thread's stack to the log and raises `worker.stalled` on
 `/api/status`; that dump is what says where it stopped.
-
-**It stopped starting right after an update, and the log says nothing useful.**
-This add-on ships an enforcing AppArmor profile: it may read anything, but it may
-only write to its own `/data`, to `/tmp` and to `/run`. If a release ever gets
-that wrong, the add-on is refused at the point it breaks the rule and the add-on
-log shows no reason, because the refusal is recorded by the kernel and not by the
-add-on. Check the host log:
-
-    ha host logs | grep 'apparmor="DENIED"'
-
-Lines naming this add-on's slug are the answer. **Please report them** — they say
-exactly which rule is missing, and the fix is a one-line change.
-
-**Do not uninstall to recover.** Uninstalling deletes `/data`, which is the entire
-collected history — months of it, and Home Assistant cannot supply it again
-because the recorder keeps about ten days. The profile is reloaded by an add-on
-*update*, so a fixed release repairs it in place with the archive intact.

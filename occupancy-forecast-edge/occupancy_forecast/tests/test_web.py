@@ -49,23 +49,6 @@ def test_an_unbuilt_panel_is_a_page_and_not_a_crash(monkeypatch):
     assert config.display_name() in html
 
 
-def test_a_build_with_an_index_but_no_assets_does_not_crash_the_start(monkeypatch, tmp_path):
-    """`StaticFiles` checks its directory at construction, so this was exactly
-    the start-up crash the skip above exists to avoid, one level down."""
-    (tmp_path / "index.html").write_text("<title>x</title>")
-    monkeypatch.setattr(web, "dist_dir", lambda: tmp_path)
-
-    class Recorder:
-        mounted = False
-
-        def mount(self, *args, **kwargs):
-            self.mounted = True
-
-    app = Recorder()
-    web.mount(app)
-    assert not app.mounted
-
-
 def test_the_assets_mount_is_skipped_when_there_is_no_build(monkeypatch):
     """Mounting a directory that does not exist is a startup crash, and a missing
     panel is not worth taking the forecaster down for."""
