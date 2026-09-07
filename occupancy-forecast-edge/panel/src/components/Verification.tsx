@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react'
 
 import type { VerificationPoint } from '../types'
 import { ChartTip, TipRow } from './ChartTip'
-import { linePath, type Pt } from './geometry'
+import { linePath, runs, type Pt } from './geometry'
 import { useChartPointer } from './useChartPointer'
 
 /**
@@ -33,18 +33,6 @@ import { useChartPointer } from './useChartPointer'
 const W = 1000
 const H = 160
 
-/** Contiguous runs where nothing was published, as [start, end] inclusive. */
-function unpublished(points: VerificationPoint[]): [number, number][] {
-  const out: [number, number][] = []
-  points.forEach((p, i) => {
-    if (p.forecast !== null) return
-    const last = out[out.length - 1]
-    if (last && last[1] === i - 1) last[1] = i
-    else out.push([i, i])
-  })
-  return out
-}
-
 export function Verification({ points, summary, startLabel, endLabel, horizon }: {
   points: VerificationPoint[]
   summary: string
@@ -70,7 +58,8 @@ export function Verification({ points, summary, startLabel, endLabel, horizon }:
 
   const forecast = at((p) => p.forecast)
   const actual = at((p) => p.actual)
-  const holes = unpublished(points)
+  // Contiguous runs where nothing was published, as [start, end] inclusive.
+  const holes = runs(points.map((p) => p.forecast === null))
   const hover = points[pointer.index ?? -1]
 
   const pct = (v: number) => `${(100 * v).toFixed(0)}%`

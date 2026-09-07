@@ -34,6 +34,7 @@ import zoneinfo
 import json
 import re
 import os
+import time
 
 from . import log
 
@@ -251,7 +252,14 @@ class Settings:
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(self.to_json())
+        # Flushed to disk BEFORE the rename. A rename is atomic; the bytes
+        # behind it are not, and a power cut between the two leaves an empty
+        # config.json that `load` then refuses -- an add-on that will not
+        # start over a setting it saved fine.
+        with tmp.open("w") as fh:
+            fh.write(self.to_json())
+            fh.flush()
+            os.fsync(fh.fileno())
         tmp.replace(path)
 
     @classmethod
@@ -278,10 +286,21 @@ def tzinfo() -> "zoneinfo.ZoneInfo":
     `features` does -- a bad timezone from Home Assistant is a reason to be
     wrong by an hour, not a reason to refuse to start.
     """
+    global _tz_warned
     try:
         return zoneinfo.ZoneInfo(TIMEZONE)
-    except Exception:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001
+        # Said once. Silent, this was an hour-shifted set of labels in one half
+        # of the stack while the other half (`features._localise`) raised on
+        # the same zone, and nothing connected the two.
+        if _tz_warned != TIMEZONE:
+            _tz_warned = TIMEZONE
+            _log.warning("timezone %r is not usable (%s); local dates and "
+                         "hours are being computed in UTC", TIMEZONE, err)
         return zoneinfo.ZoneInfo("UTC")
+
+
+_tz_warned: str | None = None
 HOLIDAY_COUNTRY: str | None = None
 HOME_COORDS: tuple[float, float] | None = None
 DAY_SCHEDULE: str | None = None
@@ -436,7 +455,34 @@ def mqtt_settings() -> dict:
         "port": int(os.environ.get("MQTT_PORT", "1883")),
         "username": os.environ.get("MQTT_USER") or None,
         "password": os.environ.get("MQTT_PASSWORD") or None,
+        # bashio prints the service's boolean as the word; anything else is no.
+        "ssl": (os.environ.get("MQTT_SSL") or "").strip().lower() == "true",
     }
+
+
+# Who may hit the endpoints that CHANGE something.
+#
+# Ingress authenticates the session -- Supervisor will not proxy a request from
+# somebody who is not logged in to Home Assistant -- but it does not
+# authorise. Every user of the house can open the panel, and the panel can
+# retrain the models and rewrite the configuration. `panel_admin` does not help:
+# it hides the sidebar entry, it does not guard the URL.
+#
+# What Supervisor does give us is the user's identity. `_init_header()` in
+# supervisor/api/ingress.py sets `X-Remote-User-Id` on the proxied request AND
+# strips any copy the client sent, so the value cannot be forged from the
+# browser -- it is as trustworthy as the Home Assistant session behind it.
+# There is no admin header: `ATTR_ADMIN` exists on the panel definition and is
+# never forwarded. So this is an allowlist of user ids and not a role check.
+#
+# EMPTY MEANS EVERYONE, deliberately. This option arrives in an add-on that has
+# been running without it, and a default that locked the owner out of their own
+# panel on upgrade would be a worse failure than the one it fixes. Setting it is
+# the opt-in.
+def admin_users() -> frozenset[str]:
+    """Home Assistant user ids allowed to POST. Empty set means unrestricted."""
+    raw = os.environ.get("OCCUPANCY_ADMIN_USERS", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 # MQTT topic root, and the MQTT client id derived from it in predict.py.
@@ -454,42 +500,84 @@ def mqtt_settings() -> dict:
 # exactly what running stable and edge side by side would do.
 DEFAULT_TOPIC_PREFIX = "occupancy_forecast"
 
+# Cached ONLY once Supervisor has answered (or there is no Supervisor to ask).
+# The version before this cached the default on failure too, for the life of
+# the process: a Supervisor that was still coming up when the add-on started --
+# a host reboot is enough -- turned the edge build into a second stable build
+# on MQTT until its next restart, with one ERROR line at boot as the only
+# trace. Now a failed lookup leaves this None, `topic_prefix()` answers the
+# default without remembering it, and everything that would publish under it
+# checks `topic_prefix_resolved()` first.
 _topic_prefix: str | None = None
+_topic_prefix_error: str | None = None
+
+
+def _supervisor_slug(token: str, timeout: float) -> str:
+    import json
+    import urllib.request
+    request = urllib.request.Request(
+        "http://supervisor/addons/self/info",
+        headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response)["data"]["slug"]
+
+
+def resolve_topic_prefix(attempts: int = 1, delay: float = 0.0,
+                         timeout: float = 5.0) -> bool:
+    """Ask Supervisor for this add-on's slug. True once the prefix is known.
+
+    The only place a network call is made for the prefix. Outside an add-on
+    there is no Supervisor and no second instance to collide with, so the
+    default is the answer and is cached at once. Inside one, each failed
+    attempt is logged at ERROR -- it is the line that explains a missing set
+    of entities -- and NOTHING is cached, so the next call asks again.
+    """
+    global _topic_prefix, _topic_prefix_error
+    if _topic_prefix is not None:
+        return True
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        _topic_prefix = DEFAULT_TOPIC_PREFIX
+        return True
+    for attempt in range(1, attempts + 1):
+        try:
+            slug = _supervisor_slug(token, timeout)
+            _, _, name = slug.partition("_")     # drop the repository prefix
+            _topic_prefix = name or DEFAULT_TOPIC_PREFIX
+            _topic_prefix_error = None
+            return True
+        except Exception as err:  # noqa: BLE001
+            _topic_prefix_error = str(err)
+            _log.error("could not read this add-on's slug from Supervisor "
+                       "(attempt %d of %d: %s). Nothing is published to MQTT "
+                       "until it can be read: a guessed prefix would collide "
+                       "with any other build of this add-on.",
+                       attempt, attempts, err)
+            if attempt < attempts and delay > 0:
+                time.sleep(delay)
+    return False
+
+
+def topic_prefix_resolved() -> bool:
+    """Whether `topic_prefix()` is this add-on's own, rather than a guess."""
+    return _topic_prefix is not None or not os.environ.get("SUPERVISOR_TOKEN")
+
+
+def topic_prefix_error() -> str | None:
+    return None if topic_prefix_resolved() else _topic_prefix_error
 
 
 def topic_prefix() -> str:
-    global _topic_prefix
-    if _topic_prefix is not None:
-        return _topic_prefix
+    """The MQTT topic root. Never makes a network call.
 
-    _topic_prefix = DEFAULT_TOPIC_PREFIX
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if token:
-        # Only attempted inside an add-on; outside one there is no supervisor to
-        # ask and no second instance to collide with.
-        try:
-            import json
-            import urllib.request
-            request = urllib.request.Request(
-                "http://supervisor/addons/self/info",
-                headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(request, timeout=15) as response:
-                slug = json.load(response)["data"]["slug"]
-            _, _, name = slug.partition("_")     # drop the repository prefix
-            if name:
-                _topic_prefix = name
-        except Exception as err:  # noqa: BLE001
-            # For the stable add-on the default IS the right answer. For any
-            # second instance it is actively wrong -- it silently adopts
-            # stable's topic root and client id, and two MQTT clients sharing
-            # an id take turns kicking each other off with nothing in the log
-            # to say why. Never silent, therefore -- and ERROR rather than
-            # warning, because it is silent data loss and not a degradation.
-            _log.error("could not read this add-on's slug from Supervisor "
-                       "(%s); falling back to the topic prefix %r. If more "
-                       "than one build of this add-on is installed, they will "
-                       "now COLLIDE on MQTT.", err, DEFAULT_TOPIC_PREFIX)
-    return _topic_prefix
+    While unresolved this returns the default so that names can still be
+    formed -- a log line, a notification title -- but it does not remember it;
+    see `resolve_topic_prefix`. Callers that would write something under the
+    prefix ask `topic_prefix_resolved()` first.
+    """
+    if _topic_prefix is None and not os.environ.get("SUPERVISOR_TOKEN"):
+        resolve_topic_prefix()      # no network outside an add-on; caches
+    return _topic_prefix or DEFAULT_TOPIC_PREFIX
 
 
 def display_name() -> str:
@@ -499,5 +587,13 @@ def display_name() -> str:
     line -- it has to say WHICH build wrote it, or two add-ons produce identical
     text and the reader cannot tell which one is complaining. Derived from the
     same slug as everything else so there is one thing to get right, not two.
+
+    It ALSO feeds the MQTT device name, and Home Assistant builds entity ids
+    from the device name -- so a casing change here silently orphans every
+    entity the add-on already owns. (`predict._device_label` used to be a
+    second copy of this transform for that reason; one function now.) There
+    used to be an acronym table beside it, because `.title()` turned the old
+    slug's "ml" into "Ml"; the current slug has no acronym and the table matched
+    nothing, so it is gone. Reintroduce one before putting an acronym in a slug.
     """
     return topic_prefix().replace("_", " ").title()

@@ -180,10 +180,11 @@ def stratified_brier(scored: pd.DataFrame, wide: pd.DataFrame,
         cut = float(usable.quantile(TRANSITION_QUANTILE))
         cuts.append(cut)
         merged = rows.merge(slopes, on=["subject", "dow", "slot"], how="left")
+        # `>=` on a float column is already plain bool (NaN compares False),
+        # so a NaN slope lands in "flat" without any fillna.
         steep = merged["slope"].abs() >= cut
         for name, mask in (("transition", steep), ("flat", ~steep)):
-            part = merged[mask.fillna(False) if name == "transition"
-                          else ~steep.fillna(False)]
+            part = merged[mask]
             if part.empty:
                 continue
             out[name].append(evaluate.score(part[features.TARGET_COLUMN].to_numpy(),

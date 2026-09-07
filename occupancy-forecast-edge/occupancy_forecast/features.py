@@ -30,7 +30,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import config
+from . import config, log
+
+_log = log.get(__name__)
 
 # ---------------------------------------------------------------------------
 # Feature groups. Named so a drop/only probe can price them as a unit.
@@ -896,9 +898,8 @@ def _add_proximity(frame: pd.DataFrame, source, subject: config.Subject,
 
     # The grid is regular, so a positional shift IS a fixed time offset here --
     # unlike the target join, which crosses gaps. One slot is GRID_MINUTES.
-    per_hour = 60 // config.GRID_MINUTES
     frame["distance_delta_30m"] = frame["distance_km"].diff(1)
-    frame["distance_delta_60m"] = frame["distance_km"].diff(per_hour)
+    frame["distance_delta_60m"] = frame["distance_km"].diff(slots_per_hour())
 
     if subject.direction_entity:
         events = source.seeded_states(subject.direction_entity, start, stop)
@@ -992,6 +993,58 @@ def unmatched_away_states(source, start: str, stop: str | None) -> dict[str, int
 # Derived columns
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The calendar, in one place
+#
+# Slot-of-day, the weekend flag and the holiday flag were each spelled out in
+# several modules -- the slot arithmetic in six -- and `_holiday_flags` existed
+# twice with different exception handling. Everything that labels a day or a
+# slot reads these now, so a change to the grid or the calendar is one edit.
+# ---------------------------------------------------------------------------
+
+def slots_per_hour() -> int:
+    return 60 // config.GRID_MINUTES
+
+
+def slot_of_day(local: pd.Series) -> pd.Series:
+    """0 .. SLOTS_PER_DAY-1 for a tz-aware LOCAL datetime series.
+
+    Local, not UTC: a slot is a wall-clock position, and the two differ by an
+    hour for half the year. On the autumn transition day two UTC slots map to
+    one local slot; the callers decide what that means for them.
+    """
+    return local.dt.hour * slots_per_hour() + local.dt.minute // config.GRID_MINUTES
+
+
+def is_weekend(dow) -> np.ndarray:
+    """1.0 on Saturday and Sunday, from pandas' Monday=0 weekday."""
+    return (np.asarray(dow) >= 5).astype(float)
+
+
+def holiday_flags(dates) -> np.ndarray:
+    """Public holidays as 1.0/0.0, or all-zeros when the calendar is unknown.
+
+    Takes a tz-aware Series or a DatetimeIndex; the LOCAL date is what is
+    looked up. `country_holidays` raises for a country the library does not
+    cover, and Home Assistant's `country` can be unset entirely. Neither is a
+    reason to abort a six-month feature build -- a flat column is simply a
+    feature that carries nothing, which the model already handles -- so every
+    failure degrades to zeros, once with a debug line.
+    """
+    index = pd.DatetimeIndex(dates)
+    zeros = np.zeros(len(index))
+    if not config.HOLIDAY_COUNTRY or len(index) == 0:
+        return zeros
+    try:
+        import holidays
+        years = sorted({int(y) for y in index.year if not pd.isna(y)})
+        calendar = holidays.country_holidays(config.HOLIDAY_COUNTRY, years=years)
+    except Exception as err:  # noqa: BLE001
+        _log.debug("no holiday calendar for %r: %s", config.HOLIDAY_COUNTRY, err)
+        return zeros
+    return np.array([1.0 if d in calendar else 0.0 for d in index.date])
+
+
 def _cyclical(local: pd.Series, prefix: str = "") -> pd.DataFrame:
     """Sine/cosine encodings of time-of-day, weekday and month.
 
@@ -1000,7 +1053,7 @@ def _cyclical(local: pd.Series, prefix: str = "") -> pd.DataFrame:
     not have much of. The abandoned first attempt at this problem used the same
     encoding; it was the one good idea in it.
     """
-    slot = local.dt.hour * (60 // config.GRID_MINUTES) + local.dt.minute // config.GRID_MINUTES
+    slot = slot_of_day(local)
     dow = local.dt.dayofweek
     month = local.dt.month
 
@@ -1011,34 +1064,14 @@ def _cyclical(local: pd.Series, prefix: str = "") -> pd.DataFrame:
     out[f"{prefix}dow_cos"] = np.cos(2 * np.pi * dow / 7)
     out[f"{prefix}month_sin"] = np.sin(2 * np.pi * (month - 1) / 12)
     out[f"{prefix}month_cos"] = np.cos(2 * np.pi * (month - 1) / 12)
-    out[f"{prefix}is_weekend"] = (dow >= 5).astype(float)
-    out[f"{prefix}is_holiday"] = _holiday_flags(local)
+    out[f"{prefix}is_weekend"] = is_weekend(dow)
+    out[f"{prefix}is_holiday"] = holiday_flags(local)
     # The same clock as an integer, for the edge the circle cannot cut cheaply.
     # See INTEGER_CALENDAR_COLUMNS. Always built; served only when named in
     # SHIPPED_EXTRAS.
     out[f"{prefix}slot"] = slot.astype(float)
     out[f"{prefix}dow"] = dow.astype(float)
     return out
-
-
-def _holiday_flags(local: pd.Series) -> np.ndarray:
-    """Public holidays, or all-zeros when we cannot know.
-
-    `country_holidays` raises `NotImplementedError` for a country the library
-    does not cover, and Home Assistant's `country` can also be unset entirely.
-    Neither is a reason to abort a six-month feature build -- a flat column is
-    simply a feature that carries nothing, which the model already handles.
-    """
-    zeros = np.zeros(len(local))
-    if not config.HOLIDAY_COUNTRY:
-        return zeros
-    try:
-        import holidays
-        years = sorted(set(local.dt.year.dropna().astype(int)))
-        calendar = holidays.country_holidays(config.HOLIDAY_COUNTRY, years=years)
-    except (NotImplementedError, KeyError, AttributeError):
-        return zeros
-    return np.array([1.0 if d in calendar else 0.0 for d in local.dt.date])
 
 
 def _liveness(source, start: str, stop: str | None) -> pd.DatetimeIndex:
@@ -1162,7 +1195,6 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
             new[name] = values.to_numpy()
 
         # Daily lags OF THE TARGET SLOT. Gated -- see safe_daily_lags.
-        weekly = []
         for days in DAILY_LAGS:
             column = f"tgt{horizon}h_lag{days}d"
             new[column] = _at_offset(table, keyed, ahead - pd.Timedelta(days=days))
