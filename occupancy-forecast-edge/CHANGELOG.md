@@ -17,6 +17,12 @@ rejected go in the commit message instead.
 
 ### Added
 
+- The add-on can publish to a broker that is not a Supervisor add-on. Set
+  `mqtt_host` (and port, user, password, ssl) in the Configuration tab and the
+  add-on uses that broker; leave it empty and the Mosquitto add-on is used as
+  before. Until now a household on EMQX or on a Mosquitto outside Supervisor
+  could not receive the entities at all.
+
 - An AppArmor profile confining the add-on's writes to its own data directory,
   which also takes Supervisor's security rating to its cap of 8. It enforces
   rather than warns: the add-on refuses to start if the profile is wrong, which

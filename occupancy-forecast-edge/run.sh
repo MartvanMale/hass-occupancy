@@ -31,7 +31,17 @@ fi
 # `set -e` is a container that will not start over a setting nobody has touched.
 export OCCUPANCY_ADMIN_USERS="$(bashio::config 'admin_users // [] | join(",")')"
 
-if bashio::services.available 'mqtt'; then
+# An explicit broker in the options wins over the Supervisor service: a broker
+# outside Supervisor (EMQX or Mosquitto on another host) registers no service,
+# and the MQTT integration in Home Assistant is already pointed at it.
+if bashio::config.has_value 'mqtt_host'; then
+    export MQTT_HOST="$(bashio::config 'mqtt_host')"
+    export MQTT_PORT="$(bashio::config 'mqtt_port')"
+    export MQTT_USER="$(bashio::config 'mqtt_user')"
+    export MQTT_PASSWORD="$(bashio::config 'mqtt_password')"
+    export MQTT_SSL="$(bashio::config 'mqtt_ssl')"
+    bashio::log.info "MQTT broker from the add-on options: ${MQTT_HOST}:${MQTT_PORT}"
+elif bashio::services.available 'mqtt'; then
     export MQTT_HOST="$(bashio::services 'mqtt' 'host')"
     export MQTT_PORT="$(bashio::services 'mqtt' 'port')"
     export MQTT_USER="$(bashio::services 'mqtt' 'username')"
@@ -41,7 +51,7 @@ if bashio::services.available 'mqtt'; then
     export MQTT_SSL="$(bashio::services 'mqtt' 'ssl' 2>/dev/null || echo false)"
 else
     # Not fatal -- see `mqtt:want` in config.yaml.
-    bashio::log.warning "No MQTT service. Entities will not be published."
+    bashio::log.warning "No MQTT broker: no mqtt_host option and no Supervisor mqtt service. Entities will not be published."
 fi
 
 # The add-on's own name, not a literal: this file is shared by the stable and

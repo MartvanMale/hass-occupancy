@@ -51,6 +51,11 @@ options:
   log_level: info
   source: store
   admin_users: []
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  mqtt_ssl: false
   influx_url: ""
   influx_org: ""
   influx_bucket: homeassistant
@@ -70,3 +75,13 @@ schema:
   influx_org: str?
   influx_bucket: str?
   influx_token: password?
+  # An MQTT broker that is not a Supervisor add-on. When mqtt_host is set these
+  # five win over the Supervisor mqtt service; when it is empty the service is
+  # used as before. A broker outside Supervisor (EMQX or Mosquitto on another
+  # host) registers no service, so without these the add-on could only ever
+  # publish through the Mosquitto add-on.
+  mqtt_host: str?
+  mqtt_port: port?
+  mqtt_user: str?
+  mqtt_password: password?
+  mqtt_ssl: bool?
