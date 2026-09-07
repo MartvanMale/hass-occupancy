@@ -1,5 +1,4 @@
 # Changelog — Edge
-
 `## Unreleased` is the queue: what has landed on edge and has not been promoted
 to stable yet. Everything below it has shipped, and is word for word what
 stable's own `CHANGELOG.md` carries — `scripts/promote.sh` is the moment a block
@@ -15,14 +14,16 @@ rejected go in the commit message instead.
 
 ## Unreleased
 
-### Added
 
+## 0.2.2 - 2026-09-07
 - The add-on can publish to a broker that is not a Supervisor add-on. Set
   `mqtt_host` (and port, user, password, ssl) in the Configuration tab and the
   add-on uses that broker; leave it empty and the Mosquitto add-on is used as
   before. Until now a household on EMQX or on a Mosquitto outside Supervisor
   could not receive the entities at all.
 
+## 0.2.1 - 2026-09-07
+### Added
 - An AppArmor profile confining the add-on's writes to its own data directory,
   which also takes Supervisor's security rating to its cap of 8. It enforces
   rather than warns: the add-on refuses to start if the profile is wrong, which
