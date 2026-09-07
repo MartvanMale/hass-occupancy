@@ -448,8 +448,9 @@ def mqtt_settings() -> dict:
     host = os.environ.get("MQTT_HOST")
     if not host:
         raise RuntimeError(
-            "no MQTT broker: expected MQTT_HOST from Supervisor's mqtt service. "
-            "Install the Mosquitto add-on, or set it in the add-on options.")
+            "no MQTT broker: expected MQTT_HOST from the mqtt_host add-on option "
+            "or from Supervisor's mqtt service. Set mqtt_host in the add-on "
+            "options, or install the Mosquitto add-on.")
     return {
         "host": host,
         "port": int(os.environ.get("MQTT_PORT", "1883")),
