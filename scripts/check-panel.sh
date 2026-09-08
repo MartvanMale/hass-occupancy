@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 # Fail if <tree>/panel/dist was not built from <tree>/panel's current source.
-#
-# The bundle is committed and the Dockerfile only COPYs it, so a stale dist/ is
-# not a build error -- it is an add-on that installs cleanly and serves last
-# week's panel, with nothing anywhere saying so.
-#
-# scripts/test.sh runs this, so a green suite means the committed bundle matches
-# its source. promote.sh does not need it -- it rebuilds both bundles itself, so
-# the pair is fresh by construction at promotion.
+# The bundle is committed and the Dockerfile only COPYs it, so a stale one is not
+# a build error -- it installs cleanly and serves last week's panel. test.sh runs
+# this; promote.sh does not need it, since it rebuilds both bundles itself.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

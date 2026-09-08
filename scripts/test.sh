@@ -1,25 +1,14 @@
 #!/usr/bin/env bash
-# Run the test suite against the edge tree -- which is the source of truth, so it
-# is the tree worth testing. `occupancy-forecast/` is generated from it and identical.
-#
-# In a container rather than a local venv so that the Python version and the
-# pinned dependencies are the ones the add-on actually ships with, on any machine
-# and with nothing installed on the host.
-#
-# requirements-dev.txt, not requirements.txt: pytest lives only in the former,
-# because the shipped image deliberately does not carry a test framework.
-#
-# No network, no Home Assistant, no broker. The tests run against a synthetic
-# household that matches nobody's real installation, which is what stops one
-# particular set of entity ids creeping back into the code.
+# Run the suite against the edge tree, the source of truth; occupancy-forecast/
+# is generated from it. In a container so the Python and the pinned deps are the
+# ones the add-on ships. requirements-dev.txt, because the shipped image carries
+# no test framework. No network, no Home Assistant, no broker -- the tests run
+# against a synthetic household, which keeps real entity ids out of the code.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The panel first, because it is the fast half and a type error there is the
-# most likely thing to be broken. `tsc --noEmit` is the whole UI test budget: it
-# catches the class of mistake that used to be caught by asserting on generated
-# markup -- a renamed API field, a handler that no longer exists -- and the
-# shapes it checks against are the other half of test_api_contract.py.
+# Panel first: the fast half. `tsc --noEmit` is the whole UI test budget, and it
+# checks the same shapes test_api_contract.py does.
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
@@ -28,11 +17,8 @@ docker run --rm \
   node:22-alpine \
   sh -c '[ -d node_modules ] || npm ci --no-audit --no-fund; npx tsc --noEmit'
 
-# The committed bundle must match the source beside it. This used to be a
-# pre-commit hook's job, and when that went nothing on any path a person
-# actually takes verified the pair -- a stale bundle installs cleanly and serves
-# last week's panel. Now a green test run means the bundle is fresh. If this
-# fails, run scripts/build-panel.sh and re-test.
+# A stale bundle installs cleanly and serves last week's panel, so a green run
+# has to mean it is fresh. If this fails: scripts/build-panel.sh, then re-test.
 scripts/check-panel.sh occupancy-forecast-edge
 
 exec docker run --rm \

@@ -1,29 +1,15 @@
 """Import an InfluxDB archive into the add-on's local store. Runs INSIDE the add-on.
 
-This is the payload for backfill-store-from-influx.sh, which is what you should
-run. It is a separate file rather than a heredoc so it can be linted, and it
-takes its Influx connection as JSON on **stdin** rather than as arguments or
-environment so the token never appears in an argv or in `ps`.
+The payload for backfill-store-from-influx.sh, which is what you run. Takes the
+Influx connection as JSON on stdin so the token never reaches an argv or `ps`.
 
-WHY THIS EXISTS. The two history sources are not symmetric in what they leave
-behind. `source: influx` trains from Influx directly and never fills the local
-store -- `server.do_collect()` short-circuits on it -- so an install that runs
-on Influx for a while and later switches to `store` starts its archive from
-zero on that day. And an install that has always been on `store` has only what
-the recorder could give it, which is measured in days.
+`source: influx` never fills the local store (`server.do_collect()`
+short-circuits), so switching to `source: store` later would start the archive
+from zero. One idempotent import closes that. Safe to re-run: the primary key is
+(entity_id, ts) and `append()` is INSERT OR IGNORE.
 
-This closes both gaps: one idempotent import and the store holds the whole
-Influx history, after which `source: store` is a real option rather than a
-six-week wait. It is also the only way to compare the two source
-implementations on the same data, which is what it was written for.
-
-It is deliberately NOT part of the add-on. Backfilling is something you do once,
-by hand, knowing what you are doing -- not something the add-on should decide to
-do to itself on startup.
-
-Safe to re-run. The store's primary key is (entity_id, ts) and `append()` is
-INSERT OR IGNORE, so a repeat run inserts nothing and a partial run heals
-itself on the next one.
+Deliberately not part of the add-on -- backfilling is a once, by hand, knowing
+what you are doing operation.
 """
 
 import datetime as dt

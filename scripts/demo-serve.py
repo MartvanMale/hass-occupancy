@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """Serve the panel against a demo `/data`, with no Home Assistant and no broker.
 
-`server.lifespan` calls `runtime.bootstrap()`, which builds a `HomeAssistant`
-client and immediately re-reads timezone, country and the home's LATITUDE AND
-LONGITUDE from it. Pointing that at a real installation would write real
-coordinates into the demo's config and put them on screen -- so this replaces
-the client with one that answers from a fictional household instead.
-
-Everything else is the real add-on: the same FastAPI app, the same worker, the
-same panel bundle. The MQTT broker is never configured, which the add-on already
-treats as "no entities published yet" rather than an error, and the event
-listener fails to connect and says so on the status page -- both are the
-documented degraded paths, not special cases added for this.
+`runtime.bootstrap()` re-reads timezone, country and the home's LATITUDE AND
+LONGITUDE from Home Assistant, so pointing it at a real install would put real
+coordinates on screen. This substitutes a client answering from a fictional
+household; everything else is the real add-on. No broker and no listener are the
+add-on's documented degraded paths, not special cases added here.
 
     scripts/demo-serve.py --data ~/occupancy-demo/data --port 8099
 """
