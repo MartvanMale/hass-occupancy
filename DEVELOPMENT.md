@@ -115,10 +115,13 @@ has to change in both.**
    — must pass. It checks the bundle against the source, so a stale bundle
    fails the suite rather than shipping silently.
 3. Add a line to `occupancy-forecast-edge/CHANGELOG.md` under `## Unreleased`,
-   filed under `### Added`, `### Changed` or `### Fixed`. That section is the
-   queue; at promotion the block is copied verbatim into
-   `occupancy-forecast/CHANGELOG.md`, which is Keep a Changelog and carries the
-   versioning rules in its preamble.
+   filed under `### Added`, `### Changed`, `### Fixed` or `### Removed` — the
+   same headings the stable changelog uses. That section is the queue; at
+   promotion the block is copied verbatim into `occupancy-forecast/CHANGELOG.md`.
+   Both files carry **no preamble and no title**: line 1 is a version heading,
+   because the store's Changelog tab shows the whole file to every user. The
+   versioning rules are in [Tests and scripts](#tests-and-scripts) below, not in
+   the changelogs.
 
    **Write it for somebody running the add-on, not for yourself.** One to three
    plain sentences saying what changed on their side — a copied block lands
@@ -189,17 +192,56 @@ hundred-odd tests: no network, no Home Assistant, no broker. Dev-only pins go in
 `requirements-dev.txt` — the shipped image deliberately carries no test
 framework.
 
-`test.sh`, `build-panel.sh`, `check-panel.sh` and `promote.sh` work anywhere
-Docker does. `deploy-edge.sh` and `backfill-store-from-influx.sh` are
-**author-local**: they rsync to `HOST=ha`, an ssh alias for one particular box,
-so they do nothing useful in a fresh clone.
+**`scripts/check-pins.sh` — run it whenever a numerical pin moves.** ~75s. It
+installs and runs the wheels on amd64, and disassembles the aarch64 ones, since
+nothing here is an ARM machine: it fails when an object gains ARMv8.1 LSE
+atomics outside libgcc's dispatch, the pyarrow 21.0.0 bug that aborted on a
+Pi 4. `test.sh` cannot cover this — it pins no `--platform`, so it tests
+whichever architecture the developer's machine is. The aarch64 half is a diff
+against `scripts/arm-baseline.json`; `--update-baseline` is honest only once the
+pin has run on a real Pi.
+
+`test.sh`, `build-panel.sh`, `check-panel.sh`, `check-pins.sh` and
+`promote.sh` work anywhere Docker does. `deploy-edge.sh` and
+`backfill-store-from-influx.sh` are **author-local**: they rsync to `HOST=ha`, an
+ssh alias for one particular box, so they do nothing useful in a fresh clone.
 
 Versions are documentation rather than a mechanism: stable is semver and moves
-only on a promotion, edge is `<next-stable>-dev`. The stable changelog's own
-preamble — not this file — says what a MAJOR, MINOR or PATCH bump means here.
+only on a promotion, edge is `<next-stable>-dev`. Both changelogs are
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). What a bump means:
+
+- **MAJOR** — something the user has to act on: a renamed or removed MQTT topic,
+  entity or `unique_id`; a removed or renamed option in `config.yaml`; a
+  `/data/history.db` migration you cannot roll back from.
+- **MINOR** — additive: new published entities, options, endpoints, or a new
+  signal the forecast can use.
+- **PATCH** — fixes and internals, with no change to any surface above.
 
 The local demo instance, and the only supported way to screenshot the panel:
 [`docs/demo-instance.md`](docs/demo-instance.md).
+
+## Comments
+
+Comments say **why**, and the code says what. This file is already wordy enough;
+the code should not be.
+
+The budget, and it is a real budget:
+
+- **File or module header: up to about five lines.** What it is, when to run it
+  or what calls it, and the one trap that would cost somebody an afternoon.
+- **Inline: one line.** Two if the reason genuinely needs a second.
+- **If the comment is longer than the code it sits above, it is too long.**
+
+What does *not* belong in a comment: the measurements you took, the alternative
+you rejected, the bug you hit on the way, or a narration of how the code came to
+look like this. Those go in the **commit message** — the same rule the changelog
+section above states, for the same reason. A reader of the diff wants them; a
+reader of the file next year does not.
+
+An incident that shaped the code is worth one sentence naming it, not a
+retelling.
+
+This applies to prose in docs too, agents included. Prefer cutting to adding.
 
 ## Never
 

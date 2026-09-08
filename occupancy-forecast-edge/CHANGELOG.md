@@ -1,19 +1,4 @@
-# Changelog — Edge
-`## Unreleased` is the queue: what has landed on edge and has not been promoted
-to stable yet. Everything below it has shipped, and is word for word what
-stable's own `CHANGELOG.md` carries — `scripts/promote.sh` is the moment a block
-crosses over, and it is copied rather than moved, so this file keeps the whole
-record of what edge has run.
-
-File each entry under the same `### Added` / `### Changed` / `### Fixed` /
-`### Removed` headings the stable changelog uses, and write it the way the stable
-changelog is written: one to three plain sentences saying what changed for
-somebody running the add-on. The block lands verbatim in the Changelog tab every
-store user sees. The mechanism, the measurement and the alternative that was
-rejected go in the commit message instead.
-
 ## Unreleased
-
 
 ## 0.2.2 - 2026-09-07
 - The add-on can publish to a broker that is not a Supervisor add-on. Set

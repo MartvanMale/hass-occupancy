@@ -1,17 +1,3 @@
-# Changelog
-
-All notable changes to the Occupancy Forecast add-on are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and versions are [semantic](https://semver.org/spec/v2.0.0.html): `X.Y.Z`.
-
-- **MAJOR** — something you have to act on: a renamed or removed MQTT topic,
-  entity or `unique_id`; a removed or renamed option in `config.yaml`; a
-  `/data/history.db` migration you cannot roll back from.
-- **MINOR** — additive: new published entities, new options, new endpoints, a
-  new signal the forecast can use.
-- **PATCH** — fixes and internals, with no change to any surface above.
-
 ## 0.1.1 - 2026-09-05
 
 ### Added
