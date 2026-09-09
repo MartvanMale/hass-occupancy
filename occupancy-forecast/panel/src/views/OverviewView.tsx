@@ -8,7 +8,7 @@ import { Curves, type Curve } from '../components/Curves'
 import { Horizons } from '../components/Horizons'
 import { Training } from '../components/Training'
 import { VerificationCard } from '../components/VerificationCard'
-import { relativeTime } from '../format'
+import { percent, pretty, relativeTime } from '../format'
 
 /**
  * Overview: who is home, who is coming home, and how much of it to believe.
@@ -34,12 +34,6 @@ import { relativeTime } from '../format'
  */
 
 const CURVE_ACCENT = ['blue', 'orange', 'aqua', 'red'] as const
-
-/** `alice` -> `Alice`. The slug is derived from the person's entity id, so it is
- *  the closest thing to a name the add-on has without asking Home Assistant. */
-const pretty = (slug: string) => slug.charAt(0).toUpperCase() + slug.slice(1)
-
-const percent = (v: number) => `${(v * 100).toFixed(1)}%`
 
 /**
  * The one sentence a row shows: what is coming, and when.

@@ -32,7 +32,7 @@ STATUS_KEYS = {
     "training_started_at", "last_collect", "last_predict", "last_error",
 }
 MQTT_KEYS = {"connected", "error"}
-FORECAST_KEYS = {"available", "predicted_at", "house", "horizons", "subjects"}
+FORECAST_KEYS = {"available", "predicted_at", "house", "horizons", "subjects", "night"}
 OUT_ROUTINE_KEYS = {
     "probability", "weekday", "n_weekday", "n_out_weekday",
     "departure_hour", "departure_sd", "departure_from",
@@ -40,14 +40,16 @@ OUT_ROUTINE_KEYS = {
 }
 SUBJECT_FORECAST_KEYS = {"subject", "current", "observed_at", "curve",
                          "next_departure_h",
-                         "next_arrival_h", "eta_minutes", "next_change"}
+                         "next_arrival_h", "eta_minutes", "next_change", "out"}
 NEXT_CHANGE_KEYS = {"direction", "in_hours", "at", "at_from"}
 WORKER_KEYS = {"phase", "cycles", "seconds_since_phase", "stalled",
                "stalled_since", "stalled_in", "stalls"}
 LISTENER_KEYS = {"connected"}          # the rest are optional in the type
 FEATURE_GROUP_KEYS = {"active", "detail"}
-CANDIDATE_KEYS = {"people", "zones", "groups", "countries", "has_proximity"}
+CANDIDATE_KEYS = {"people", "zones", "groups", "countries", "has_proximity",
+                  "schedules"}
 SETTINGS_KEYS = {"people", "zones", "house_entity", "holiday_country",
+                 "day_schedule",
                  "departure_threshold", "arrival_threshold", "crossing_min_hours"}
 
 # The Data tab. Every one of these is a discriminated union on the panel side:
@@ -515,6 +517,53 @@ def test_the_metrics_carry_every_field_the_quality_cards_read(tmp_path):
         assert FOLD_SCORE_KEYS <= set(fold)
     for b in detail["reliability"]:
         assert RELIABILITY_BIN_KEYS <= set(b)
+
+
+def test_a_nan_in_the_metrics_reaches_the_panel_as_null_not_as_a_500(tmp_path):
+    """`metrics.json` is written with `allow_nan=True` and read back with a
+    float NaN in it: a single-class fold has no AUC, a horizon with no baseline
+    rung has no `best_baseline_brier`, an empty fold pads every score. FastAPI
+    renders responses with `allow_nan=False`, so a NaN that reaches a handler's
+    return value is a 500 for the whole endpoint -- which is what a synthetic
+    household's own artifact did for four horizons' quality cards.
+
+    Rendered through the same response class the app uses, because the suite
+    ships no HTTP client and this is the layer the bug lived in.
+    """
+    import json
+
+    from fastapi.responses import JSONResponse
+
+    from occupancy_forecast import evaluate, explore
+
+    scored = evaluate.score(np.array([0.0, 1.0, 1.0]), np.array([0.2, 0.8, 0.9]))
+    empty = evaluate.score(np.array([]), np.array([]))
+    pooled = evaluate.summarize([scored, empty])
+    metrics = {name: 0.5 for name in HORIZON_METRICS_KEYS}
+    metrics.update(horizon_h=1, ships=True, kind="pooled", n_folds=2,
+                   n_scored=3, n_train_final=3, folds_beating_best_baseline=1,
+                   best_baseline="none", best_baseline_brier=float("nan"),
+                   skill_vs_best_baseline_pct=float("nan"),
+                   brier_fold_min=pooled["brier_fold_min"],
+                   per_fold=pooled["per_fold"], reliability=[], baselines={},
+                   fallback={}, rival_brier=None, rival_kind=None)
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "metrics.json").write_text(json.dumps({
+        "model_version": "0.1.0", "trained_at": None, "duration_s": None,
+        "evaluation": "rolling-origin-embargoed",
+        "horizons": {"1": metrics}, "failed": {},
+    }))
+    assert "NaN" in (models / "metrics.json").read_text(), "the fixture must carry the literal"
+
+    summary = explore.metrics_summary(models)
+    detail = explore.metrics_detail(models, 1)
+    for payload in (summary, detail):
+        JSONResponse(content=payload).body          # raises ValueError before the fix
+    assert summary["horizons"][0]["best_baseline_brier"] is None
+    assert detail["per_fold"][1]["brier"] is None, "the empty fold is null, not 0.0"
+    assert detail["per_fold"][0]["brier"] == pooled["per_fold"][0]["brier"], \
+        "a real number passes through unrounded"
 
 
 def test_every_explorer_endpoint_answers_rather_than_raising_on_day_one():

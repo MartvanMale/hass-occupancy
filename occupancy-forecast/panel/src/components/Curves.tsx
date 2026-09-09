@@ -1,7 +1,7 @@
 import { useState, type CSSProperties } from 'react'
 import type { NightBand } from '../types'
 import { ChartTip, TipRow } from './ChartTip'
-import { clamp, linePath } from './geometry'
+import { clamp, linePath, runs } from './geometry'
 import { useChartPointer } from './useChartPointer'
 
 /**
@@ -67,14 +67,8 @@ function pathFor(values: (number | null)[]): string {
  *  not of the subject, so in practice every curve holes at the same hour. A
  *  band is drawn only where nothing at all is forecast. */
 function holes(curves: Curve[], n: number): [number, number][] {
-  const out: [number, number][] = []
-  for (let i = 0; i < n; i += 1) {
-    if (curves.length === 0 || !curves.every((c) => c.values[i] == null)) continue
-    const last = out[out.length - 1]
-    if (last && last[1] === i - 1) last[1] = i
-    else out.push([i, i])
-  }
-  return out
+  return runs(Array.from({ length: n }, (_, i) =>
+    curves.length > 0 && curves.every((c) => c.values[i] == null)))
 }
 
 export function Curves({ curves, hours, night = [], label, at }: {

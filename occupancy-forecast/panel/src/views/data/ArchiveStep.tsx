@@ -2,7 +2,7 @@ import type { Archive, ArchiveEntity } from '../../types'
 import { Chip } from '../../components/Chip'
 import { Row } from '../../components/Row'
 import { Shape, type Accent, type IconName } from '../../components/Icon'
-import { absoluteTime, relativeTime } from '../../format'
+import { absoluteTime, bytes, count, relativeTime } from '../../format'
 
 /**
  * Step one: the archive, and the entity the rest of the page follows.
@@ -16,17 +16,6 @@ import { absoluteTime, relativeTime } from '../../format'
  * The two summary rows above the grid stay rows. They are statements, not
  * choices, and making them look pickable would be a lie.
  */
-
-const count = (n: number) => n.toLocaleString()
-
-const bytes = (n: number) => {
-  if (n < 1024) return `${n} B`
-  const units = ['kB', 'MB', 'GB']
-  let value = n / 1024
-  let i = 0
-  while (value >= 1024 && i < units.length - 1) { value /= 1024; i += 1 }
-  return `${value.toFixed(1)} ${units[i]}`
-}
 
 /** The icon for an entity is what the add-on uses it FOR, which is more use
  *  than what type it is -- the type is already in the secondary line. */

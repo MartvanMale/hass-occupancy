@@ -20,6 +20,13 @@ write in YAML: the sensors arrive as ordinary Home Assistant entities.
 still starts, still collects history and still trains. It simply publishes
 nothing, and `mqtt` in `/health` says which it is.
 
+**A broker that is not an add-on.** Supervisor hands over the host, port and
+credentials of a broker it runs itself, so a Mosquitto add-on needs nothing
+configured. A broker outside Supervisor — EMQX, or Mosquitto on another machine
+— registers no such service, so set `mqtt_host` (and `mqtt_port`, `mqtt_user`,
+`mqtt_password`, `mqtt_ssl`) in the Configuration tab instead. Those five win
+over the Supervisor service; leave `mqtt_host` empty and nothing changes.
+
 ### Where the history should live
 
 `source` is the one decision that is awkward to revisit later, because it
@@ -141,6 +148,8 @@ a list on this page it cannot quietly go stale.
 |---|---|
 | `log_level` | standard add-on log level; see `## The log` below |
 | `source` | `store` (default) accumulates history from Home Assistant. `influx` reads an existing InfluxDB v2 archive instead. Which to pick is `### Where the history should live` above |
+| `admin_users` | Home Assistant user ids allowed to save the configuration, retrain or reload. **Empty, the default, means everyone who can open the panel** — Ingress proves who the caller is, not whether they may retrain the house |
+| `mqtt_host` / `mqtt_port` / `mqtt_user` / `mqtt_password` / `mqtt_ssl` | only for a broker that is not a Supervisor add-on; see `### A broker, first` above |
 | `influx_url` / `influx_org` / `influx_bucket` / `influx_token` | required when `source` is `influx` |
 
 Everything else — which people, which zones, which group — is configured on the
@@ -471,4 +480,15 @@ recorded journeys before it will ship at all.
 **Nothing has been published for hours and the log is silent.** The heartbeat
 line is hourly, so silence older than that means the worker has stopped. The
 watchdog dumps every thread's stack to the log and raises `worker.stalled` on
-`/api/status`; that dump is what says where it stopped.
+`/api/status`; that dump is what says where it stopped. `/health` then answers
+503, and Supervisor restarts the add-on on the strength of it — so read the log
+for the dump rather than expecting to find it still stuck.
+
+**Saving the configuration or starting a retrain is refused.** Your Home
+Assistant user id is not in `admin_users`. The panel is readable by anyone who
+can open it; only changing things is gated.
+
+**The log says `Could not take ownership of /data -- running as root`.** The
+add-on hands `/data` to an unprivileged user on the first start after 0.2.1 and
+drops to it. If that fails it carries on as root and says so, which is a working
+add-on rather than one that refuses to start.
