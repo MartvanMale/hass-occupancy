@@ -32,7 +32,9 @@ import mimetypes
 import re
 from pathlib import Path
 
-from .. import config
+from .. import config, log
+
+_log = log.get(__name__)
 
 # `StaticFiles` types a response off `mimetypes`, and the standard library's
 # table has no `.woff2` -- nor does `python:3.13-slim`, which ships no
@@ -112,6 +114,13 @@ def mount(app) -> None:
     """
     directory = dist_dir()
     if directory is None:
+        return
+    if not (directory / "assets").is_dir():
+        # `StaticFiles` checks its directory at construction, so an
+        # index.html with no assets/ beside it was exactly the start-up crash
+        # this function exists to avoid.
+        _log.warning("%s has no assets/ directory; the panel's index will be "
+                     "served but its bundle will not", directory)
         return
     from fastapi.staticfiles import StaticFiles
 

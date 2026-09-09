@@ -1,0 +1,692 @@
+{
+  "note": "Per-object count of ARMv8.1 LSE instructions NOT behind libgcc's runtime dispatch. Written by scripts/check-pins.sh --update-baseline. All should be 0.",
+  "platform": "manylinux_2_28_aarch64",
+  "abi": "cp313",
+  "confirmed_on_hardware": "not yet confirmed on a Raspberry Pi 4 (Cortex-A72)",
+  "objects": {
+    "numpy/_core/_multiarray_tests.so": {
+      "unguarded": 0,
+      "version": "2.3.4"
+    },
+    "numpy/_core/_multiarray_umath.so": {
+      "unguarded": 0,
+      "version": "2.3.4"
+    },
+    "numpy/fft/_pocketfft_umath.so": {
+      "unguarded": 0,
+      "version": "2.3.4"
+    },
+    "numpy/numpy.libs/libscipy_openblas64_.so": {
+      "unguarded": 0,
+      "version": "2.3.4"
+    },
+    "numpy/random/_generator.so": {
+      "unguarded": 0,
+      "version": "2.3.4"
+    },
+    "pandas/_libs/algos.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/groupby.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/hashing.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/hashtable.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/index.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/internals.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/interval.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/join.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/lib.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/ops.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/parsers.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/reshape.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/sas.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/sparse.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslib.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/conversion.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/fields.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/parsing.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/period.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/strptime.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/timedeltas.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/timestamps.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/timezones.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/tzconversion.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/tslibs/vectorized.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/window/aggregations.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/window/indexers.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pandas/_libs/writers.so": {
+      "unguarded": 0,
+      "version": "2.3.3"
+    },
+    "pyarrow/_acero.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_azurefs.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_compute.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_csv.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_dataset.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_dataset_orc.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_dataset_parquet.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_dataset_parquet_encryption.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_feather.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_flight.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_fs.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_gcsfs.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_hdfs.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_json.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_orc.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_parquet.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_parquet_encryption.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_pyarrow_cpp_tests.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_s3fs.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/_substrait.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/lib.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_acero.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_compute.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_dataset.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_flight.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_python.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_python_flight.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_python_parquet_encryption.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libarrow_substrait.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "pyarrow/libparquet.so": {
+      "unguarded": 0,
+      "version": "23.0.1"
+    },
+    "scikit-learn/sklearn/_cyutility.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/_isotonic.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/_loss/_loss.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_dbscan_inner.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_hdbscan/_linkage.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_hdbscan/_reachability.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_hdbscan/_tree.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_hierarchical_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_k_means_common.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_k_means_elkan.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_k_means_lloyd.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/cluster/_k_means_minibatch.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/datasets/_svmlight_format_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/decomposition/_cdnmf_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/decomposition/_online_lda_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_gradient_boosting.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_hist_gradient_boosting/_binning.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_hist_gradient_boosting/_bitset.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_hist_gradient_boosting/_gradient_boosting.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_hist_gradient_boosting/_predictor.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_hist_gradient_boosting/histogram.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/ensemble/_hist_gradient_boosting/splitting.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/linear_model/_cd_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/linear_model/_sag_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/linear_model/_sgd_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/manifold/_barnes_hut_tsne.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/manifold/_utils.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_dist_metrics.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_argkmin.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_argkmin_classmode.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_base.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_datasets_pair.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_middle_term_computer.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_radius_neighbors.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_distances_reduction/_radius_neighbors_classmode.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/_pairwise_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/metrics/cluster/_expected_mutual_info_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/neighbors/_ball_tree.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/neighbors/_kd_tree.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/neighbors/_quad_tree.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/preprocessing/_csr_polynomial_expansion.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/preprocessing/_target_encoder_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/svm/_liblinear.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/svm/_libsvm.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/svm/_libsvm_sparse.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/tree/_criterion.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/tree/_partitioner.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/tree/_splitter.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/tree/_tree.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/tree/_utils.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_cython_blas.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_fast_dict.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_isfinite.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_random.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_seq_dataset.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_typedefs.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/_weight_vector.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/arrayfuncs.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/murmurhash.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scikit-learn/sklearn/utils/sparsefuncs_fast.so": {
+      "unguarded": 0,
+      "version": "1.7.2"
+    },
+    "scipy/_cyutility.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/cluster/hierarchy/_hierarchy.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/cluster/hierarchy/_optimal_leaf_ordering.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/fft/_duccfft/pyduccfft.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/fftpack/convolve.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/interpolate/_interpnd.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/interpolate/_ppoly.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/interpolate/_rgi_cython.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/io/_fast_matrix_market/_fmm_core.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/linalg/_cythonized_array_utils.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/linalg/_decomp_interpolative.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/linalg/_matfuncs_sqrtm_triu.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/linalg/_solve_toeplitz.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/linalg/cython_blas.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/ndimage/_ni_label.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/optimize/_bglu_dense.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/optimize/_highspy/_core.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/optimize/_highspy/_highs_options.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/optimize/_lsq/givens_elimination.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/optimize/_pava_pybind.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/optimize/_trlib/_trlib.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/signal/_peak_finding_utils.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/signal/_sosfilt.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/signal/_upfirdn_apply.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/_csparsetools.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/csgraph/_flow.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/csgraph/_matching.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/csgraph/_min_spanning_tree.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/csgraph/_reordering.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/csgraph/_shortest_path.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/sparse/csgraph/_traversal.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/_ckdtree.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/_distance_pybind.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/_hausdorff.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/_qhull.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/_voronoi.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/transform/_rigid_transform_cy.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/spatial/transform/_rotation_cy.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/special/_test_internal.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/special/_ufuncs_cxx.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_ansari_swilk_statistics.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_qmc_cy.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_qmvnt_cy.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_rcont/rcont.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_sobol.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_stats.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    },
+    "scipy/stats/_unuran/unuran_wrapper.so": {
+      "unguarded": 0,
+      "version": "1.18.1"
+    }
+  }
+}

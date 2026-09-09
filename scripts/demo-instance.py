@@ -1,32 +1,19 @@
 #!/usr/bin/env python3
 """Build a throwaway `/data` for a household that does not exist, for screenshots.
 
-Every screenshot of this add-on is a picture of somebody's home: who lives
-there, where they work, when the house is empty, and the entity ids naming all
-three. The panel's Config view renders `person.*` and `zone.*` ids verbatim and
-the Data view lists every archived series, so redacting a capture afterwards
-means catching every one of them in an image editor.
-
-This does the opposite: it runs the REAL pipeline against a household that was
-generated, so there is nothing to redact. `occupancy_forecast/tests/synthetic.py`
-already builds one -- Alice and Bob, with holidays, a mid-history routine change
-and partner coupling -- and it exists for exactly this reason: "the whole point
-of a synthetic household here is that it belongs to nobody, which is what stops
-one particular installation creeping into the package."
-
-**The numbers on screen are not invented.** This writes a state history, then
-trains on it and backtests the trained model to fill the forecast record. So the
-curves, the ship gate, the fold bars and the verification card all show what the
-add-on actually does with that history. Only the household is fictional.
+A screenshot of a real install is a picture of somebody's home, and the panel
+renders `person.*` and `zone.*` ids verbatim, so redaction means catching every
+one in an image editor. This runs the REAL pipeline against the synthetic
+household in `occupancy_forecast/tests/synthetic.py` instead, so there is
+nothing to redact. The numbers are not invented: it writes a history, trains on
+it and backtests to fill the forecast record.
 
     scripts/demo-instance.py build      --out ~/occupancy-demo/data
     python -m occupancy_forecast.train                     # against the same /data
     scripts/demo-instance.py forecasts  --out ~/occupancy-demo/data
 
-Run OUTSIDE an add-on, where `config.topic_prefix()` falls back to
-`DEFAULT_TOPIC_PREFIX` -- so the panel titles itself "Occupancy Forecast" with no
-build suffix, which is what a release screenshot wants, and no Supervisor, broker
-or Home Assistant is involved at any point.
+Run OUTSIDE an add-on, so `config.topic_prefix()` falls back and the panel
+titles itself "Occupancy Forecast" with no build suffix.
 """
 from __future__ import annotations
 
@@ -160,15 +147,10 @@ def distance_rows(events: list[tuple[pd.Timestamp, str]],
         for step in range(steps + 1):
             at(when + pd.Timedelta(minutes=step * COMMUTE_STEP_MIN),
                previous + (target - previous) * step / steps)
-        # Then a sparse hold until the next change, the way a parked phone reports.
-        #
-        # `until` for the LAST event, not six hours and then silence. A parked
-        # phone keeps reporting; it does not stop because its owner stopped
-        # moving. Stopping made the archive fall quiet for however long it was
-        # between the final state change and now -- and `features.observability`
-        # rightly refuses anything inside a silence longer than
-        # `config.MAX_SILENCE_H`, so those slots never became backtest origins
-        # and the verification card could score barely half its window.
+        # Then a sparse hold until the next change, the way a parked phone
+        # reports. `until` for the LAST event, not silence: a gap longer than
+        # `config.MAX_SILENCE_H` is refused by `features.observability`, so those
+        # slots never become backtest origins.
         stop = events[index + 1][0] if index + 1 < len(events) else until
         cursor = when + pd.Timedelta(minutes=COMMUTE_MIN + IDLE_STEP_MIN)
         while cursor < stop:
@@ -444,13 +426,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("step", choices=["build", "fit", "forecasts"])
     parser.add_argument("--out", type=Path, required=True)
-    # 180, not 400, and the reason is the ship gate rather than taste. Folds
-    # scale with history: 400 days is 51 of them, and at 51 the sign test can
-    # PROVE a minority fold record, so a horizon with real average skill is
-    # refused. 175 days is 19 folds -- which is what the real archive has, and
-    # why it ships 43 of 48. Fewer days also starve the per-horizon fits at long
-    # range, which is the only condition under which the POOLED family wins:
-    # measured at 400 days it lost every horizon by ~0.02 Brier.
+    # 180, not 400, because folds scale with history and at 51 folds the sign
+    # test can prove a minority record, refusing a horizon with real skill. 180
+    # gives ~19 folds, which is what the real archive has.
     parser.add_argument("--days", type=int, default=180,
                         help="history to generate (build) / to backtest (forecasts)")
     parser.add_argument("--seed", type=int, default=7)

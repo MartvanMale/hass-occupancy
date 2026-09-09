@@ -15,7 +15,7 @@ import { Select } from '../components/Select'
 import { HorizonSlider } from '../components/HorizonSlider'
 import { VerificationCard } from '../components/VerificationCard'
 import { TimeSeries, type Point } from '../components/TimeSeries'
-import { absoluteTime } from '../format'
+import { absoluteTime, count, DAY_OPTIONS } from '../format'
 import { useDebounced } from '../hooks'
 import { ArchiveCard } from './data/ArchiveStep'
 import {
@@ -43,15 +43,6 @@ import { HorizonQualityCard, QualityCard } from './data/QualityCards'
  * watching MQTT reconnect, and there is nothing on this tab worth a timer.
  * Fetches happen on mount and when a control changes.
  */
-
-const DAY_OPTIONS = [
-  { value: '1', label: 'last 24 hours' },
-  { value: '7', label: 'last 7 days' },
-  { value: '30', label: 'last 30 days' },
-  { value: '90', label: 'last 90 days' },
-]
-
-const count = (n: number) => n.toLocaleString()
 
 function EntityCard({ series }: { series: EntitySeries | null }) {
   if (!series) return <p className="empty">Loading…</p>
@@ -163,6 +154,10 @@ export function DataView({ status }: { status: Status | null }) {
     if (!picked) return
     let live = true
     setSeries(null)
+    // The one fetch here that re-runs on a control, so the one that can clear
+    // a stale message. After the `picked` guard: an archive that failed to
+    // load never sets `picked`, and its message must stay.
+    setError(null)
     getEntitySeries(picked, Number(days))
       .then((s) => { if (live) setSeries(s) })
       .catch((e: Error) => { if (live) setError(e.message) })

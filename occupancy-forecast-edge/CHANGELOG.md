@@ -1,29 +1,19 @@
-# Changelog — Edge
-`## Unreleased` is the queue: what has landed on edge and has not been promoted
-to stable yet. Everything below it has shipped, and is word for word what
-stable's own `CHANGELOG.md` carries — `scripts/promote.sh` is the moment a block
-crosses over, and it is copied rather than moved, so this file keeps the whole
-record of what edge has run.
-
-File each entry under the same `### Added` / `### Changed` / `### Fixed` /
-`### Removed` headings the stable changelog uses, and write it the way the stable
-changelog is written: one to three plain sentences saying what changed for
-somebody running the add-on. The block lands verbatim in the Changelog tab every
-store user sees. The mechanism, the measurement and the alternative that was
-rejected go in the commit message instead.
-
 ## Unreleased
 
+## 0.2.2 - 2026-09-09
 
-## 0.2.2 - 2026-09-07
+### Added
+
 - The add-on can publish to a broker that is not a Supervisor add-on. Set
   `mqtt_host` (and port, user, password, ssl) in the Configuration tab and the
   add-on uses that broker; leave it empty and the Mosquitto add-on is used as
   before. Until now a household on EMQX or on a Mosquitto outside Supervisor
   could not receive the entities at all.
 
-## 0.2.1 - 2026-09-07
+## 0.2.1 - 2026-09-09
+
 ### Added
+
 - An AppArmor profile confining the add-on's writes to its own data directory,
   which also takes Supervisor's security rating to its cap of 8. It enforces
   rather than warns: the add-on refuses to start if the profile is wrong, which

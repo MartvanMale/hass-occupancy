@@ -1,16 +1,134 @@
-# Changelog
+## 0.2.2 - 2026-09-09
 
-All notable changes to the Occupancy Forecast add-on are documented in this file.
+### Added
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and versions are [semantic](https://semver.org/spec/v2.0.0.html): `X.Y.Z`.
+- The add-on can publish to a broker that is not a Supervisor add-on. Set
+  `mqtt_host` (and port, user, password, ssl) in the Configuration tab and the
+  add-on uses that broker; leave it empty and the Mosquitto add-on is used as
+  before. Until now a household on EMQX or on a Mosquitto outside Supervisor
+  could not receive the entities at all.
 
-- **MAJOR** — something you have to act on: a renamed or removed MQTT topic,
-  entity or `unique_id`; a removed or renamed option in `config.yaml`; a
-  `/data/history.db` migration you cannot roll back from.
-- **MINOR** — additive: new published entities, new options, new endpoints, a
-  new signal the forecast can use.
-- **PATCH** — fixes and internals, with no change to any surface above.
+## 0.2.1 - 2026-09-09
+
+### Added
+
+- An AppArmor profile confining the add-on's writes to its own data directory,
+  which also takes Supervisor's security rating to its cap of 8. It enforces
+  rather than warns: the add-on refuses to start if the profile is wrong, which
+  is the intended trade.
+- **`admin_users`** — the Home Assistant users allowed to change the
+  configuration or start a retrain. Ingress proved who the caller was and
+  nothing then decided whether they were allowed to retrain the house. Empty by
+  default, which is exactly how every existing install behaves today.
+- Supervisor now restarts the add-on if its worker gets stuck or it could not
+  reach Home Assistant at start-up. It used to report itself healthy in both
+  cases.
+- The device page in Home Assistant now shows the add-on's name, version and
+  support link.
+- The options on the Configuration tab have proper names and descriptions
+  instead of raw keys.
+- Edge is marked advanced and experimental, so it is only offered to users who
+  have switched advanced mode on.
+- README sections on what the add-on stores — and that it travels in your
+  backups — and on giving it a read-only, bucket-scoped InfluxDB token.
+
+### Changed
+
+- The add-on no longer runs as root. It takes ownership of its data directory on
+  the first start after the change and then drops to an unprivileged user; if it
+  cannot take ownership it says so in the log and carries on as root, rather than
+  refusing to start.
+- `scripts/test.sh` now checks that the committed panel bundle was built from
+  the source beside it. Nothing on any path a person actually took verified that
+  pair before.
+- `scripts/deploy-edge.sh` stamps an uncommitted tree with a hash of its
+  contents, so two different edits can no longer deploy under the same version
+  string.
+- `scripts/deploy-stable.sh` is removed. It targeted a local stable add-on that
+  no longer exists, and created a directory on the box that collided with the
+  store-installed one before failing. Stable deploys by `git push`.
+- Internal tidying, with no change to any published surface: one shared spelling
+  of the slot-of-day calendar, one of the panel's number formatting, and one of
+  the run-length accumulator its charts use.
+- `departure.py` keeps its unshipped model half, now headed with what it
+  measured and why it did not ship, so the record travels with the code.
+- The Dockerfile copies the panel bundle before the Python, so ordinary code
+  edits no longer rebuild the panel layer.
+
+### Fixed
+
+- A security update to one of the add-on's dependencies (pyarrow, CVE-2026-25087).
+- `config.yaml` described the add-on's Home Assistant access as read-only. It
+  never has been: the add-on creates and dismisses its own progress
+  notification.
+- The panel's per-horizon quality card failed to load for some horizons and
+  showed an error instead. A figure that does not exist for a horizon now shows
+  as a dash.
+- A configuration save that is rejected no longer changes anything. A save with
+  nobody ticked was refused, but had already emptied the list of people — so the
+  add-on collected nobody's history from the next cycle until it was restarted.
+- If Supervisor could not be asked which add-on this is at start-up — still
+  booting after a host restart, say — the edge build fell back to stable's
+  entity names and MQTT topics and kept them until it was restarted, which is
+  precisely the collision that fallback warns about. It now keeps retrying, and
+  publishes nothing until it knows.
+- The stall watchdog could not see a training run that had itself hung; a train
+  now has its own one-hour deadline. The status page also reports the MQTT
+  connection accurately, and a good cycle clears the error a bad one left
+  behind.
+- `out_departure`, `out_return` and `next_change_at` were an hour out on the two
+  clock-change days.
+- One of the two 02:xx observations on the autumn clock-change day was thrown
+  away rather than averaged.
+- Removing a person no longer breaks the forecasts until the next scheduled
+  train, which could be a week away. Changing the people or zones now starts a
+  retrain straight away, and a removed person's entities leave Home Assistant
+  instead of holding their last forecast forever.
+- The add-on asked Home Assistant for far more history than it needed on every
+  five-minute cycle — up to 400 days of it in the worst case. Each entity is now
+  asked only for the stretch it is actually missing.
+- A horizon could be served by a leftover model from an earlier training run
+  after the latest run had dropped it.
+- A model trained before a configuration change is now refused at load, with a
+  line saying to retrain, instead of failing silently on every cycle.
+- A latent bug in the dedicated model family that would have discarded its
+  warm-up rows as soon as a new published field was added.
+- The decision to serve a horizon is now a fair comparison. The model and its
+  baselines were scored on slightly different sets of rows, and a fold the model
+  could not score at all counted as a fold it lost.
+- The add-on no longer refuses to start when there is nothing to forecast yet —
+  no `person` entity, or Home Assistant unreachable. It starts idle with the
+  reason on the Setup tab, which is the page you need in order to fix it. Its
+  configuration file is also written safely, so a power cut cannot leave an
+  empty one behind.
+- The history archive is no longer read and written through one shared database
+  connection that was never closed.
+- The "still learning" notification came back within five minutes of being
+  dismissed, for as long as seven weeks. It is now sent only when something has
+  actually changed: once a day while collecting, once when training starts, and
+  dismissed once something ships.
+- A TLS-only MQTT broker works now. Supervisor says whether the broker wants
+  TLS and the add-on ignored it, connecting in plaintext.
+- In the panel, the dropdown no longer clears what you have typed every ten
+  seconds while it is open, and the "was it right?" and entity cards recover
+  from an error without a page reload.
+- A configuration change now takes effect on the live trigger subscription
+  instead of waiting for a restart.
+- A clean shutdown waits for the "offline" message to be sent, so the entities
+  cannot be left showing as available under stale values.
+- The training schedule is read on your household's clock rather than the
+  container's, and a timezone the add-on cannot use is logged once instead of
+  being quietly treated as UTC.
+- The status page's zone scan no longer starts a second scan on every poll that
+  lands during the first, and retries a failed one after a minute rather than a
+  quarter of an hour.
+- The explore endpoints clamp their day range consistently, and return a proper
+  404 for a horizon that does not exist.
+- A partially built panel no longer crashes start-up; it is skipped with a
+  warning.
+- Appending to the history archive no longer runs two full table scans per
+  insert.
+- Four API fields the panel reads were missing from the contract test.
 
 ## 0.1.1 - 2026-09-05
 

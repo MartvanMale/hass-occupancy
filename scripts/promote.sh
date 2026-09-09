@@ -1,51 +1,21 @@
 #!/usr/bin/env bash
-# Promote the edge add-on's code into the stable add-on.
+# Generate the stable add-on's code from edge's. The two run the SAME code at
+# different release points, and an add-on's build context is its own directory,
+# so one has to be generated from the other. Runs edge -> stable, never back.
 #
-# The two add-ons run the SAME code at different release points. A Home
-# Assistant add-on's Docker build context is its own directory, so it cannot
-# reach a shared parent -- which leaves either two hand-maintained copies that
-# drift, or one generated from the other. This is the generator, and it runs
-# edge -> stable.
+# config.yaml, DOCS.md and CHANGELOG.md are hand-written per add-on and excluded.
+# Note the --delete: a file only in occupancy-forecast/ and not excluded below is
+# removed, so anything stable needs belongs in edge or in the exclude list.
 #
-# The direction is the whole point. `occupancy-forecast-edge/` is where work happens;
-# `occupancy-forecast/` changes ONLY here, and only when you have decided a change has
-# earned its way into the add-on you trust. Generating the other way round --
-# which is what this script used to do -- meant every edit landed in the stable
-# add-on's directory first, so there was nowhere to put work in progress and
-# "test it on edge before promoting" was not actually possible.
-#
-# config.yaml, DOCS.md and CHANGELOG.md are hand-written per add-on and are left
-# alone here: the versions differ, the docs differ, and the changelogs are not
-# the same file -- edge's carries a ## Unreleased queue on top of the same
-# release history stable has.
-#
-# Note the --delete: a file that exists ONLY in occupancy-forecast/ and is not excluded
-# below gets removed on the next run. Anything the stable add-on needs in its own
-# right belongs in occupancy-forecast-edge/ so that it mirrors, or in the exclude list.
-#
-# This script does not bump the version, does not move the changelog, does not
-# commit and does not deploy. It stages the code and shows you what changed;
-# every irreversible step after that is yours.
-#
-# It does NOT require the edge tree to be committed first. The workflow is: work
-# in edge, promote when happy, then ONE commit carrying both trees. That is why
-# there is no pre-commit hook guarding occupancy-forecast/ any more -- the guard
-# assumed edge and the promotion were separate commits, and they are not.
+# Stages the code and shows the diff. It does not bump the version, move the
+# changelog, commit or deploy -- every irreversible step after this is yours. It
+# promotes the WORKING tree, so edge need not be committed first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Arguments first, before any check that can fail -- otherwise `--help` and a
-# typo'd flag both die on whatever the tree happens to look like instead of
-# saying what the flag was.
-#
-# The tests are cheap and the alternative is discovering it in production, where
-# "production" is the forecast your heating reads. So they run by default and
-# skipping them has to be typed out.
-#
-# `--no-test` is for exactly one honest case: scripts/test.sh has just been run
-# against the edge tree as it stands and nothing has been edited since. Since
-# this script promotes the WORKING tree, "as it stands" means literally the
-# files on disk -- so an edit made after that test run is an untested promotion.
+# Arguments first, so a typo'd flag says so rather than dying on the tree.
+# `--no-test` is honest in one case: test.sh has just been run against these
+# exact files on disk. Anything edited since is an untested promotion.
 run_tests=1
 for arg in "$@"; do
     case "$arg" in
@@ -64,25 +34,20 @@ else
     echo "SKIPPING TESTS (--no-test) -- promoting on the strength of an earlier run."
 fi
 
-# Rebuild EDGE's bundle before promoting. The pre-commit hook used to refuse a
-# panel source edit whose committed dist/ did not match it -- that check is gone
-# with the hook, and a stale bundle is silent: it installs cleanly and serves
-# last week's panel. Since one commit now carries both trees, the honest fix is
-# to make the bundle fresh by construction here rather than to check it. Cheap
-# (sub-second) and a no-op when the source has not moved.
+# Rebuild EDGE's bundle first: a stale one is silent, and one commit now carries
+# both trees, so it is made fresh by construction rather than checked. A no-op
+# when the source has not moved.
 scripts/build-panel.sh occupancy-forecast-edge
 
-# The panel's SOURCE is promoted; its build output is not copied. dist/ is
-# rebuilt below from the promoted source, so stable ships a bundle built from
-# stable's own tree rather than a copy of whatever edge last compiled.
+# The panel's SOURCE is promoted, not its build output; dist/ is rebuilt below
+# so stable's bundle comes from stable's own tree.
 rsync -a --delete \
   --exclude '__pycache__' --exclude '*.pyc' --exclude '.pytest_cache' \
   --exclude 'node_modules' --exclude 'dist' \
   --exclude 'config.yaml' --exclude 'DOCS.md' --exclude 'CHANGELOG.md' \
   occupancy-forecast-edge/ occupancy-forecast/
 
-# Build stable's bundle from stable's OWN promoted source rather than copying
-# edge's, so the two are independently reproducible from their own trees.
+# From stable's own promoted source, so each tree is independently reproducible.
 scripts/build-panel.sh occupancy-forecast
 
 echo

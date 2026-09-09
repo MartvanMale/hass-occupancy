@@ -1,31 +1,17 @@
 # Pinned so a rebuild months from now reproduces the model that is running.
 pandas==2.3.3
 numpy==2.3.4
-# Never below 22.0.0, whatever a future pin bump is trying to reproduce.
-# pyarrow 21.0.0's aarch64 wheel bundles mimalloc compiled with ARMv8.1 LSE
-# atomics, inlined as far as `mi_thread_init`, so it executes an illegal
-# instruction the moment the library loads on an ARMv8.0 core -- a Raspberry
-# Pi 4's Cortex-A72, say. It takes pandas and scikit-learn down with it, because
-# pandas imports pyarrow at import time, and the add-on dies with a bare
-# `Illegal instruction (core dumped)` and no traceback. Fixed upstream by
-# apache/arrow#47766, first released in 22.0.0.
-pyarrow==22.0.0
+# Never below 22.0.0: pyarrow 21.0.0's aarch64 wheel inlined ARMv8.1 LSE atomics
+# in bundled mimalloc and aborted on a Pi 4 (apache/arrow#47766). 23.0.1 for
+# CVE-2026-25087.
+pyarrow==23.0.1
 scikit-learn==1.7.2
-# Already arrives with scikit-learn, pinned here because train.py imports it
-# directly to farm the 48 horizons out across processes.
+# Arrives with scikit-learn; pinned because train.py imports it directly.
 joblib==1.6.0
 paho-mqtt==2.1.0
 fastapi==0.121.2
 uvicorn==0.38.0
 holidays==0.68
-
-# For the Home Assistant trigger subscription in listen.py, via its SYNC client
-# (`websockets.sync.client`) -- the rest of this add-on is threads, and an
-# asyncio client would mean a second event loop beside uvicorn's for no gain.
-# Pure Python, no compiled dependency.
-#
-# This is the one place that crosses the stdlib-only note in sources/ha.py.
-# That note is about making four urllib requests a minute, where pulling in an
-# HTTP stack really would be silly; a persistent, authenticated, reconnecting
-# WebSocket is not something to hand-roll on a raw socket.
+# listen.py uses the SYNC client; an asyncio one would mean a second event loop
+# beside uvicorn's. Pure Python.
 websockets==15.0.1
