@@ -87,12 +87,40 @@ def lock_released():
         server._train_lock.release()
 
 
+class _WithStore:
+    """A source backed by the local archive, which is what gates on days."""
+    store = object()
+
+
+def test_the_status_page_never_recounts_usable_history(monkeypatch):
+    """`/api/status` polls every ten seconds and `/health` is the watchdog's.
+
+    `usable_history_days` walks the whole archive, so it belongs to the worker
+    and the status page reads what the worker left. Calling it here is the
+    regression that would put a growing full scan on both.
+    """
+    def _refuse(*args, **kwargs):
+        raise AssertionError("usable_history_days called from a request handler")
+
+    monkeypatch.setattr(server.features, "usable_history_days", _refuse)
+    monkeypatch.setitem(server._state, "source", _WithStore())
+    monkeypatch.setitem(server._state, "usable_days", 12.5)
+    assert server._history_days() == 12.5
+
+
+def test_usable_days_is_zero_before_the_first_worker_cycle(monkeypatch):
+    """Not None, and not the archive's age: nothing is trainable yet."""
+    monkeypatch.setitem(server._state, "source", _WithStore())
+    monkeypatch.setitem(server._state, "usable_days", None)
+    assert server._history_days() == 0.0
+
+
 def test_a_retrain_is_refused_when_the_history_is_too_short(monkeypatch):
     monkeypatch.setattr(server, "_history_days", lambda: 1.0)
     with pytest.raises(HTTPException) as raised:
         server._start_background_train()
     assert raised.value.status_code == 409
-    assert "days of history" in raised.value.detail
+    assert "days of observed presence" in raised.value.detail
     # Refused before the lock was taken, or the next attempt would 409 forever.
     assert not server._train_lock.locked()
 

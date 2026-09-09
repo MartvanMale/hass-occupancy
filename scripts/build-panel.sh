@@ -8,24 +8,22 @@
 # root-owned and the next non-root build cannot overwrite them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/container-guard.sh
 
 TREE="${1:-occupancy-forecast-edge}"
 PANEL="$PWD/$TREE/panel"
 [[ -d "$PANEL" ]] || { echo "no panel in $TREE" >&2; exit 1; }
 
-# Named volume for npm's cache. Created root-owned, so claim it once.
-if ! docker volume inspect occupancy-panel-npm >/dev/null 2>&1; then
-    docker volume create occupancy-panel-npm >/dev/null
-    docker run --rm -v occupancy-panel-npm:/cache alpine \
-        chown -R "$(id -u):$(id -g)" /cache
-fi
+guard_start
+guard_volume occupancy-panel-npm
 
-docker run --rm \
+guard_run panel \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
   -v "$PANEL":/w -w /w \
   -v occupancy-panel-npm:/tmp/.npm \
   node:22-alpine \
+  timeout -k 30 900 \
   sh -c '[ -d node_modules ] || npm ci --no-audit --no-fund; npm run build'
 
 # After the build, never before: vite.config.ts sets `emptyOutDir: true`. At

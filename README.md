@@ -77,16 +77,22 @@ sensors you already have answer the second one better.
 
 ### The first few weeks are honest, not impressive
 
-Home Assistant cannot give you training history — its recorder keeps about 10
-days. So the add-on starts its own archive the moment you install it, and from
-day one it publishes **baselines** rather than nothing.
+Home Assistant's recorder keeps about 10 days by default, and purges — what it
+has today it will not have next month. So the add-on keeps its own archive, and
+starts it by importing whatever your recorder actually holds, reaching back up
+to 400 days. On a stock install that is a few days. If you have raised
+`purge_keep_days` and have months of history, the add-on takes all of it and can
+start training almost immediately.
 
-It starts training at 10 days, and a horizon is served by the model **only**
-where the model measurably beat that horizon's own baseline. Early models are
-weak and most horizons will not qualify at first. That is the design, not a
-disappointment: training early cannot make your forecasts worse, only better
-where skill has been demonstrated. Horizons can switch back, too, as the
-baselines improve.
+Until it can, the forecast sensors read `unknown`: they exist, and they have
+nothing to say yet. Who is home right now publishes from the first cycle.
+
+Training starts at 10 days, and a horizon publishes **only** where the model
+measurably beat that horizon's own baseline. Early models are weak and most
+horizons will not qualify at first. Where one does not, nothing is published —
+the sensor stays `unknown` and the 48-hour chart has a gap, rather than showing
+a number nobody earned. **The baseline is the bar, never the answer.** Horizons
+can stop publishing again, too, as the baselines improve.
 
 ## What it publishes
 

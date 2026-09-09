@@ -222,7 +222,11 @@ def test_the_collector_groups_entities_by_how_far_back_they_reach(store, now):
     by_entity = {tuple(ids): _iso_to_dt(start) for ids, start, _ in ha.calls}
     assert now - by_entity[("person.alice",)] < dt.timedelta(hours=3)
     assert dt.timedelta(days=9) < now - by_entity[("zone.work",)] < dt.timedelta(days=11)
-    assert now - by_entity[("sensor.never",)] > dt.timedelta(days=ha_mod.BOOTSTRAP_DAYS - 1)
+    # The bootstrap is walked backwards a chunk at a time, so the first window
+    # is the most recent one -- and this HA answers nothing, so the walk stops
+    # there rather than asking for the other thirteen.
+    assert now - by_entity[("sensor.never",)] < dt.timedelta(
+        days=ha_mod.BOOTSTRAP_CHUNK_DAYS + 1)
 
     # Five minutes later: the empty entity is not asked again.
     ha.calls.clear()
@@ -238,6 +242,69 @@ def test_the_collector_groups_entities_by_how_far_back_they_reach(store, now):
     (_ids, start, _stop), = ha.calls
     assert asked_at - _iso_to_dt(start) < dt.timedelta(hours=2), \
         "the 400-day window is asked for once, not on every retry"
+
+
+class _RecorderWithAFloor:
+    """A recorder holding `days` of history and nothing before it.
+
+    Answers a window inside its retention with one carried-forward entry per
+    entity even when nothing changed -- which is what `minimal_response` really
+    does, and what makes "no entries at all" mean "past the purge horizon"
+    rather than "a quiet month".
+    """
+
+    def __init__(self, now, days, quiet=()):
+        self.now, self.days, self.quiet = now, days, set(quiet)
+        self.calls: list[tuple[list[str], str, str]] = []
+
+    def history(self, entity_ids, start, stop=None):
+        self.calls.append((list(entity_ids), start, stop))
+        begin = _iso_to_dt(start)
+        if self.now - begin > dt.timedelta(days=self.days):
+            return []
+        return [[{"entity_id": e, "state": "home", "last_changed": start}]
+                if e in self.quiet else
+                [{"entity_id": e, "state": "home", "last_changed": start},
+                 {"entity_id": e, "state": "not_home",
+                  "last_changed": _utc(begin + dt.timedelta(hours=1))}]
+                for e in entity_ids]
+
+
+def _utc(when: dt.datetime) -> str:
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_deep_archive_is_imported_in_windows_down_to_the_recorder_floor(store, now):
+    """One 400-day request would be one 18 MB response on a three-year archive.
+
+    So the bootstrap walks back a chunk at a time and stops where history does.
+    """
+    from occupancy_forecast.sources import ha as ha_mod
+
+    ha = _RecorderWithAFloor(now, days=95)
+    result = ha_mod.StoreSource(store, ha).collect(["person.alice"])
+
+    chunk = ha_mod.BOOTSTRAP_CHUNK_DAYS
+    reached = now - min(_iso_to_dt(start) for _ids, start, _ in ha.calls)
+    assert dt.timedelta(days=95) < reached < dt.timedelta(days=95 + chunk), \
+        "walked past the floor to prove it, but not on to the full 400 days"
+    assert result["requests"] < ha_mod.BOOTSTRAP_DAYS // chunk
+    assert store.states("person.alice", _utc(now - dt.timedelta(days=400)))
+
+
+def test_a_quiet_entity_does_not_stop_the_walk_early(store, now):
+    """A zone nobody entered for a month yields no state CHANGES in that window.
+
+    Stopping on "nothing was appended" would cut its archive off there; the
+    stop signal is an empty response, which only the purge horizon produces.
+    """
+    from occupancy_forecast.sources import ha as ha_mod
+
+    ha = _RecorderWithAFloor(now, days=95, quiet=["zone.work"])
+    ha_mod.StoreSource(store, ha).collect(["zone.work"])
+
+    reached = now - min(_iso_to_dt(start) for _ids, start, _ in ha.calls)
+    assert reached > dt.timedelta(days=95)
 
 
 def test_entities_that_reported_today_share_one_request(store, now):

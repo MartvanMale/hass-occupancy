@@ -186,11 +186,28 @@ and `-a` will not pick those up.
 
 ## Tests and scripts
 
-`scripts/test.sh` runs `tsc --noEmit`, then `check-panel.sh`, then pytest in
-`python:3.13-slim` with the pinned dependencies the add-on ships. Five
-hundred-odd tests: no network, no Home Assistant, no broker. Dev-only pins go in
-`requirements-dev.txt` — the shipped image deliberately carries no test
-framework.
+`scripts/test.sh` runs `tsc --noEmit`, then `check-panel.sh`, then pytest with
+the pinned dependencies the add-on ships. 540 tests in about four minutes: no
+network, no Home Assistant, no broker. Dev-only pins go in `requirements-dev.txt`
+— the shipped image deliberately carries no test framework.
+
+pytest runs in a locally built `occupancy-forecast-test:<hash>`, tagged with a
+hash of both requirements files. Moving a pin builds a new tag on the next run
+and cannot be served the old one; the old tag is inert and can be deleted at
+leisure.
+
+**Every script here that runs a container sources `scripts/container-guard.sh`,
+and it is not optional.** A container's life belongs to the Docker daemon rather
+than to the client that asked for it, so a script killed mid-run leaves one
+behind — three of them once deadlocked the machine, each pegging the box against
+a suite that takes minutes. The guard gives every container a name, a
+`hass-occupancy.script` label and a `timeout` of its own, traps the signals it
+can, sweeps corpses at the next start, and takes a lock so two runs cannot
+overlap (the second refuses, it does not queue). The in-container `timeout` is
+the load-bearing one: it is the only mechanism that survives a `kill -9` of the
+shell. `TEST_TIMEOUT` (seconds, default 900) sets it for the suite.
+
+`docker ps --filter label=hass-occupancy.script` shows what a run has open.
 
 **`scripts/check-pins.sh` — run it whenever a numerical pin moves.** ~75s. It
 installs and runs the wheels on amd64, and disassembles the aarch64 ones, since
@@ -202,7 +219,8 @@ against `scripts/arm-baseline.json`; `--update-baseline` is honest only once the
 pin has run on a real Pi.
 
 `test.sh`, `build-panel.sh`, `check-panel.sh`, `check-pins.sh` and
-`promote.sh` work anywhere Docker does. `deploy-edge.sh` and
+`promote.sh` work on any Linux with Docker — the guard uses `flock` and `nproc`,
+so macOS would need two shims nobody here has written. `deploy-edge.sh` and
 `backfill-store-from-influx.sh` are **author-local**: they rsync to `HOST=ha`, an
 ssh alias for one particular box, so they do nothing useful in a fresh clone.
 

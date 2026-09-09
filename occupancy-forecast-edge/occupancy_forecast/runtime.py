@@ -139,6 +139,20 @@ def absence_entities(settings: config.Settings) -> list[str]:
     return sorted(e for e in (settings.next_alarm or {}).values() if e)
 
 
+def presence_entities(settings: config.Settings) -> list[str]:
+    """Entities whose `unknown` ends the previous state rather than being a gap.
+
+    The people and the house group. Passed rather than matched on a `person.`
+    prefix: the house entity is not always a `group.*`, and a prefix test is
+    one more place wired to how one installation happens to be set up. See
+    `sources.ha.StoreSource.collect`.
+    """
+    wanted = list(settings.people)
+    if settings.house_entity:
+        wanted.append(settings.house_entity)
+    return sorted(set(wanted))
+
+
 def trigger_entities(settings: config.Settings) -> list[str]:
     """The subset of `tracked_entities` whose change is worth re-predicting for.
 

@@ -93,16 +93,23 @@ export function Horizons({ served, kinds = {}, beatenBy = {} }: {
     !isModel(h) ? 'none' : kinds[String(h)] === 'pooled' ? 'pooled' : 'dedicated'
   const modelled = horizons.filter(isModel)
 
-  const primary =
-    modelled.length === 0
-      ? 'No horizon has beaten its baseline yet, so nothing is published'
-      : modelled.length === horizons.length
-        ? `Every horizon is served by the model`
-        : `Model serves ${modelled.length} of ${horizons.length} horizons`
-
   const dedicated = horizons.filter((h) => stateOf(h) === 'dedicated')
   const pooled = horizons.filter((h) => stateOf(h) === 'pooled')
   const unserved = horizons.length - modelled.length
+  // Losing a bake-off and never having had one both publish nothing, and only
+  // the first is the model's fault -- `best_baseline` is present for exactly
+  // the first, which is the convention the per-cell tooltip already reads.
+  const beaten = horizons.filter((h) => stateOf(h) === 'none' && beatenBy[String(h)])
+  const untrained = unserved - beaten.length
+
+  const primary =
+    modelled.length === 0
+      ? beaten.length
+        ? 'No horizon has beaten its baseline yet, so nothing is published'
+        : 'No model has trained yet, so nothing is published'
+      : modelled.length === horizons.length
+        ? `Every horizon is served by the model`
+        : `Model serves ${modelled.length} of ${horizons.length} horizons`
 
   // The visible line: three counted facts, joined. What it USED to say -- that
   // an unserved horizon means the model did not beat its baseline, so the
@@ -126,10 +133,15 @@ export function Horizons({ served, kinds = {}, beatenBy = {} }: {
       + `and ${pooled.length} come from the one pooled model (${summariseRuns(runs(pooled))}). `
     : ''
   const where = modelled.length ? `${summariseRuns(runs(modelled))}. ` : ''
+  const why = beaten.length && untrained
+    ? `the model lost to its own baseline at ${beaten.length} of them and has not `
+      + `trained or passed its publication checks at the other ${untrained}`
+    : beaten.length
+      ? 'the model did not beat its own baseline'
+      : 'the model has not trained or has not passed its publication checks'
   const rest = unserved
-    ? `${modelled.length ? 'Elsewhere nothing' : 'Nothing'} is published: the `
-      + 'model did not beat its own baseline, so the sensor reads unknown and '
-      + 'the forecast chart has a gap.'
+    ? `${modelled.length ? 'Elsewhere nothing' : 'Nothing'} is published: ${why}, `
+      + 'so the sensor reads unknown and the forecast chart has a gap.'
     : ''
   const described = `${where}${split}${rest}`
 

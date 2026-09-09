@@ -63,9 +63,8 @@ MIN_TEST_ROWS = 200
 # tapering lives. Two things keep it honest rather than merely encouraging:
 #
 #   * The ship gate (train.py) is unchanged, and it demands a real effect size,
-#     not just a majority of folds. A model that cannot beat its own baseline is
-#     not served -- predict.py falls back per horizon. So an early model can add
-#     skill or sit out; it cannot make the forecast worse.
+#     not just a majority of folds. A horizon whose model cannot beat its own
+#     baseline publishes nothing, so an early model can add skill or sit out.
 #   * `min_test_rows` scales with the household. 200 was silently a
 #     three-subject assumption: at 30-minute slots one subject yields 48 rows a
 #     day, so a lone person could never have cleared a 200-row window no matter

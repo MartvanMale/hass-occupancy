@@ -611,7 +611,13 @@ def slot_fraction(events: list[tuple[str, str]], slots: pd.DatetimeIndex,
         return empty
 
     times = pd.to_datetime([t for t, _ in events], utc=True, format="ISO8601")
-    values = np.array([1.0 if str(v).strip() == match else 0.0 for _, v in events])
+    # NaN, not 0.0, for a state that means "no reading": `keep` below drops
+    # those segments from the numerator AND the denominator, so the slot loses
+    # coverage instead of gaining a false zero. A tracker that stopped
+    # reporting used to read as away for as long as it stayed quiet.
+    values = np.array([np.nan if config.is_empty(v)
+                       else 1.0 if str(v).strip() == match else 0.0
+                       for _, v in events])
     order = np.argsort(times.asi8, kind="stable")
     times, values = times[order], values[order]
 
@@ -792,6 +798,12 @@ def presence_events(source, subject: config.Subject, start: str,
     group configured its presence is the OR over the people, merged from their
     individual traces. That keeps `group` from being a hard dependency for
     something Home Assistant can already tell us.
+
+    A person enters that merge at their first observation and not before, so
+    somebody added to the config today does not retroactively make the house
+    unknown for every day the recorder cannot supply them. `seeded_states`
+    carries the pre-window value in, so a person who existed then is present
+    from the first event; one who did not is simply not part of the OR yet.
     """
     if subject.is_person or subject.entity_id:
         return source.seeded_states(subject.entity_id, start, stop, seed_days=14)
@@ -805,8 +817,20 @@ def presence_events(source, subject: config.Subject, start: str,
         key=lambda item: item[0])
     for when, index, value in stamped:
         latest[index] = value
+        # Asymmetric, and the order of these two tests is the whole design.
+        # One person known to be home makes the house home no matter who else
+        # is unobserved -- home is a positive fact that survives an unknown.
+        # Away is not: nobody known-home and somebody unknown means the house
+        # might well be occupied, so it is unknown rather than empty.
         anyone = any(v == config.HOME_STATE for v in latest.values())
-        state = config.HOME_STATE if anyone else "not_home"
+        all_known = all(not config.is_empty(v) for v in latest.values())
+        state = config.HOME_STATE if anyone else (
+            "not_home" if all_known else "unknown")
+        # Several people can write at the same instant -- two trackers coming
+        # back together, or the seeds -- and only the state after the last of
+        # them ever held for any time. Drop the zero-length one.
+        if merged and merged[-1][0] == when:
+            merged.pop()
         if not merged or merged[-1][1] != state:
             merged.append((when, state))
     return merged
@@ -1331,6 +1355,35 @@ def history_start(source) -> str:
 
     return (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=400)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
+
+
+def usable_history_days(source, stop: str | None = None) -> float:
+    """Days of history a model could actually be fitted on.
+
+    `store.span()` measures the age of the oldest row, which is not the same
+    question: a bootstrap collect reaches back as far as the recorder will go,
+    so one unused tracker can put weeks on the clock before a single slot is
+    usable. Counted here the way training counts it -- observed under the
+    liveness mask, with every person's presence known -- so missing data can
+    never make the add-on look ready sooner than it is.
+
+    EXPENSIVE: a grid over the whole archive plus a liveness scan of every
+    tracked entity. Call it from the worker, never from a request handler.
+    """
+    if not config.PEOPLE:
+        return 0.0
+    start = history_start(source)
+    end = (pd.Timestamp(stop) if stop else pd.Timestamp.now(tz="UTC")).floor(
+        f"{config.GRID_MINUTES}min")
+    slots = grid(pd.Timestamp(start), end)
+    if not len(slots):
+        return 0.0
+
+    valid = observability(_liveness(source, start, end.isoformat()), slots)
+    for person in config.PEOPLE:
+        events = presence_events(source, person, start, end.isoformat())
+        valid &= slot_fraction(events, slots, config.HOME_STATE)["frac"].notna().to_numpy()
+    return float(np.count_nonzero(valid)) / config.SLOTS_PER_DAY
 
 
 def build(source, start: str | None = None, stop: str | None = None) -> pd.DataFrame:

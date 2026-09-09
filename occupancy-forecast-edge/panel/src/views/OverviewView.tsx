@@ -47,11 +47,13 @@ const CURVE_ACCENT = ['blue', 'orange', 'aqua', 'red'] as const
  * fifteen hours away is worse than the relative form it replaced.
  */
 function changeSentence(change: NextChange): string {
+  // "No change expected" was a claim about the house. The curve is sparse, so
+  // the usual reason there is no crossing is that no horizon near it publishes.
   if (change.direction === null || change.at === null) {
-    return 'No change expected in the next 48 hours.'
+    return 'No arrival or departure time is predicted.'
   }
   const at = new Date(change.at)
-  if (Number.isNaN(at.getTime())) return 'No change expected in the next 48 hours.'
+  if (Number.isNaN(at.getTime())) return 'No arrival or departure time is predicted.'
 
   const clock = at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   const sameDay = at.toDateString() === new Date().toDateString()
@@ -73,9 +75,11 @@ function dayWord(at: Date): string {
 /** "in 3 h", "within the hour", from a moment rather than the raw crossing --
  *  so the chip and the sentence cannot disagree about the same event. */
 function untilLabel(at: string | null): string {
-  if (at === null) return 'steady'
+  // Both of these are the ABSENT case, not a settled one: "steady" read as a
+  // positive claim about a house the add-on has nothing to say about.
+  if (at === null) return 'no estimate'
   const hours = (new Date(at).getTime() - Date.now()) / 3_600_000
-  if (!Number.isFinite(hours)) return 'steady'
+  if (!Number.isFinite(hours)) return 'no estimate'
   if (hours <= 1) return 'within the hour'
   return `in ${Math.round(hours)} h`
 }

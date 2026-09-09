@@ -101,6 +101,17 @@ HOUSE_SLUG = "house"
 # The state Home Assistant uses for "in the home zone". Universal.
 HOME_STATE = "home"
 
+# The words Home Assistant writes when it has no reading. Universal, and one
+# definition on purpose: the collector, the trigger filter and the slot
+# integrator all have to agree on what "we do not know" looks like, and three
+# spellings of it is how an unknown tracker came to read as away.
+EMPTY_STATES = frozenset({"unknown", "unavailable", "", "none"})
+
+
+def is_empty(value) -> bool:
+    """True when a state means "no reading" rather than a reading."""
+    return value is None or str(value).strip().lower() in EMPTY_STATES
+
 DATA_DIR = Path("/data")
 CONFIG_PATH = DATA_DIR / "config.json"
 MODELS_DIR = DATA_DIR / "models"

@@ -25,7 +25,8 @@ from occupancy_forecast.tests.conftest import settings as make_settings
 # --- panel/src/types.ts, transcribed -------------------------------------
 
 STATUS_KEYS = {
-    "display_name", "history", "days_until_training", "people", "feature_groups",
+    "display_name", "history", "days_until_training", "usable_presence_days",
+    "people", "feature_groups",
     "served_by", "model_kind", "best_baseline", "worker",
     "mqtt", "listener", "last_train", "last_train_seconds",
     "next_train", "train_cadence", "training_in_progress",

@@ -1,16 +1,18 @@
 """Append-only SQLite history, the add-on's own archive.
 
-This exists because **Home Assistant cannot supply training history.** Measured
-on a well-configured instance: a 100-day request reached back 21 days despite
-`purge_keep_days: 100`, and stock Home Assistant defaults to 10. There is no
-long-term-statistics shortcut either -- LTS covers only numeric entities with a
-`state_class`, and presence is a string while the proximity distance sensors
-carry `state_class: None`.
+This exists because **Home Assistant does not KEEP training history.** It will
+hand over whatever it has -- `collect()` imports up to `BOOTSTRAP_DAYS` of it on
+first start, and a `purge_keep_days` raised to months is months the add-on can
+train on immediately -- but the recorder purges on that setting, which defaults
+to 10 days, so what it answers with today it will not answer with later. There
+is no long-term-statistics shortcut either: LTS covers only numeric entities
+with a `state_class`, and presence is a string while the proximity distance
+sensors carry `state_class: None`.
 
-So the add-on accumulates its own. Measured at 158 state changes per day across
-the seven entities a two-person household tracks, that is **~2.3 MB per year**,
-and the add-on's `/data` survives restarts and updates. Which means this store
-keeps history *forever* -- strictly better than the recorder it reads from.
+So the add-on keeps its own copy, and never purges it. Measured at 158 state
+changes per day across the seven entities a two-person household tracks, that is
+**~2.3 MB per year**, and the add-on's `/data` survives restarts and updates.
+That is the whole claim: this store outlives the recorder it reads from.
 
 Storage is deliberately dumb: one row per state change, primary key
 (entity_id, ts). Re-importing an overlapping window is therefore idempotent, so
@@ -208,6 +210,23 @@ class HistoryStore:
 
     def count(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM states").fetchone()[0]
+
+    def user_version(self) -> int:
+        """SQLite's own schema-version field, as a one-shot migration key.
+
+        Zero on every file written before this existed, which is exactly what a
+        migration wants to see. It lives in the database header rather than in
+        a table because a `meta` table would itself need creating on every
+        deployed file, and because nothing but a migration should ever read it.
+        Set it only after the work it records has actually been done.
+        """
+        return int(self._db.execute("PRAGMA user_version").fetchone()[0])
+
+    def set_user_version(self, version: int) -> None:
+        # No parameter binding: PRAGMA does not take one. The caller passes a
+        # module constant, never anything from outside.
+        self._db.execute(f"PRAGMA user_version = {int(version)}")
+        self._db.commit()
 
     def last_seen(self, entity_id: str) -> int | None:
         row = self._db.execute(

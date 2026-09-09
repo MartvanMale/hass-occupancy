@@ -31,7 +31,7 @@ import os
 import threading
 from typing import Callable
 
-from . import log
+from . import config, log
 
 _log = log.get(__name__)
 
@@ -48,10 +48,11 @@ BACKOFF_CAP = 60.0
 # actually detects a dead peer.
 RECV_TIMEOUT = 5.0
 
-# States that mean "no reading", not "a new reading". `StoreSource.collect`
-# already drops these, so waking the worker for one would rebuild a month of
-# features to arrive at the answer it already published.
-EMPTY_STATES = {"unknown", "unavailable", "", "none"}
+# States that mean "no reading", not "a new reading". Waking the worker for one
+# would rebuild a month of features to arrive at the answer it already
+# published -- the collector stores presence gaps, but nothing about them moves
+# a forecast until the tracker comes back.
+EMPTY_STATES = config.EMPTY_STATES
 
 
 def should_fire(trigger: dict) -> bool:

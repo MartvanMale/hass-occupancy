@@ -1,0 +1,13 @@
+# Line endings are a repo policy, not a per-clone accident. run.sh is the add-on
+# entrypoint and a CRLF shebang asks the kernel for `bash\r`; and
+# panel/dist/.source-hash is a sha256 over source BYTES, so a CRLF working tree
+# reports a stale bundle. eol=lf, not just text=auto: the hash is computed over
+# the working tree, not the index.
+* text=auto eol=lf
+
+# Vendored fonts.
+*.woff2 binary
+
+# Vendored SIL licence, CRLF as shipped by IBM Plex. Keep it byte-identical: it
+# is inside the panel/dist/.source-hash input set.
+OFL.txt -text

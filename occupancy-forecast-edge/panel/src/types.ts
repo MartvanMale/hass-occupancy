@@ -83,6 +83,11 @@ export interface Status {
   display_name: string
   history: History
   days_until_training: number
+  /** Days of presence actually observed, which is what `days_until_training`
+   *  counts down from. Lower than `history.days` -- that is the age of the
+   *  oldest row, and an unused tracker inflates it. Null on an Influx
+   *  install, which is not gated on it. */
+  usable_presence_days: number | null
   /** Subject slugs, one per configured person. The Data tab needs them to name
    *  a subject in the feature table; `config.HOUSE_SLUG` is the other one and
    *  is always present. */

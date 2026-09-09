@@ -1,5 +1,42 @@
 ## Unreleased
 
+### Fixed
+
+- A phone that stops reporting no longer counts as everybody being out. Home
+  Assistant writes `unknown` or `unavailable` when it has lost track of
+  somebody, and until now that was thrown away, so the last known position was
+  carried forward for as long as the silence lasted -- and a tracker that went
+  quiet at breakfast trained the model on an empty house all morning. Those
+  stretches are now recorded and left out of training instead. One person known
+  to be at home still counts as the house being occupied, whatever anybody
+  else's phone is doing.
+- The Overview page counted the age of the oldest thing in the archive when it
+  said how long was left before training. It now counts days of presence
+  actually observed, which is the number training was always waiting on: a
+  tracker that has been in the archive for weeks without reporting no longer
+  makes the add-on look ready days early. The status API carries it as
+  `usable_presence_days` beside the archive's own span.
+
+### Changed
+
+- The models are rebuilt once on upgrade, because the ones on disk were fitted
+  on the presence data this release corrects. Nothing is published until that
+  finishes -- previously an upgrade like this could have left the sensors
+  reading `unknown` until the next scheduled retrain, up to a week away.
+- On first start after upgrading, the add-on re-reads the last few days of
+  presence from Home Assistant's recorder to recover the gaps earlier versions
+  discarded. This happens once, not on every restart.
+- The first import from Home Assistant now reads the recorder a month at a time
+  and stops where its history runs out, instead of asking for 400 days in one
+  request. If you keep `purge_keep_days` at months or years, that request could
+  return tens of megabytes at once on a small box; nothing about how much
+  history you end up with has changed.
+- The Overview page no longer says "steady" or "no change expected" when it
+  simply has no prediction to give, and the horizon strip now distinguishes a
+  horizon where the model lost to its baseline from one that has not trained
+  yet. On a fresh install the old wording blamed a comparison that had never
+  run.
+
 ## 0.2.2 - 2026-09-09
 
 ### Added

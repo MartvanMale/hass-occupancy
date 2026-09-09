@@ -10,6 +10,7 @@
 # --update-baseline is honest only once the pin has run on the actual Pi.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/container-guard.sh
 
 TREE="occupancy-forecast-edge"
 ONLY="both"
@@ -39,6 +40,8 @@ if [[ ! -f "$TREE/requirements.txt" ]]; then
     exit 2
 fi
 
+guard_start
+
 amd64_status="skipped"
 arm_status="skipped"
 
@@ -48,11 +51,12 @@ arm_status="skipped"
 if [[ "$ONLY" != "arm" ]]; then
     echo "=== amd64: executing the pinned stack ==="
     status=0
-    docker run --rm --platform linux/amd64 \
+    guard_run pins-amd64 --platform linux/amd64 \
         -e HOME=/tmp -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
         -v "$PWD/$TREE/requirements.txt":/requirements.txt:ro \
         -v "$PWD/scripts/cpu_smoke.py":/cpu_smoke.py:ro \
         python:3.13-slim \
+        timeout -k 30 600 \
         sh -c 'pip install --quiet --no-cache-dir --root-user-action=ignore \
                    -r /requirements.txt \
                && exec python /cpu_smoke.py' || status=$?
@@ -72,11 +76,12 @@ fi
 if [[ "$ONLY" != "amd64" ]]; then
     echo "=== aarch64: reading the instructions ==="
     status=0
-    docker run --rm \
+    guard_run pins-arm \
         -e HOME=/tmp -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
         -e OWNER="$(id -u):$(id -g)" \
         -v "$PWD":/w -w /w \
         python:3.13-slim \
+        timeout -k 30 900 \
         sh -c '
             set -e
             apt-get update -qq >/dev/null 2>&1 || {

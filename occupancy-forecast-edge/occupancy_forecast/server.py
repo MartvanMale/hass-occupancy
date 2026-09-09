@@ -141,6 +141,9 @@ _state: dict = {
     "loaded_at": None, "last_collect": None, "last_predict": None,
     "last_train": None, "last_train_seconds": None, "training_started_at": None,
     "last_error": None, "forecast": [],
+    # Days of usable history, recounted once a worker cycle. None until the
+    # first one finishes, which reads as 0.0 -- see `_history_days`.
+    "usable_days": None,
     # (computed_at, {state: count}). The scan is a full-history read of every
     # person, and the status page polls every few seconds -- see _unmatched.
     "unmatched_zones": (None, {}),
@@ -181,9 +184,28 @@ def _load_models() -> None:
 
 
 def _history_days() -> float:
+    """Days of history a model could be fitted on, as of the last worker cycle.
+
+    Read, never computed: `features.usable_history_days` walks the whole
+    archive, and this is reached from `/api/status` on a ten-second poll and
+    from `/health`, which is the Supervisor watchdog's target. The worker
+    refreshes it once a cycle -- see `_refresh_history_days`.
+
+    `inf` without a store: an Influx install brings its own archive, of a size
+    nobody here chose, and has never been gated on this.
+    """
+    if getattr(_state["source"], "store", None) is None:
+        return float("inf")
+    days = _state.get("usable_days")
+    return 0.0 if days is None else days
+
+
+def _refresh_history_days() -> None:
+    """Recount usable history. The worker's job, and nobody else's."""
     source = _state["source"]
-    store = getattr(source, "store", None)
-    return _span(store)["days"] if store else float("inf")
+    if getattr(source, "store", None) is None:
+        return
+    _state["usable_days"] = features.usable_history_days(source)
 
 
 def do_collect() -> dict:
@@ -194,7 +216,8 @@ def do_collect() -> dict:
         return {"skipped": "influx source keeps its own history"}
 
     result = source.collect(runtime.tracked_entities(settings),
-                            absence_is_a_reading=runtime.absence_entities(settings))
+                            absence_is_a_reading=runtime.absence_entities(settings),
+                            gap_is_a_boundary=runtime.presence_entities(settings))
     synthetic = discover.sample_distances(ha, settings)
     result["synthetic"] = store.append(synthetic)
     _state["last_collect"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -265,7 +288,8 @@ def _too_little_history() -> HTTPException | None:
         return None
     return HTTPException(
         status_code=409,
-        detail=f"only {days:.1f} days of history; {MIN_DAYS_TO_TRAIN} are needed "
+        detail=f"only {days:.1f} days of observed presence; "
+               f"{MIN_DAYS_TO_TRAIN} are needed "
                f"before there is enough to hold out a test window. No forecast "
                f"is published until then.")
 
@@ -459,16 +483,16 @@ def _notify_progress() -> None:
         if state[0] == "collecting":
             ha.notify(
                 f"{name} is still learning",
-                f"Collected **{days:.0f} of {MIN_DAYS_TO_TRAIN} days** of history. "
-                f"No forecast is published yet -- the sensors exist and read "
-                f"unknown until a model has earned a horizon.",
+                f"Observed **{days:.0f} of {MIN_DAYS_TO_TRAIN} days** of "
+                f"presence. No forecast is published yet -- the sensors exist "
+                f"and read unknown until a model has earned a horizon.",
                 notify_id)
         elif state[0] == "training":
             # Training now, but nothing has beaten its baseline yet. Say so
             # rather than going quiet -- silence here reads as "broken".
             ha.notify(
                 f"{name} is still learning",
-                f"Training on **{days:.0f} days** of history. No horizon beats "
+                f"Training on **{days:.0f} days** of presence. No horizon beats "
                 f"its baseline yet, so nothing is published. This improves as "
                 f"history accumulates.",
                 notify_id)
@@ -636,6 +660,7 @@ def _say_alive(now: float | None = None) -> bool:
 def _worker() -> None:
     """Collect, predict, and retrain on schedule. One thread, no scheduler library."""
     last_train_day = None
+    stale_retrained = False
     while not _stop.is_set():
         started = time.monotonic()
         try:
@@ -645,6 +670,10 @@ def _worker() -> None:
                 config.resolve_topic_prefix()
             beat("collect")
             do_collect()
+            # Its own phase: a full-archive recount is slow enough that the
+            # watchdog would otherwise be timing it as part of the collect.
+            beat("history")
+            _refresh_history_days()
             # No `if models` guard: with none trained, predict still publishes
             # a record with an empty curve, so the entities exist and read
             # `unknown` rather than never appearing. Guarding here is what left
@@ -663,9 +692,23 @@ def _worker() -> None:
             # Daily while the history is still growing fast, weekly once it is
             # mature and a retrain has little left to change.
             due = (now.hour == TRAIN_HOUR
-                   and (days < FULL_HISTORY_DAYS or now.weekday() == TRAIN_WEEKDAY))
-            if due and last_train_day != now.date() and days >= MIN_DAYS_TO_TRAIN:
-                last_train_day = now.date()
+                   and (days < FULL_HISTORY_DAYS or now.weekday() == TRAIN_WEEKDAY)
+                   and last_train_day != now.date())
+            # A MODEL_VERSION bump refuses every artifact at once, and once the
+            # history is mature the next scheduled train is Monday -- so a
+            # Tuesday release would otherwise publish nothing all week. Off the
+            # schedule entirely, and once: if this train fails, the failure is
+            # in `last_error` and the scheduled one is still coming.
+            forced = (not _state["models"] and not stale_retrained
+                      and bool(predict_mod.stale_artifacts()))
+            if (due or forced) and days >= MIN_DAYS_TO_TRAIN:
+                if forced:
+                    stale_retrained = True
+                    _log.info("retraining now: every model on disk was built by "
+                              "an older version, and nothing is published until "
+                              "they are replaced")
+                if due:
+                    last_train_day = now.date()
                 if _take_train_lock():
                     beat("train")
                     try:
@@ -865,6 +908,10 @@ def _status() -> dict:
         "source": settings.source if settings else None,
         "history": _span(store) if store else {"note": "influx"},
         "days_until_training": max(0, round(MIN_DAYS_TO_TRAIN - days, 1)),
+        # What `days_until_training` actually counted down from. Not the same
+        # as `history.days`, which is the age of the oldest row: an unused
+        # tracker puts weeks on that without making one slot trainable.
+        "usable_presence_days": round(days, 3) if store else None,
         "horizons_shipping": _shipping_horizons(),
         "people": [s.slug for s in config.PEOPLE] if settings else [],
         "feature_groups": _feature_groups(),

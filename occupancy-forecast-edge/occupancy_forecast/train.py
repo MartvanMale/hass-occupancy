@@ -61,7 +61,7 @@ from . import baseline, config, evaluate, features, log
 
 _log = log.get(__name__)
 
-MODEL_VERSION = "0.4.0"
+MODEL_VERSION = "0.4.1"
 
 # Minimum Brier skill over the best baseline for a horizon to be published at
 # all. Below this the model is not adding anything worth the extra moving

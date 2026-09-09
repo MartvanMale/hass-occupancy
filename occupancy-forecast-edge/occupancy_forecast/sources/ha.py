@@ -27,6 +27,7 @@ import urllib.parse
 import urllib.request
 from typing import Iterable
 
+from .. import config
 from .store import HistoryStore, _ms
 
 SUPERVISOR_API = "http://supervisor/core/api"
@@ -46,10 +47,15 @@ SUPERVISOR_API = "http://supervisor/core/api"
 HEARTBEAT_ENTITY = "occupancy_ml.collector"
 
 # How far back to reach on the very first collection. Recorder will usually have
-# far less than this -- 10 days is the stock default -- but asking for more
-# costs nothing and an install that has been recording for months should get all
-# of it. Measured: a 100-day request returned in 0.8 s and 0.2 MB.
+# far less than this -- 10 days is the stock default -- but an install that has
+# been recording for months should get all of it.
 BOOTSTRAP_DAYS = 400
+
+# ...asked for in windows this wide, newest first, rather than in one request.
+# The response is parsed whole before a row is stored, and a deep archive is
+# large: measured, six proximity entities cost 0.5 MB per 30 days, so three
+# years of them would be one ~18 MB response to hold in memory on a Pi.
+BOOTSTRAP_CHUNK_DAYS = 30
 
 # Re-fetch this much on every poll. Writes are idempotent (primary key on
 # entity_id + ts), so overlapping is free and it means a missed poll, a restart
@@ -75,6 +81,20 @@ EMPTY_RETRY_SECONDS = 3600
 # word rather than `unavailable` or `unknown`, because Home Assistant uses both
 # for this and a reader should not have to handle two spellings of one fact.
 ABSENT = "absent"
+
+# What gets stored where a reading is merely MISSING. A different fact from
+# ABSENT and so a different word: "no alarm is set" is something we know, and
+# this is something we do not. It exists as a row rather than as silence
+# because the row is what ends the preceding state -- without it the last
+# known state carries forward for as long as the tracker stays quiet.
+UNKNOWN = "unknown"
+
+# Bumped when a release needs the store rewritten or refilled once. 1 re-pulls
+# presence over the bootstrap window: releases before this dropped every
+# `unknown` from a person or group, so those transitions are missing from
+# every archive already written and the recorder is the only place left that
+# still has them.
+STORE_VERSION = 1
 
 
 class HomeAssistant:
@@ -167,6 +187,54 @@ class HomeAssistant:
             pass  # never raised, or already gone
 
 
+def _utc(when: dt.datetime) -> str:
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _rows(series: list, keep_gap: set[str], keep_absence: set[str]
+          ) -> tuple[list[tuple[str, int, str]], set[str]]:
+    """Flatten a `/history/period` response into store rows, and who they name."""
+    rows: list[tuple[str, int, str]] = []
+    named: set[str] = set()
+    for entries in series or []:
+        entity_id = None
+        for entry in entries:
+            # Only the first entry of a minimal_response series names itself.
+            entity_id = entry.get("entity_id") or entity_id
+            state = entry.get("state")
+            when = entry.get("last_changed") or entry.get("last_updated")
+            if not (entity_id and when):
+                continue
+            named.add(entity_id)
+            if config.is_empty(state):
+                # Normalised in both cases, because HA uses both words for each
+                # and the reader should not have to know which it got.
+                if entity_id in keep_gap:
+                    state = UNKNOWN
+                elif entity_id in keep_absence:
+                    state = ABSENT
+                else:
+                    continue
+            rows.append((entity_id, _ms(when), str(state)))
+    return rows, named
+
+
+def _windows(begin: dt.datetime, now: dt.datetime,
+             chunk_days: int = BOOTSTRAP_CHUNK_DAYS):
+    """`[begin, now]` as request windows, NEWEST FIRST.
+
+    Newest first is what lets a walk stop: history runs out at the recorder's
+    purge horizon and there is only one of those, so the first empty window
+    means every window below it is empty too.
+    """
+    span = dt.timedelta(days=chunk_days)
+    until = now
+    while until > begin:
+        start = max(begin, until - span)
+        yield start, until
+        until = start
+
+
 class StoreSource:
     """A `Source` reading the local store, with `collect()` to keep it fed."""
 
@@ -190,30 +258,52 @@ class StoreSource:
     # -- collection ---------------------------------------------------------
 
     def collect(self, entity_ids: list[str],
-                absence_is_a_reading: Iterable[str] = ()) -> dict:
+                absence_is_a_reading: Iterable[str] = (),
+                gap_is_a_boundary: Iterable[str] = ()) -> dict:
         """Pull everything new for `entity_ids` from HA into the store.
 
         The window starts at the oldest per-entity watermark minus an overlap,
         so an entity added to the config later gets backfilled with whatever
-        recorder still holds rather than starting from now.
+        recorder still holds rather than starting from now. A window wider than
+        `BOOTSTRAP_CHUNK_DAYS` is walked backwards in chunks and stops at the
+        first empty one, which is the recorder's purge horizon.
+
+        Two kinds of entity keep what would otherwise be dropped, for two
+        different reasons.
 
         `absence_is_a_reading` names the entities for which `unavailable` and
-        `unknown` are DATA rather than a gap, and are therefore stored instead
-        of dropped. There is exactly one shape of sensor like that so far: a
+        `unknown` are DATA. There is exactly one shape of sensor like that: a
         next-alarm sensor reads `unavailable` precisely when no alarm is set,
         which is the more common state and at least as informative as a time.
         Dropping it would leave an archive that says nothing at all on the days
         somebody had no alarm -- indistinguishable from the days the sensor was
         broken, and unrecoverable later, because Home Assistant's recorder will
         long since have discarded the difference.
+
+        `gap_is_a_boundary` names the presence entities, where the same words
+        mean the opposite: not a reading, but the END of one. Dropped, they
+        left the previous state to be carried forward indefinitely, and a phone
+        that stopped reporting read as everybody-out for as long as it stayed
+        quiet -- straight into the training labels. Stored as UNKNOWN, the
+        interval is uncovered instead, which is what it is.
         """
         if not entity_ids:
             return {"added": 0, "entities": 0}
 
         now = dt.datetime.now(dt.timezone.utc)
         mono = time.monotonic()
+        keep_gap = set(gap_is_a_boundary)
+        # One-shot, keyed in the store rather than per process: a flag on the
+        # instance would re-pull the whole bootstrap window on every restart.
+        refill = (keep_gap if self.store.user_version() < STORE_VERSION
+                  else set())
         begins: dict[str, dt.datetime] = {}
+        bootstrap: set[str] = set()
         for entity_id in entity_ids:
+            if entity_id in refill:
+                begins[entity_id] = now - dt.timedelta(days=BOOTSTRAP_DAYS)
+                bootstrap.add(entity_id)
+                continue
             seen = self.store.last_seen(entity_id)
             if seen:
                 begins[entity_id] = (dt.datetime.fromtimestamp(seen / 1000, dt.timezone.utc)
@@ -226,6 +316,8 @@ class StoreSource:
             # only covers the time since the previous ask found nothing.
             begins[entity_id] = (asked[1] - dt.timedelta(minutes=OVERLAP_MINUTES)
                                  if asked else now - dt.timedelta(days=BOOTSTRAP_DAYS))
+            if asked is None:
+                bootstrap.add(entity_id)
             self._asked_empty[entity_id] = (mono, now)
 
         # Bucket by HOW FAR BACK a window reaches, not by where its start lands
@@ -240,37 +332,36 @@ class StoreSource:
             key = int((now - begin).total_seconds()) // (WINDOW_BUCKET_HOURS * 3600)
             groups.setdefault(key, []).append(entity_id)
 
-        series: list = []
-        stop = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        for _key, ids in sorted(groups.items(), reverse=True):   # oldest window first
-            start = min(begins[e] for e in ids)
-            series.extend(self.ha.history(ids, start.strftime("%Y-%m-%dT%H:%M:%SZ"), stop)
-                          or [])
-        earliest = min(begins.values()) if begins else now
-
         keep_absence = set(absence_is_a_reading)
-        rows: list[tuple[str, int, str]] = []
-        for entries in series or []:
-            entity_id = None
-            for entry in entries:
-                # Only the first entry of a minimal_response series names itself.
-                entity_id = entry.get("entity_id") or entity_id
-                state = entry.get("state")
-                when = entry.get("last_changed") or entry.get("last_updated")
-                if not (entity_id and when):
-                    continue
-                if state in (None, "", "unknown", "unavailable"):
-                    if entity_id not in keep_absence:
-                        continue
-                    # Normalised, because HA uses both words for the same thing
-                    # and the reader should not have to know which one it got.
-                    state = ABSENT
-                rows.append((entity_id, _ms(when), str(state)))
+        added = requests = 0
+        seen_entities: set[str] = set()
+        earliest = now
+        for _key, ids in sorted(groups.items(), reverse=True):   # oldest window first
+            begin = min(begins[e] for e in ids)
+            # Only the bootstrap is chunked. A watermark can be months old on an
+            # entity that rarely changes -- a zone nobody visits -- and chunking
+            # that would turn one request every five minutes into nine, forever.
+            spans = (_windows(begin, now) if any(e in bootstrap for e in ids)
+                     else [(begin, now)])
+            for start, until in spans:
+                series = self.ha.history(ids, _utc(start), _utc(until)) or []
+                requests += 1
+                earliest = min(earliest, start)
+                rows, named = _rows(series, keep_gap, keep_absence)
+                # Per window, not once at the end: an interrupted walk then
+                # keeps what it got, and resuming re-asks only for the rest.
+                added += self.store.append(rows)
+                seen_entities |= named
+                if not any(series):
+                    break
 
-        added = self.store.append(rows)
+        # After the append, so an interrupted refill runs again. Re-running it
+        # is free: the (entity_id, ts) primary key makes the rows idempotent.
+        if refill:
+            self.store.set_user_version(STORE_VERSION)
         self.store.append([(HEARTBEAT_ENTITY, int(now.timestamp() * 1000), "ok")])
-        return {"added": added, "entities": len(series),
-                "since": earliest.isoformat(), "requests": len(groups)}
+        return {"added": added, "entities": len(seen_entities),
+                "since": earliest.isoformat(), "requests": requests}
 
     def liveness_times(self, start: str, stop: str | None = None) -> list[str]:
         """When we know history was being captured.

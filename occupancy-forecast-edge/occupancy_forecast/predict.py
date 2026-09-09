@@ -114,6 +114,17 @@ def _load_artifact(path: Path) -> dict | None:
 _stale: list[tuple[str, str | None]] = []
 
 
+def stale_artifacts() -> list[tuple[str, str | None]]:
+    """Model files the last `load_models` refused for their version.
+
+    Non-empty means a MODEL_VERSION bump has just orphaned a trained house.
+    Nothing here retrains on its own, and the scheduled train is weekly once
+    the history is mature, so the worker uses this to retrain at once rather
+    than publish nothing until Monday.
+    """
+    return list(_stale)
+
+
 def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
     """The per-horizon view the rest of the package expects, from two families.
 
