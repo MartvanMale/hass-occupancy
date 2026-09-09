@@ -107,7 +107,18 @@ def build_source(settings: config.Settings, ha: HomeAssistant,
         return InfluxSource(url, token, org,
                             bucket=os.environ.get("INFLUX_BUCKET", "homeassistant"),
                             units=settings.units)
-    return StoreSource(store or HistoryStore(config.HISTORY_DB), ha)
+    return StoreSource(store or forecast_log(), ha)
+
+
+def forecast_log() -> HistoryStore:
+    """Where the add-on records what it published, whatever the source is.
+
+    The same file and the same class as the archive -- the `forecasts` table
+    lives beside `states` -- but it is deliberately not reached through the
+    source: `.store` is what tells the rest of the add-on it is NOT on Influx,
+    and an Influx install needs this table without inheriting any of that.
+    """
+    return HistoryStore(config.HISTORY_DB)
 
 
 def tracked_entities(settings: config.Settings) -> list[str]:
@@ -171,9 +182,16 @@ def trigger_entities(settings: config.Settings) -> list[str]:
 
 
 def bootstrap(path: Path = config.CONFIG_PATH):
-    """Everything, wired. Returns (settings, ha, source)."""
+    """Everything, wired. Returns (settings, ha, source, forecast_log).
+
+    The log is built whatever the source is: it holds what this add-on
+    PUBLISHED, which has no relationship to where history is read from. On
+    `store` it is the same object the source reads through; on `influx`
+    `build_source` ignores it and only the forecast table is ever written.
+    """
     ha = home_assistant()
     settings = refresh_environment(load_settings(ha, path), ha)
     settings.save(path)
     config.configure(settings)
-    return settings, ha, build_source(settings, ha)
+    log = forecast_log()
+    return settings, ha, build_source(settings, ha, log), log

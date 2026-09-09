@@ -491,6 +491,22 @@ p.empty.error { color: rgb(var(--rgb-red)); }
 .popup .search::placeholder { color: var(--text-2); }
 .popup .search:focus { outline: 2px solid rgba(var(--rgb-aqua), .6); }
 
+/* Days to keep, typed rather than picked -- the one free numeric field on the
+   page, so it borrows the Select trigger's height and ground to sit level with
+   them. The spinners go: they are three pixels wide at this height. */
+.days { display: inline-flex; align-items: center; gap: 8px;
+        color: var(--text-2); font-size: var(--secondary-size); }
+.days input { font: inherit; font-family: var(--mono); color: var(--text);
+              font-size: var(--primary-size); width: 4.5rem; text-align: right;
+              height: var(--control-height); padding: 0 10px; border: none;
+              border-radius: var(--control-radius);
+              background: rgba(var(--rgb-grey), .12); }
+.days input:hover { background: rgba(var(--rgb-grey), .2); }
+.days input:focus { outline: 2px solid rgba(var(--rgb-aqua), .6); }
+.days input::-webkit-outer-spin-button,
+.days input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.days input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
 .popup ul { list-style: none; margin: 0; padding: 0;
             max-height: 15rem; overflow-y: auto; }
 .popup li { display: flex; align-items: center; justify-content: space-between;

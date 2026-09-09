@@ -56,6 +56,7 @@ export function App() {
   const [departure, setDeparture] = useState<string>('0.5')
   const [arrival, setArrival] = useState<string>('0.5')
   const [minHours, setMinHours] = useState<string>('2')
+  const [retention, setRetention] = useState<string>('30')
   const [loaded, setLoaded] = useState(false)
 
   const [saving, setSaving] = useState(false)
@@ -71,6 +72,7 @@ export function App() {
     setDeparture(s.departure_threshold.toFixed(2))
     setArrival(s.arrival_threshold.toFixed(2))
     setMinHours(String(s.crossing_min_hours))
+    setRetention(String(s.forecast_retention_days))
     setLoaded(true)
   }, [])
 
@@ -132,6 +134,7 @@ export function App() {
         departure_threshold: Number(departure),
         arrival_threshold: Number(arrival),
         crossing_min_hours: Number(minHours),
+        forecast_retention_days: Number(retention),
       })
       setSaved(true)
       if (savedTimer.current) clearTimeout(savedTimer.current)
@@ -205,6 +208,7 @@ export function App() {
             departure={departure}
             arrival={arrival}
             minHours={minHours}
+            retention={retention}
             loaded={loaded}
             saving={saving}
             saved={saved}
@@ -217,6 +221,7 @@ export function App() {
             setDeparture={setDeparture}
             setArrival={setArrival}
             setMinHours={setMinHours}
+            setRetention={setRetention}
           />
         ) : view === 'data' ? (
           <DataView status={status} />

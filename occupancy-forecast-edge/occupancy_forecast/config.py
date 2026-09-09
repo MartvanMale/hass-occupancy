@@ -78,7 +78,8 @@ HORIZONS_H = tuple(range(1, 49))
 # subject, not about what the model produces.
 SENSOR_HORIZONS_H = (1, 2, 3, 6, 12, 24, 36, 48)
 
-# How long the record of what was forecast is kept, for the verification chart.
+# Default for `Settings.forecast_retention_days` -- how long the record of what
+# was forecast is kept, for the verification chart. Settable on the Setup tab.
 #
 # All 48 horizons are stored, not just SENSOR_HORIZONS_H: the point of that card
 # is a slider across the whole range, and the difference is a few megabytes.
@@ -235,6 +236,10 @@ class Settings:
     departure_threshold: float = DEFAULT_DEPARTURE_THRESHOLD
     arrival_threshold: float = DEFAULT_ARRIVAL_THRESHOLD
     crossing_min_hours: int = DEFAULT_CROSSING_MIN_HOURS
+    # Whole days, and 0 means never prune. Storage, not behaviour: nothing
+    # refits from this table and no published entity reads it. Lowering it
+    # deletes on the next cycle, unrecoverably.
+    forecast_retention_days: int = FORECAST_RETENTION_DAYS
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)

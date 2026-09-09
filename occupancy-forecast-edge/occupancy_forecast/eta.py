@@ -418,7 +418,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     from . import runtime
-    _, _, source = runtime.bootstrap()
+    _, _, source, _ = runtime.bootstrap()
     summary = train_all(source, args.models)
     print(f"\n{'subject':<8} {'samples':>8} {'arrivals':>9} {'MAE':>7} {'baseline':>9} "
           f"{'skill':>7} {'folds':>7} {'p':>7}  ships")

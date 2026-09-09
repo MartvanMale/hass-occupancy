@@ -137,6 +137,9 @@ _IMPORTED_AT = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 _state: dict = {
     "settings": None, "ha": None, "source": None,
+    # What was published, as opposed to where history is read from. Held here
+    # rather than on the source so an Influx install has one too.
+    "forecast_log": None,
     "models": {}, "eta_models": {}, "out_routine": {},
     "loaded_at": None, "last_collect": None, "last_predict": None,
     "last_train": None, "last_train_seconds": None, "training_started_at": None,
@@ -241,7 +244,7 @@ def _record_forecasts(results: list[dict]) -> None:
     Wrapped whole: this is bookkeeping for a chart, and a store that has gone
     read-only or filled its disk must not stop the house getting a forecast.
     """
-    store = getattr(_state["source"], "store", None)
+    store = _state["forecast_log"]
     if store is None:
         return
     try:
@@ -258,9 +261,12 @@ def _record_forecasts(results: list[dict]) -> None:
                 rows.append((result["subject"], int(target.timestamp() * 1000),
                              int(horizon), float(value)))
         store.append_forecasts(rows)
-        store.prune_forecasts(
-            dt.datetime.now(dt.timezone.utc)
-            - dt.timedelta(days=config.FORECAST_RETENTION_DAYS))
+        settings = _state["settings"]
+        keep = (settings.forecast_retention_days if settings
+                else config.FORECAST_RETENTION_DAYS)
+        if keep:                                  # 0 means keep everything
+            store.prune_forecasts(
+                dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=keep))
     except Exception:
         _log.warning("could not record this cycle's forecasts; the verification "
                      "chart will show a gap here", exc_info=True)
@@ -748,12 +754,13 @@ async def lifespan(_: FastAPI):
     # at import, and a miss was remembered for the life of the process.
     config.resolve_topic_prefix(attempts=5, delay=3.0)
     try:
-        settings, ha, source = runtime.bootstrap()
+        settings, ha, source, forecast_log = runtime.bootstrap()
         configured = True
     except Exception as err:  # noqa: BLE001
-        settings, ha, source = _degraded_bootstrap(err)
+        settings, ha, source, forecast_log = _degraded_bootstrap(err)
         configured = False
-    _state.update({"settings": settings, "ha": ha, "source": source})
+    _state.update({"settings": settings, "ha": ha, "source": source,
+                   "forecast_log": forecast_log})
     try:
         _load_models()
     except Exception as err:  # noqa: BLE001
@@ -779,7 +786,9 @@ async def lifespan(_: FastAPI):
     if _listener is not None:
         _listener.stop()
     _broker.close()
-    store = getattr(_state.get("source"), "store", None)
+    # One object on `store` (the source reads through it) and on `influx` (only
+    # the forecast table is written), so closing the log closes everything.
+    store = _state.get("forecast_log")
     if store is not None:
         store.close()
 
@@ -809,7 +818,7 @@ def _degraded_bootstrap(err: Exception) -> tuple:
     except Exception as load_err:  # noqa: BLE001
         _log.error("could not read the saved configuration (%s); starting "
                    "from a blank one", load_err)
-    return settings or config.Settings(), ha, None
+    return settings or config.Settings(), ha, None, None
 
 
 _threads_started = False
@@ -1289,12 +1298,28 @@ def _optional_str(value, key: str) -> str | None:
 
 
 def typed_patch(payload: dict) -> dict:
-    """The identity fields of a config patch, type-checked. Or a 400.
+    """The self-contained fields of a config patch, type-checked. Or a 400.
 
     Shapes only; whether an entity exists is the endpoint's question, because
-    that needs Home Assistant. Separate so it is testable without one.
+    that needs Home Assistant. Separate so it is testable without one. The
+    fields that have to be read against the CURRENT settings are in
+    `crossing_patch` instead.
     """
     out: dict = {}
+    if "forecast_retention_days" in payload:
+        value = _number(payload, "forecast_retention_days", "a whole number of days")
+        # The floor is derived: under the longest horizon a forecast is pruned
+        # before it can ever come due, so the chart would be permanently empty
+        # at the top of its range. 0 is the exception because it prunes nothing.
+        floor = -(-max(config.HORIZONS_H) // 24)
+        if value != int(value) or value < 0 or 0 < value < floor:
+            raise HTTPException(
+                status_code=400,
+                detail=f"forecast_retention_days must be 0 (keep everything) "
+                       f"or at least {floor} whole days -- shorter than that "
+                       f"and a +{max(config.HORIZONS_H)} h forecast is deleted "
+                       f"before it can be scored.")
+        out["forecast_retention_days"] = int(value)
     if "people" in payload:
         out["people"] = _entity_list(payload["people"], "people", "person")
     if "zones" in payload:
@@ -1403,10 +1428,13 @@ def api_save_config(payload: dict) -> dict:
         raise HTTPException(status_code=400, detail=str(err)) from err
     settings.save()
     _state["settings"] = settings
-    old_store = getattr(_state["source"], "store", None)
-    _state["source"] = runtime.build_source(settings, _state["ha"], old_store)
-    if old_store is not None and getattr(_state["source"], "store", None) is not old_store:
-        old_store.close()
+    # The log outlives a save, including one that switches `source`: closing it
+    # here is how a store->influx switch would have thrown away the open handle
+    # the forecast table is still written through.
+    if _state["forecast_log"] is None:
+        _state["forecast_log"] = runtime.forecast_log()
+    _state["source"] = runtime.build_source(settings, _state["ha"],
+                                            _state["forecast_log"])
     # Who to listen to changed with who to track. Without this, a person added
     # here is not subscribed to until the next restart -- and nothing says so,
     # because the add-on carries on publishing perfectly good five-minute
@@ -1527,8 +1555,8 @@ def api_explore_horizon(horizon: int) -> dict:
 @app.get("/api/explore/verification")
 def api_explore_verification(subject: str, horizon: int,
                              days: int = explore.DEFAULT_DAYS) -> dict:
-    return explore.verification(_state["source"], _state["settings"],
-                                subject, horizon, days)
+    return explore.verification(_state["source"], _state["forecast_log"],
+                                _state["settings"], subject, horizon, days)
 
 
 @app.get("/api/explore/metrics")

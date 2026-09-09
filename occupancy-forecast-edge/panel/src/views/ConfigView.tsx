@@ -155,6 +155,7 @@ export interface ConfigViewProps {
   departure: string
   arrival: string
   minHours: string
+  retention: string
   loaded: boolean
   saving: boolean
   saved: boolean
@@ -167,6 +168,7 @@ export interface ConfigViewProps {
   setDeparture: (value: string) => void
   setArrival: (value: string) => void
   setMinHours: (value: string) => void
+  setRetention: (value: string) => void
 }
 
 /**
@@ -188,13 +190,20 @@ const RUNS = [1, 2, 3, 4, 6].map((h) => ({
   label: h === 1 ? '1 hour (any single hour)' : `${h} hours`,
 }))
 
+
 export function ConfigView({
   status, candidates,
   people, zones, house, holiday, daySchedule, departure, arrival, minHours,
-  loaded, saving, saved, error,
+  retention, loaded, saving, saved, error,
   onSubmit, togglePerson, toggleZone, setHouse, setHoliday, setDaySchedule,
-  setDeparture, setArrival, setMinHours,
+  setDeparture, setArrival, setMinHours, setRetention,
 }: ConfigViewProps) {
+  // Typed, so it can be mid-edit. An empty field must not reach the server as
+  // Number('') === 0, which is the one value that means something else.
+  const retentionOk = /^\d+$/.test(retention.trim())
+  const complaint = error ?? (retentionOk
+    ? null
+    : 'Days to keep must be a whole number of days, 0 or more.')
   return (
     <>
       <div className="cards">
@@ -402,15 +411,44 @@ export function ConfigView({
               }
             />
           </Card>
+
+          <Card
+            title="Forecast record"
+            subtitle="How long to keep what was published, for the “Was it right?”
+              chart. Nothing is trained on it and no entity reads it."
+          >
+            <Row
+              icon="database"
+              control
+              accent="blue"
+              primary="Keep each forecast for"
+              secondary="0 keeps everything. Shortening this deletes the older
+                rows on the next cycle, and they cannot be rebuilt."
+              trailing={
+                <span className="days">
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    inputMode="numeric"
+                    aria-label="Days of forecasts to keep"
+                    value={retention}
+                    onChange={(e) => setRetention(e.target.value)}
+                  />
+                  days
+                </span>
+              }
+            />
+          </Card>
         </div>
 
         <div className="actions">
-          <button type="submit" disabled={!loaded || saving}>
+          <button type="submit" disabled={!loaded || saving || !retentionOk}>
             <Icon name="save" />
             {saving ? 'Saving…' : 'Save'}
           </button>
           <span className={saved ? 'saved on' : 'saved'}>Saved</span>
-          {error && <span className="error">{error}</span>}
+          {complaint && <span className="error">{complaint}</span>}
         </div>
       </form>
     </>

@@ -30,6 +30,13 @@ import { absoluteTime, DAY_OPTIONS_RECENT, pretty } from '../format'
  * step five, whose subtitle already asks the question.
  */
 
+/** The window the log actually keeps, which is not the window being charted.
+ *  0 is the "keep everything" setting, not a zero-length window. */
+function keptFor(days: number | null): string {
+  if (days === null) return 'Kept for as long as the Setup tab says.'
+  return days === 0 ? 'Kept indefinitely.' : `Kept for ${days} days.`
+}
+
 export function VerificationCard({ status, defaultHorizon = 6 }: {
   status: Status | null
   /** 6 h by default because that is the window the Lovelace card watches and
@@ -109,7 +116,7 @@ export function VerificationCard({ status, defaultHorizon = 6 }: {
         control
         accent="blue"
         primary="Window"
-        secondary={`Kept for ${data?.available ? data.retention_days : 30} days.`}
+        secondary={keptFor(data?.available ? data.retention_days : null)}
         trailing={
           <Select label="Time window" value={days} onChange={setDays}
                   options={DAY_OPTIONS_RECENT} />

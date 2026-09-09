@@ -547,8 +547,8 @@ def test_verification_puts_the_forecast_on_the_slot_it_was_about(home_all_week):
     home_all_week.append_forecasts(
         [("alice", int(t.timestamp() * 1000), 6, 0.75) for t in slots])
 
-    result = explore.verification(FakeSource(home_all_week), make_settings(),
-                                  "alice", 6, days=2)
+    result = explore.verification(FakeSource(home_all_week), home_all_week,
+                                  make_settings(), "alice", 6, days=2)
     assert result["available"] is True
     assert result["served"] == len(slots)
     assert all(p["forecast"] == 0.75 for p in result["points"])
@@ -566,8 +566,8 @@ def test_a_slot_nothing_was_published_for_is_a_null_and_not_a_zero(home_all_week
     home_all_week.append_forecasts(
         [("alice", int(t.timestamp() * 1000), 6, 0.75) for t in published])
 
-    result = explore.verification(FakeSource(home_all_week), make_settings(),
-                                  "alice", 6, days=2)
+    result = explore.verification(FakeSource(home_all_week), home_all_week,
+                                  make_settings(), "alice", 6, days=2)
     by_t = {p["t"]: p for p in result["points"]}
     for t in withheld:
         assert by_t[t.isoformat()]["forecast"] is None
@@ -584,8 +584,8 @@ def test_the_holes_lead_the_summary_rather_than_the_score(home_all_week):
     home_all_week.append_forecasts(
         [("alice", int(t.timestamp() * 1000), 6, 0.75) for t in slots[:10]])
 
-    result = explore.verification(FakeSource(home_all_week), make_settings(),
-                                  "alice", 6, days=2)
+    result = explore.verification(FakeSource(home_all_week), home_all_week,
+                                  make_settings(), "alice", 6, days=2)
     assert result["summary"].startswith("published for 10 of")
 
 
@@ -593,8 +593,8 @@ def test_before_anything_has_come_due_it_says_so(home_all_week):
     """The normal state for the first `horizon` hours after a deploy, and
     forever for a horizon the model never earns. Not a 404, not an empty chart
     with a 0.000 Brier under it."""
-    result = explore.verification(FakeSource(home_all_week), make_settings(),
-                                  "alice", 6, days=2)
+    result = explore.verification(FakeSource(home_all_week), home_all_week,
+                                  make_settings(), "alice", 6, days=2)
     assert result["available"] is False
     assert "come due" in result["reason"]
 
@@ -606,26 +606,51 @@ def test_a_forecast_about_the_future_is_not_scored_yet(home_all_week):
     home_all_week.append_forecasts(
         [("alice", int(ahead.timestamp() * 1000), 6, 0.75)])
 
-    result = explore.verification(FakeSource(home_all_week), make_settings(),
-                                  "alice", 6, days=2)
+    result = explore.verification(FakeSource(home_all_week), home_all_week,
+                                  make_settings(), "alice", 6, days=2)
     assert result["available"] is False, "nothing in the window has come due"
 
 
 def test_an_unknown_subject_or_horizon_is_an_answer(home_all_week):
     source = FakeSource(home_all_week)
-    stranger = explore.verification(source, make_settings(), "carol", 6, days=2)
+    stranger = explore.verification(source, home_all_week, make_settings(),
+                                    "carol", 6, days=2)
     assert stranger["available"] is False and "carol" in stranger["reason"]
 
-    impossible = explore.verification(source, make_settings(), "alice", 99, days=2)
+    impossible = explore.verification(source, home_all_week, make_settings(),
+                                      "alice", 99, days=2)
     assert impossible["available"] is False and "99" in impossible["reason"]
 
 
-def test_an_influx_installation_keeps_no_such_record():
-    """`explore` asks a source for its store and gets None. The reason has to
-    say why rather than reading as a fault, because it never will have one."""
-    class Storeless:
-        pass
+def test_an_influx_installation_is_verified_like_any_other(home_all_week):
+    """The record is the add-on's own output; truth comes from the SOURCE, and
+    `presence_events` reads Influx perfectly well. Asking the source for a
+    store made a card about the serving path unavailable on the one kind of
+    install that was also recording nothing to put in it."""
+    class Influx:
+        """No `.store`, and both reads the protocol requires."""
 
-    result = explore.verification(Storeless(), make_settings(), "alice", 6)
+        def seeded_states(self, entity_id, start, stop=None, seed_days=14):
+            return home_all_week.seeded_states(entity_id, start, stop, seed_days)
+
+        def states(self, entity_id, start, stop=None):
+            return home_all_week.states(entity_id, start, stop)
+
+    slots = _slots(2)
+    home_all_week.append_forecasts(
+        [("alice", int(t.timestamp() * 1000), 6, 0.75) for t in slots])
+
+    result = explore.verification(Influx(), home_all_week, make_settings(),
+                                  "alice", 6, days=2)
+    assert result["available"] is True
+    assert result["served"] == len(slots)
+    assert result["brier"] == pytest.approx(0.0625, abs=1e-6)
+
+
+def test_a_start_up_that_has_no_log_yet_is_an_answer_not_an_error(home_all_week):
+    """`_degraded_bootstrap` opens nothing, and the panel it exists to keep
+    serving is the one that shows this card."""
+    result = explore.verification(FakeSource(home_all_week), None,
+                                  make_settings(), "alice", 6, days=2)
     assert result["available"] is False
-    assert "InfluxDB" in result["reason"]
+    assert "starting up" in result["reason"]

@@ -51,7 +51,8 @@ CANDIDATE_KEYS = {"people", "zones", "groups", "countries", "has_proximity",
                   "schedules"}
 SETTINGS_KEYS = {"people", "zones", "house_entity", "holiday_country",
                  "day_schedule",
-                 "departure_threshold", "arrival_threshold", "crossing_min_hours"}
+                 "departure_threshold", "arrival_threshold", "crossing_min_hours",
+                 "forecast_retention_days"}
 
 # The Data tab. Every one of these is a discriminated union on the panel side:
 # `{available: false, reason}` or `{available: true, ...}`, which is what makes
@@ -280,9 +281,26 @@ def test_candidates_carries_every_field_the_pickers_read():
 
 
 def test_the_saved_settings_round_trip_through_the_form():
-    """GET /api/config seeds the form; POST sends back these same seven keys."""
+    """GET /api/config seeds the form; POST sends back these same keys."""
     from dataclasses import asdict
     assert SETTINGS_KEYS <= set(asdict(make_settings()))
+
+
+def test_every_settable_field_the_form_sends_is_on_a_validator_allowlist():
+    """`typed_patch` drops what it does not recognise, silently. A field added
+    to the form and forgotten here never saves and never errors -- so the two
+    halves of `ConfigPatch` are checked against each other rather than trusted.
+    """
+    from occupancy_forecast import server
+
+    settable = SETTINGS_KEYS - {"holiday_country"}          # optional in the patch
+    payload = {"people": [], "zones": [], "house_entity": None,
+               "day_schedule": None, "departure_threshold": 0.5,
+               "arrival_threshold": 0.5, "crossing_min_hours": 2,
+               "forecast_retention_days": 30}
+    applied = {**server.typed_patch(payload),
+               **server.crossing_patch(payload, make_settings())}
+    assert settable <= set(applied), settable - set(applied)
 
 
 # --- the Data tab ---------------------------------------------------------
@@ -401,7 +419,8 @@ def test_verification_carries_every_field_the_was_it_right_card_reads(tmp_path):
     store.append_forecasts([("alice", int(t.timestamp() * 1000), 6, 0.8)
                             for t in slots])
 
-    result = explore.verification(Source(), make_settings(), "alice", 6, days=1)
+    result = explore.verification(Source(), store, make_settings(), "alice", 6,
+                                  days=1)
     assert VERIFICATION_KEYS <= set(result)
     for point in result["points"]:
         assert VERIFICATION_POINT_KEYS <= set(point)
@@ -419,7 +438,8 @@ def test_an_unavailable_verification_still_answers_in_the_explorable_shape(tmp_p
     class Source:
         store = HistoryStore(tmp_path / "empty.db")
 
-    result = explore.verification(Source(), make_settings(), "alice", 6, days=1)
+    result = explore.verification(Source(), Source.store, make_settings(),
+                                  "alice", 6, days=1)
     assert UNAVAILABLE_KEYS <= set(result)
     assert result["available"] is False
 

@@ -1459,7 +1459,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", type=Path, default=config.FEATURES_PATH)
     args = parser.parse_args(argv)
 
-    _, _, source = runtime.bootstrap()
+    _, _, source, _ = runtime.bootstrap()
 
     began = dt.datetime.now()
     table = build(source, args.start, args.stop)

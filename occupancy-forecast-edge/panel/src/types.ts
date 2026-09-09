@@ -167,6 +167,9 @@ export interface Settings {
   departure_threshold: number
   arrival_threshold: number
   crossing_min_hours: number
+  /** Days of published forecasts kept for the "Was it right?" chart.
+   *  0 means never pruned. */
+  forecast_retention_days: number
 }
 
 /** What POST /api/config accepts. A key left out is a setting left alone. */
@@ -183,6 +186,9 @@ export interface ConfigPatch {
   departure_threshold: number
   arrival_threshold: number
   crossing_min_hours: number
+  /** Days of published forecasts kept for the "Was it right?" chart.
+   *  0 means never pruned. */
+  forecast_retention_days: number
 }
 
 // --- the Overview tab -----------------------------------------------------
@@ -392,6 +398,7 @@ export type Verification = Explorable<{
   scored: number
   brier: number | null
   mae: number | null
+  /** How long the forecast log keeps a row. 0 means never pruned. */
   retention_days: number
   summary: string
 }>

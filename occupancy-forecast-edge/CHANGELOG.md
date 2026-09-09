@@ -1,7 +1,24 @@
 ## Unreleased
 
+### Added
+
+- **How long the forecast record is kept is now a setting**, on the Setup tab
+  under "Forecast record". Type a number of days; **0 keeps everything and
+  never deletes**. It still defaults to 30 days. This is the history behind the
+  "Was it right?" chart and nothing else — no model is trained on it and no
+  entity reads it, so a longer window costs only a few megabytes. Shortening it
+  deletes the older rows on the next cycle and they cannot be rebuilt.
+
 ### Fixed
 
+- The "Was it right?" chart now works when the add-on reads its history from
+  InfluxDB. It said that installation kept no record of what it published --
+  and it did not, because nothing was ever written: every forecast an `influx`
+  install made went unrecorded, on every cycle. The record is the add-on's own
+  output and has nothing to do with where history is read from, so it is now
+  kept whatever the source is. Existing `influx` installs start empty and fill
+  up over the following 30 days. There is still no local history archive on
+  `influx`, so the first two cards on the Data tab still say so.
 - A phone that stops reporting no longer counts as everybody being out. Home
   Assistant writes `unknown` or `unavailable` when it has lost track of
   somebody, and until now that was thrown away, so the last known position was

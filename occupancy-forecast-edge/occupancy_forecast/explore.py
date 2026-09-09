@@ -580,9 +580,15 @@ def horizon_recipe(horizon: int, models: dict) -> dict:
 
 # --- was it right? --------------------------------------------------------
 
-def verification(source, settings, subject: str, horizon_h: int,
+def verification(source, log, settings, subject: str, horizon_h: int,
                  days: int | None = None) -> dict:
     """What was forecast for each slot at one horizon, against what happened.
+
+    `log` is the forecast record and `source` is the history; they are separate
+    arguments because they are separate questions. This used to read the log
+    through `source.store`, which an Influx install does not have -- so it
+    reported the add-on's own bookkeeping as a consequence of where history
+    comes from, and recorded nothing at all.
 
     This is the only number the add-on reports that is about the SERVING path.
     Everything on the Judge step is rolling-origin cross-validation computed at
@@ -609,10 +615,9 @@ def verification(source, settings, subject: str, horizon_h: int,
     if horizon_h not in config.HORIZONS_H:
         return unavailable(f"+{horizon_h} h is not a horizon this add-on forecasts")
 
-    store = getattr(source, "store", None)
-    if store is None:
-        return unavailable("this installation reads its history from InfluxDB, "
-                           "so the add-on keeps no record of what it published")
+    if log is None:
+        return unavailable("the add-on has not finished starting up, so there "
+                           "is no record of what it published yet")
 
     days = _clamp_days(days)
     stop = pd.Timestamp.now(tz="UTC")
@@ -621,8 +626,8 @@ def verification(source, settings, subject: str, horizon_h: int,
     if len(slots) == 0:
         return unavailable("the window is shorter than one slot")
 
-    forecast_rows = store.forecast_series(subject, horizon_h, start.isoformat(),
-                                          stop.isoformat())
+    forecast_rows = log.forecast_series(subject, horizon_h, start.isoformat(),
+                                        stop.isoformat())
     if not forecast_rows:
         return unavailable(
             f"nothing published for +{horizon_h} h has come due yet. The "
@@ -659,7 +664,7 @@ def verification(source, settings, subject: str, horizon_h: int,
         "scored": scores.n,
         "brier": _num(scores.brier),
         "mae": _num(scores.mae_frac),
-        "retention_days": config.FORECAST_RETENTION_DAYS,
+        "retention_days": settings.forecast_retention_days,
         "summary": _verification_summary(len(slots), served, scores),
     }
 

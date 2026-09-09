@@ -290,6 +290,27 @@ def test_well_formed_identity_fields_pass_through():
         "the crossing cuts are crossing_patch's, not this one's"
 
 
+@pytest.mark.parametrize("value", [1, 30.5, True, "30", -1])
+def test_retention_must_be_whole_days_the_chart_can_reach(value):
+    """One day is the case worth pinning: it is a legal-looking number that
+    deletes a +48 h forecast before it can ever be scored, so the top of the
+    chart's range would be permanently empty with nothing saying why."""
+    with pytest.raises(HTTPException) as raised:
+        server.typed_patch({"forecast_retention_days": value})
+    assert raised.value.status_code == 400
+
+
+def test_zero_is_keep_everything_and_has_no_upper_bound():
+    floor = -(-max(config_mod.HORIZONS_H) // 24)
+    assert server.typed_patch({"forecast_retention_days": 0}) == {
+        "forecast_retention_days": 0}
+    assert server.typed_patch({"forecast_retention_days": floor}) == {
+        "forecast_retention_days": floor}
+    patch = server.typed_patch({"forecast_retention_days": 3650.0})
+    assert patch == {"forecast_retention_days": 3650}
+    assert isinstance(patch["forecast_retention_days"], int)
+
+
 class _FakeHA:
     """Just enough Home Assistant for a save: the live entity ids, and the
     core config `refresh_environment` re-reads."""
@@ -347,6 +368,7 @@ def _accepted_save_setup(monkeypatch):
     live = make_settings()
     monkeypatch.setitem(server._state, "settings", live)
     monkeypatch.setitem(server._state, "source", object())
+    monkeypatch.setitem(server._state, "forecast_log", object())
     monkeypatch.setitem(server._state, "ha",
                         _FakeHA("person.alice", "person.bob", "zone.alice_office"))
     monkeypatch.setattr(server, "_listener", None)
@@ -397,6 +419,24 @@ def test_a_save_that_changes_nobody_neither_retracts_nor_retrains(monkeypatch):
     assert retrains == []
 
 
+def test_the_forecast_log_survives_a_save_that_changes_the_source(monkeypatch):
+    """A save is how a refused start-up gets going, and how `source` changes.
+    The log is neither: it must be opened if start-up never got that far, and
+    left alone otherwise -- closing it on a store->influx switch would drop the
+    handle the forecast table is still written through."""
+    _accepted_save_setup(monkeypatch)
+    held = server._state["forecast_log"]
+
+    server.api_save_config({"departure_threshold": 0.4})
+    assert server._state["forecast_log"] is held
+
+    opened = object()
+    monkeypatch.setattr(server.runtime, "forecast_log", lambda: opened)
+    monkeypatch.setitem(server._state, "forecast_log", None)
+    server.api_save_config({"departure_threshold": 0.5})
+    assert server._state["forecast_log"] is opened
+
+
 # ---------------------------------------------------------------------------
 # Start-up that refuses, and the health check Supervisor can act on
 # ---------------------------------------------------------------------------
@@ -412,9 +452,10 @@ def test_a_refused_bootstrap_still_hands_the_panel_something_to_edit(monkeypatch
     monkeypatch.setattr(config_mod.Settings, "load",
                         classmethod(lambda cls, path=None: (_ for _ in ()).throw(
                             ValueError("Expecting value: line 1 column 1"))))
-    settings, ha, source = server._degraded_bootstrap(RuntimeError("no people configured"))
+    settings, ha, source, log = server._degraded_bootstrap(
+        RuntimeError("no people configured"))
 
-    assert ha is None and source is None
+    assert ha is None and source is None and log is None
     assert isinstance(settings, config_mod.Settings) and settings.people == []
     assert "no people configured" in server._state["last_error"]
 
@@ -675,11 +716,6 @@ class _Recorder:
         return 0
 
 
-class _Source:
-    def __init__(self, store):
-        self.store = store
-
-
 def _result(curve, observed_at="2026-09-02T20:30:00+00:00"):
     return {"subject": "alice", "observed_at": observed_at, "curve": curve}
 
@@ -689,7 +725,7 @@ def test_a_forecast_is_recorded_on_the_slot_it_was_about(monkeypatch):
     after whenever this cycle happened to run'. The join on the read side is an
     equality, so an anchor half a slot out would line nothing up ever."""
     store = _Recorder()
-    monkeypatch.setitem(server._state, "source", _Source(store))
+    monkeypatch.setitem(server._state, "forecast_log", store)
 
     server._record_forecasts([_result({6: 0.8})])
 
@@ -703,7 +739,7 @@ def test_an_unserved_horizon_writes_no_row(monkeypatch):
     """The absence IS the record. It is what makes the gap appear on the chart,
     and it is why this must not be helpfully backfilled with a null row."""
     store = _Recorder()
-    monkeypatch.setitem(server._state, "source", _Source(store))
+    monkeypatch.setitem(server._state, "forecast_log", store)
 
     server._record_forecasts([_result({1: 0.9, 2: 0.8})])
 
@@ -713,7 +749,8 @@ def test_an_unserved_horizon_writes_no_row(monkeypatch):
 
 def test_the_retention_window_is_pruned_every_cycle(monkeypatch):
     store = _Recorder()
-    monkeypatch.setitem(server._state, "source", _Source(store))
+    monkeypatch.setitem(server._state, "forecast_log", store)
+    monkeypatch.setitem(server._state, "settings", make_settings())
 
     server._record_forecasts([_result({6: 0.8})])
 
@@ -722,22 +759,66 @@ def test_the_retention_window_is_pruned_every_cycle(monkeypatch):
     assert abs(age.days - config_mod.FORECAST_RETENTION_DAYS) <= 1
 
 
+def test_the_window_pruned_is_the_one_the_setting_names(monkeypatch):
+    """The whole point of making it settable: the number on the Setup tab has
+    to be the number the pruner uses, not a constant that happens to match."""
+    store = _Recorder()
+    settings = make_settings()
+    settings.forecast_retention_days = 7
+    monkeypatch.setitem(server._state, "forecast_log", store)
+    monkeypatch.setitem(server._state, "settings", settings)
+
+    server._record_forecasts([_result({6: 0.8})])
+
+    age = dt.datetime.now(dt.timezone.utc) - store.pruned[0]
+    assert abs(age.days - 7) <= 1
+
+
+def test_zero_days_prunes_nothing_at_all(monkeypatch):
+    """Not "delete everything older than now", which is what a cutoff computed
+    from 0 would mean and would erase the table on the first cycle."""
+    store = _Recorder()
+    settings = make_settings()
+    settings.forecast_retention_days = 0
+    monkeypatch.setitem(server._state, "forecast_log", store)
+    monkeypatch.setitem(server._state, "settings", settings)
+
+    server._record_forecasts([_result({6: 0.8})])
+
+    assert len(store.rows) == 1, "still recorded"
+    assert store.pruned == [], "and nothing was deleted"
+
+
 def test_a_store_that_cannot_be_written_does_not_fail_the_serve_cycle(monkeypatch):
     """The house getting a forecast outranks the chart getting a data point. A
     full disk or a read-only database must cost a gap on a panel card, not the
     prediction Home Assistant is waiting for."""
-    monkeypatch.setitem(server._state, "source", _Source(_Recorder(fail=True)))
+    monkeypatch.setitem(server._state, "forecast_log", _Recorder(fail=True))
 
     server._record_forecasts([_result({6: 0.8})])  # must not raise
 
 
-def test_an_influx_installation_records_nothing_and_says_nothing(monkeypatch):
-    """No store to write to, and that is not an error -- it is a configuration
-    in which this card is honestly unavailable."""
-    class Storeless:
+def test_an_influx_installation_records_what_it_published(monkeypatch):
+    """The record is the add-on's own output and has nothing to do with where
+    history is read from. Reaching it through `source.store` meant an Influx
+    install returned at the guard on every cycle and recorded nothing, for as
+    long as it was installed."""
+    class Influx:
         pass
 
-    monkeypatch.setitem(server._state, "source", Storeless())
+    store = _Recorder()
+    monkeypatch.setitem(server._state, "source", Influx())
+    monkeypatch.setitem(server._state, "forecast_log", store)
+
+    server._record_forecasts([_result({6: 0.8})])
+
+    assert len(store.rows) == 1
+
+
+def test_a_start_up_that_has_no_log_yet_records_nothing_and_says_nothing(monkeypatch):
+    """`_degraded_bootstrap` opens no files at all, so the worker can reach a
+    cycle before there is anywhere to write."""
+    monkeypatch.setitem(server._state, "forecast_log", None)
     server._record_forecasts([_result({6: 0.8})])  # must not raise
 
 
