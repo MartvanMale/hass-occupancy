@@ -33,6 +33,12 @@
   tracker that has been in the archive for weeks without reporting no longer
   makes the add-on look ready days early. The status API carries it as
   `usable_presence_days` beside the archive's own span.
+- When something fails, the Data tab and the status API no longer repeat the
+  underlying error. A message from a library can carry the file it was reading
+  or the address of your broker, and both of those are readable by any Home
+  Assistant user rather than only the ones listed in `admin_users`. The panel
+  still says that something failed and when; the error itself now goes to the
+  add-on log, where the Log tab shows it.
 
 ### Changed
 

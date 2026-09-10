@@ -34,8 +34,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from . import config, discover, evaluate, features, runtime
+from . import config, discover, evaluate, features, log, runtime
 from .sources.ha import HEARTBEAT_ENTITY
+
+_log = log.get(__name__)
 
 # How far back an entity view reaches by default, and the most it will reach.
 # The cap is not about the database -- it is about the response: 90 days of
@@ -331,7 +333,11 @@ def feature_inventory(path) -> dict:
     try:
         meta = pq.ParquetFile(path).metadata
     except Exception as err:  # noqa: BLE001
-        return unavailable(f"the feature table could not be read: {err}")
+        # pyarrow names the path and its own internals, and this endpoint needs
+        # no login -- so the panel says to look and the log says what.
+        _log.warning("the feature table could not be read: %s", err, exc_info=True)
+        return unavailable("the feature table could not be read — the add-on log "
+                           "has the error")
 
     names = list(meta.schema.names)
     rows = meta.num_rows

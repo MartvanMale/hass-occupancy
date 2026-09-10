@@ -756,6 +756,28 @@ def test_nothing_connects_to_mqtt_under_a_guessed_prefix(monkeypatch):
     assert broker.client() is None
     assert not broker.connected
     assert "not up yet" in broker.last_error
+    assert broker.last_error_public == broker.last_error, \
+        "written here, so the Setup tab keeps saying why"
+
+
+def test_a_broker_failure_is_logged_rather_than_served(monkeypatch):
+    """The reason above is this add-on's own sentence. A paho failure is not:
+    it can name the broker and its port, and `/api/status` needs no login. The
+    full text stays on `last_error` because that is the key the transition-only
+    log line compares against."""
+    from occupancy_forecast import log, predict
+
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+
+    def boom():
+        raise OSError("core-mosquitto:1883 connection refused")
+
+    monkeypatch.setattr(predict, "connect", boom)
+
+    broker = predict.Broker()
+    assert broker.client() is None
+    assert "core-mosquitto" in broker.last_error
+    assert broker.last_error_public == log.SEE_THE_LOG
 
 
 # A literal that ESCAPES the add-on must derive from the slug. A literal that

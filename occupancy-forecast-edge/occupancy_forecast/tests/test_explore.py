@@ -305,6 +305,23 @@ def test_a_missing_feature_table_says_it_has_not_been_built(tmp_path):
     assert "training run" in result["reason"]
 
 
+def test_an_unreadable_feature_table_does_not_hand_the_error_back(tmp_path, caplog):
+    """`/api/explore/features` needs no login -- `admin_only` guards the POSTs
+    and nothing else -- and pyarrow's message names the path it failed on. So
+    the panel gets a sentence and the log gets the exception."""
+    path = tmp_path / "features.parquet"
+    path.write_bytes(b"not a parquet file")
+    caplog.set_level("WARNING")
+
+    result = explore.feature_inventory(path)
+
+    assert result["available"] is False
+    assert "the add-on log" in result["reason"]
+    assert str(path) not in result["reason"]
+    assert "parquet" not in result["reason"].lower()
+    assert any(r.exc_info for r in caplog.records), "logged with its traceback"
+
+
 def test_a_feature_series_reads_three_columns_not_the_table(parquet, monkeypatch):
     """It does read data -- but only the three columns it names, which is the
     same trick `train.load` uses and which the changelog records as three

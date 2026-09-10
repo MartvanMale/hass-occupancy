@@ -118,6 +118,7 @@ class Listener:
         self.connected = False
         self.last_event: str | None = None
         self.last_error: str | None = None
+        self.last_error_public: str | None = None
         self.events = 0
         self.fired = 0
 
@@ -130,11 +131,11 @@ class Listener:
     def start(self) -> None:
         """Begin listening. Never raises: a failure here must not stop the add-on."""
         if not self.url or not self.token:
-            self.last_error = ("no Home Assistant to listen to: expected "
-                               "SUPERVISOR_TOKEN or HA_URL + HA_TOKEN")
+            self._record("no Home Assistant to listen to: expected "
+                         "SUPERVISOR_TOKEN or HA_URL + HA_TOKEN")
             return
         if not self.entity_ids:
-            self.last_error = "nothing to subscribe to"
+            self._record("nothing to subscribe to")
             return
         self._thread = threading.Thread(target=self._run, name="occupancy-listener",
                                         daemon=True)
@@ -169,6 +170,13 @@ class Listener:
         except Exception:  # noqa: BLE001
             pass
 
+    def _record(self, text: str | None, public: str | None = None) -> None:
+        """Remember a reason. `public` is what `/api/status` may show, and
+        defaults to `text` -- right for the reasons written here, not for an
+        exception's own message."""
+        self.last_error = text
+        self.last_error_public = text if public is None else public
+
     @property
     def status(self) -> dict:
         return {
@@ -177,7 +185,7 @@ class Listener:
             "events": self.events,
             "fired": self.fired,
             "last_event": self.last_event,
-            "last_error": self.last_error,
+            "last_error": self.last_error_public,
         }
 
     # -- the thread ---------------------------------------------------------
@@ -189,7 +197,10 @@ class Listener:
                 self._session()
                 backoff = BACKOFF_START      # a clean session resets the ladder
             except Exception as err:  # noqa: BLE001
-                self.last_error = f"{_now()}: {err}"
+                # Logged because the status page now carries only the stamp.
+                _log.warning("listener session ended: %s. Retrying in %ss.",
+                             err, backoff, exc_info=True)
+                self._record(f"{_now()}: {err}", f"{_now()}: {log.SEE_THE_LOG}")
             finally:
                 self.connected = False
             if self._stop.wait(backoff):
@@ -224,7 +235,7 @@ class Listener:
                       len(self.entity_ids),
                       "entity" if len(self.entity_ids) == 1 else "entities")
             self.connected = True
-            self.last_error = None
+            self._record(None)
             try:
                 while not self._stop.is_set() and self._socket is socket:
                     try:
@@ -271,7 +282,9 @@ class Listener:
             # The callback is the caller's problem, but it must not take the
             # subscription down with it -- that would trade a slow forecast
             # for no event-driven forecast at all.
-            self.last_error = f"{_now()}: on_event: {err}"
+            _log.warning("the listener's callback raised: %s", err, exc_info=True)
+            self._record(f"{_now()}: on_event: {err}",
+                         f"{_now()}: {log.SEE_THE_LOG}")
 
 
 def _now() -> str:

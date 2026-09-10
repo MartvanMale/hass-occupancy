@@ -143,7 +143,8 @@ _state: dict = {
     "models": {}, "eta_models": {}, "out_routine": {},
     "loaded_at": None, "last_collect": None, "last_predict": None,
     "last_train": None, "last_train_seconds": None, "training_started_at": None,
-    "last_error": None, "forecast": [],
+    # The full text, and what `/api/status` may show of it -- see log.SEE_THE_LOG.
+    "last_error": None, "last_error_public": None, "forecast": [],
     # Days of usable history, recounted once a worker cycle. None until the
     # first one finishes, which reads as 0.0 -- see `_history_days`.
     "usable_days": None,
@@ -439,7 +440,11 @@ def _take_train_lock() -> bool:
 
 def _record_error(err: Exception, from_cycle: bool) -> None:
     global _cycle_failed
-    _state["last_error"] = f"{dt.datetime.now(dt.timezone.utc).isoformat()}: {err}"
+    # Same ISO stamp on both: the panel splits on it to say how long ago, and a
+    # timestamp leaks nothing. Only the message is held back.
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    _state["last_error"] = f"{stamp}: {err}"
+    _state["last_error_public"] = f"{stamp}: {log.SEE_THE_LOG}"
     _cycle_failed = from_cycle
 
 
@@ -448,6 +453,7 @@ def _clear_cycle_error() -> None:
     global _cycle_failed
     if _cycle_failed:
         _state["last_error"] = None
+        _state["last_error_public"] = None
         _cycle_failed = False
 
 
@@ -950,7 +956,8 @@ def _status() -> dict:
         },
         "eta_models": {s: a.get("metrics", {}).get("ships")
                        for s, a in _state["eta_models"].items()},
-        "mqtt": {"connected": _broker.connected, "error": _broker.last_error},
+        "mqtt": {"connected": _broker.connected,
+                 "error": _broker.last_error_public},
         "listener": _listener.status if _listener else {"connected": False,
                                                         "last_error": "not started"},
         # The worker's own health, because everything else on this page can look
@@ -974,7 +981,7 @@ def _status() -> dict:
         # policy from the gap between two timestamps.
         "train_cadence": "weekly" if days >= FULL_HISTORY_DAYS else "daily",
         "training_started_at": _state["training_started_at"],
-        "last_error": _state["last_error"],
+        "last_error": _state["last_error_public"],
         "training_in_progress": _train_lock.locked(),
         "code": {"fingerprint": _CODE_FINGERPRINT, "imported_at": _IMPORTED_AT},
     }

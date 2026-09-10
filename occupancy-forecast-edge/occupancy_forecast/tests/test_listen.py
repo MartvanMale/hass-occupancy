@@ -227,6 +227,26 @@ def test_nothing_to_subscribe_to_is_not_an_error_worth_raising():
     assert listener.last_error == "nothing to subscribe to"
 
 
+def test_the_status_holds_back_a_message_this_module_did_not_write(caplog):
+    """`/api/status` needs no login, and a callback's exception can name a
+    token or a URL -- so the status page gets the stamp and the log gets the
+    rest. A reason written here is not a secret and still shows."""
+    def boom():
+        raise RuntimeError("rejected: token abc123 for /api/websocket")
+
+    listener = listen.Listener(["person.alice"], boom, url="ws://test", token="secret")
+    caplog.set_level("WARNING")
+    listener._handle(_event(_trigger("not_home", "home")))
+
+    assert "abc123" in (listener.last_error or ""), "kept for the log"
+    assert "abc123" not in listener.status["last_error"]
+    assert any(r.exc_info for r in caplog.records), "logged with its traceback"
+
+    quiet = listen.Listener([], lambda: None, url="ws://test", token="secret")
+    quiet.start()
+    assert quiet.status["last_error"] == "nothing to subscribe to"
+
+
 def test_connecting_logs_what_it_subscribed_to(monkeypatch, caplog):
     """`_session` had no test, and it is the only place `connected` is set.
 

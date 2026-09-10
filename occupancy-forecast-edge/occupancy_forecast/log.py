@@ -70,6 +70,12 @@ THIRD_PARTY = ("uvicorn", "uvicorn.access", "uvicorn.error", "paho",
 # the connection errors, which are the part with any value.
 SECRET_BEARING = ("websockets", "websockets.client", "websockets.protocol")
 
+# What an endpoint that needs no login says in place of an exception's own
+# message, which can carry a /data path, a broker address or a library's
+# internals. `/api/status` and the Data tab are readable by any Home Assistant
+# user, not only the ones listed in `admin_users`.
+SEE_THE_LOG = "the add-on log has the error"
+
 _configured = False
 _handler: logging.Handler | None = None
 

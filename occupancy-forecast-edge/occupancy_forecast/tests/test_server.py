@@ -8,6 +8,8 @@ because an HTTPException raised inside that thread reaches nobody.
 """
 
 import datetime as dt
+import json
+import re
 import threading
 import time
 
@@ -652,6 +654,27 @@ def test_a_good_cycle_clears_the_error_a_bad_cycle_left_and_only_that(monkeypatc
     server._record_error(RuntimeError("every horizon failed to train"), from_cycle=False)
     server._clear_cycle_error()
     assert "failed to train" in server._state["last_error"]
+
+
+def test_the_status_page_keeps_an_errors_stamp_and_drops_its_message(monkeypatch):
+    """`/api/status` needs no login and the panel polls it every ten seconds,
+    so an exception's own text -- which can name a /data path or a broker --
+    stays in `_state` and in the log. The ISO stamp survives because
+    `panel/src/format.ts` splits on it to say how long ago the failure was."""
+    monkeypatch.setitem(server._state, "settings", make_settings())
+    monkeypatch.setitem(server._state, "last_error", None)
+    monkeypatch.setitem(server._state, "last_error_public", None)
+    monkeypatch.setattr(server, "_cycle_failed", False)
+
+    server._record_error(OSError("no such file: /data/features.parquet"),
+                         from_cycle=True)
+
+    assert "/data/features.parquet" in server._state["last_error"], "kept for the log"
+    served = server._status()
+    assert "/data/features.parquet" not in json.dumps(served)
+    assert server.log.SEE_THE_LOG in served["last_error"]
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T[\d:.+\-Z]+: ", served["last_error"]), \
+        "the shape splitError() matches, or the Training card loses its clock"
 
 
 def test_the_status_page_shows_the_worker_ageing(monkeypatch):

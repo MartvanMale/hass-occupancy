@@ -542,6 +542,7 @@ class Broker:
     def __init__(self):
         self._client: mqtt.Client | None = None
         self.last_error: str | None = None
+        self.last_error_public: str | None = None
 
     def client(self) -> mqtt.Client | None:
         if self._client is not None:
@@ -557,7 +558,8 @@ class Broker:
             if reason != self.last_error:
                 _log.warning("MQTT withheld: %s. Nothing is published until the "
                              "add-on's own slug is known.", reason)
-            self.last_error = reason
+            # Written here rather than by a library, so the status page keeps it.
+            self.last_error = self.last_error_public = reason
             return None
         try:
             self._client = connect()
@@ -566,12 +568,15 @@ class Broker:
             # saying nothing had changed.
             if self.last_error is not None:
                 _log.info("MQTT reconnected")
-            self.last_error = None
+            self.last_error = self.last_error_public = None
         except Exception as err:  # noqa: BLE001
+            # The comparison stays on the full text: that is what makes the
+            # line above fire on a CHANGED error rather than every cycle.
             if str(err) != self.last_error:
                 _log.warning("MQTT unavailable: %s. Entities will not update "
                              "until it is back.", err)
             self.last_error = str(err)
+            self.last_error_public = log.SEE_THE_LOG
             self._client = None
         return self._client
 
