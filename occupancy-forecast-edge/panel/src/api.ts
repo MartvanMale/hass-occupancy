@@ -5,12 +5,9 @@ import type {
 } from './types'
 
 /**
- * Every path here is relative and must stay that way.
- *
- * Ingress serves the panel from `/api/hassio_ingress/<token>/`, so `api/status`
- * resolves against that prefix while `/api/status` would escape it and hit Home
- * Assistant's own API, which answers 401. The build side of the same rule is
- * `base: './'` in vite.config.ts.
+ * Every path here is relative and must stay that way: Ingress serves the panel
+ * from `/api/hassio_ingress/<token>/`, so `/api/status` escapes it and hits HA's
+ * own API. The build side of the rule is `base: './'` in vite.config.ts.
  */
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path)
@@ -26,13 +23,8 @@ export const getSettings = () => get<Settings>('api/config')
  *  Assistant entities can never disagree. */
 export const getForecast = () => get<Forecast>('api/forecast')
 
-/**
- * The Data tab.
- *
- * `URLSearchParams` rather than interpolation: an entity id is full of dots and
- * could hold a `+` or a `#`, and a hand-built query string turns the first of
- * those into a space server-side and truncates at the second.
- */
+/** The Data tab. `URLSearchParams` rather than interpolation: an entity id is
+ *  full of dots and could hold a `+` or a `#`. */
 export const getArchive = () => get<Archive>('api/explore/archive')
 
 export const getEntitySeries = (entityId: string, days: number) =>
@@ -50,9 +42,7 @@ export const getFeatureSeries = (subject: string, column: string, days: number) 
 export const getHorizon = (horizon: number) =>
   get<HorizonRecipe>(`api/explore/horizon/${horizon}`)
 
-/** Uncached server-side, deliberately: the serve cycle rewrites both the
- *  archive and the forecast record every five minutes, and a stale answer is
- *  exactly what this card exists to catch. */
+/** Uncached server-side, deliberately: a stale answer is exactly what this card exists to catch. */
 export const getVerification = (subject: string, horizon: number, days: number) =>
   get<Verification>(
     `api/explore/verification?${new URLSearchParams({
@@ -79,12 +69,8 @@ export async function saveConfig(patch: ConfigPatch): Promise<void> {
   }
 }
 
-/** The four things the Training card can set going.
- *
- *  `train` is the odd one out: it takes minutes, so it is asked to run in the
- *  background and answers 202 immediately. Progress is then read from
- *  `training_in_progress` on the status poll rather than from this promise.
- */
+/** The four things the Training card can set going. `train` takes minutes,
+ *  answers 202, and reports progress via `training_in_progress` on the status poll. */
 export type Action = 'train' | 'collect' | 'predict' | 'reload'
 
 const PATHS: Record<Action, string> = {

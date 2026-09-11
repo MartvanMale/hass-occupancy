@@ -38,42 +38,24 @@ add-on will work without, and it tells you on its own status page what turning
 each one on would buy you.
 
 The things that help most, roughly in order: a GPS tracker behind each person
-(the Companion app), the **Proximity** integration against `zone.home` — the
-largest single measured win — and any zones worth knowing about, like work or a
-second office. [The setup guide](occupancy-forecast/DOCS.md#setting-up) walks
-through each one.
+(the Companion app), the **Proximity** integration against `zone.home`, and any
+zones worth knowing about, like work or a second office. [The setup
+guide](occupancy-forecast/DOCS.md#setting-up) walks through each one.
 
 ### If you already archive to InfluxDB
 
-By default the add-on keeps its own SQLite archive under `/data`. Set
-`source: influx` instead and it trains from an existing bucket immediately —
-months of history on the first run rather than days. Three things to get right:
-
-- **It only ever reads Influx.** Getting Home Assistant's states into a bucket is
-  the InfluxDB integration's job, set up separately and first. So give the add-on
-  a **read-only token scoped to that one bucket**: the only endpoint it calls is
-  `/api/v2/query`, and a token that can do more than that is a token that can do
-  more than it needs to.
-- **InfluxDB v2**, because the source speaks Flux. A missing URL, org or token
-  refuses to start rather than quietly falling back to the local store.
-- **Check the bucket's retention.** The local store never purges; a bucket very
-  often does, and a 30-day retention silently caps training history at 30 days —
-  the opposite of the reason to switch.
-
-Install Proximity if you go this way: the synthesised distance is written to the
-local store, and an `influx` install has none, so that fallback never runs.
+Set `source: influx` and the add-on trains from that bucket on its first run,
+months of history rather than days. It needs a read-only token scoped to that
+bucket, InfluxDB v2, and a bucket retention longer than the history you want to
+train on — see [Where the history should
+live](occupancy-forecast/DOCS.md#where-the-history-should-live).
 
 ### What it does not read
 
-Presence state, which zone that state names, distance and direction of travel,
-and the calendar. **That is the whole list.**
-
-So motion sensors, door contacts, `media_player`, illuminance and standalone
-`device_tracker` entities are *not* read — no device class is consulted anywhere.
-A house wired for occupancy detection contributes nothing here beyond what its
-`person` entities already say. This forecasts presence over the next two days,
-which is a different question from whether a room is occupied right now, and the
-sensors you already have answer the second one better.
+It reads presence state, which zone that state names, distance and direction of
+travel, and the calendar; nothing else, and no device class. [What the model is
+actually fed](occupancy-forecast/DOCS.md#what-the-model-is-actually-fed) says why
+motion sensors and door contacts are not on the list.
 
 ### The first few weeks are honest, not impressive
 
@@ -87,12 +69,10 @@ start training almost immediately.
 Until it can, the forecast sensors read `unknown`: they exist, and they have
 nothing to say yet. Who is home right now publishes from the first cycle.
 
-Training starts at 10 days, and a horizon publishes **only** where the model
-measurably beat that horizon's own baseline. Early models are weak and most
-horizons will not qualify at first. Where one does not, nothing is published —
-the sensor stays `unknown` and the 48-hour chart has a gap, rather than showing
-a number nobody earned. **The baseline is the bar, never the answer.** Horizons
-can stop publishing again, too, as the baselines improve.
+Training starts at 10 days, and a horizon publishes only where the model beat
+that horizon's own baseline; until then its sensor reads `unknown` and the
+48-hour chart has a gap. Horizons can stop publishing again as the baselines
+improve.
 
 ## What it publishes
 

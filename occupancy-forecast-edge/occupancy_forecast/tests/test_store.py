@@ -1,11 +1,8 @@
 """The archive, and the record of what was forecast beside it.
 
 The `forecasts` table is a migration onto a file that already exists on every
-installation, so the first test here is the one that matters most: opening a
-store against a database that predates the table must add it rather than fail.
-CLAUDE.md's rule is "a migration, never a rewrite", and `CREATE TABLE IF NOT
-EXISTS` under the existing `executescript` is what makes that true -- but only
-if nothing else in the open path assumes a fresh file.
+installation, so opening a store against a database that predates the table
+must add it rather than fail.
 """
 
 import datetime as dt
@@ -58,9 +55,9 @@ def test_the_forecast_table_is_added_to_an_existing_archive(tmp_path, now):
 
 
 def test_the_last_forecast_for_a_slot_wins(store, now):
-    """A 30-minute slot is covered by several five-minute cycles, each with a
-    fresher feature row. The one the sensor was holding when the slot arrived is
-    the last one written, and that is what the chart must score."""
+    """A 30-minute slot is covered by several five-minute cycles; the one the
+    sensor was holding when the slot arrived is the last written, and that is
+    what the chart must score."""
     target = _ms(now)
     store.append_forecasts([("alice", target, 6, 0.10)])
     store.append_forecasts([("alice", target, 6, 0.90)])
@@ -87,9 +84,8 @@ def test_horizons_and_subjects_do_not_collide(store, now):
 
 
 def test_a_subject_with_no_forecasts_is_empty_rather_than_an_error(store, now):
-    """A fresh install, and every install for its first hours. `explore` turns
-    this into a readable "nothing has come due yet", which it can only do if the
-    store answers rather than raises."""
+    """A fresh install, and every install for its first hours: `explore` can only
+    say "nothing has come due yet" if the store answers rather than raises."""
     assert store.forecast_series("nobody", 6,
                                  (now - dt.timedelta(days=1)).isoformat()) == []
     assert store.forecast_count("nobody") == 0
@@ -97,8 +93,7 @@ def test_a_subject_with_no_forecasts_is_empty_rather_than_an_error(store, now):
 
 def test_the_window_is_honoured_at_both_ends(store, now):
     """`stop` is what keeps forecasts about the FUTURE off a chart of the past:
-    a +48 h forecast made now targets a slot two days out, and until that slot
-    arrives there is nothing to compare it to."""
+    a +48 h forecast targets a slot with nothing to compare it to yet."""
     store.append_forecasts([
         ("alice", _ms(now - dt.timedelta(days=3)), 6, 0.1),   # before start
         ("alice", _ms(now - dt.timedelta(hours=2)), 6, 0.2),  # inside
@@ -136,8 +131,8 @@ def test_pruning_forecasts_leaves_the_archive_alone(store, now):
 
 
 def test_append_reports_only_the_rows_it_actually_inserted(store, now):
-    """The collector's "added" number, without the two full COUNT(*) scans that
-    used to bracket every insert to compute it."""
+    """The collector's "added" number, without a COUNT(*) scan on either side of
+    the insert to compute it."""
     rows = [("person.alice", _ms(now), "home"), ("person.alice", _ms(now) + 1, "home")]
     assert store.append(rows) == 2
     assert store.append(rows) == 0, "duplicates are ignored, and not counted"
@@ -148,9 +143,8 @@ def test_append_reports_only_the_rows_it_actually_inserted(store, now):
 # ---------------------------------------------------------------------------
 # One connection per thread
 #
-# The collector, the training thread and every request handler on uvicorn's
-# threadpool all read this store; the collector writes it. It used to be one
-# connection shared by all of them with `check_same_thread` switched off.
+# The collector, the training thread and every uvicorn handler read this store
+# at once, so none of them may share a connection.
 # ---------------------------------------------------------------------------
 
 def test_each_thread_gets_its_own_connection_and_close_shuts_them_all(store, now):
@@ -187,10 +181,8 @@ def test_each_thread_gets_its_own_connection_and_close_shuts_them_all(store, now
 # ---------------------------------------------------------------------------
 # What the collector asks Home Assistant for
 #
-# One request per watermark bucket rather than one request from the OLDEST
-# watermark for everything, and an entity with no history at all is asked once
-# an hour for the stretch since it was last asked -- not for 400 days every
-# five minutes, forever.
+# One request per watermark bucket, and an entity with no history is asked once
+# an hour -- not for 400 days every five minutes, forever.
 # ---------------------------------------------------------------------------
 
 class _RecordingHA:
@@ -222,9 +214,8 @@ def test_the_collector_groups_entities_by_how_far_back_they_reach(store, now):
     by_entity = {tuple(ids): _iso_to_dt(start) for ids, start, _ in ha.calls}
     assert now - by_entity[("person.alice",)] < dt.timedelta(hours=3)
     assert dt.timedelta(days=9) < now - by_entity[("zone.work",)] < dt.timedelta(days=11)
-    # The bootstrap is walked backwards a chunk at a time, so the first window
-    # is the most recent one -- and this HA answers nothing, so the walk stops
-    # there rather than asking for the other thirteen.
+    # The bootstrap walks backwards a chunk at a time, and an empty answer stops
+    # the walk at the first window.
     assert now - by_entity[("sensor.never",)] < dt.timedelta(
         days=ha_mod.BOOTSTRAP_CHUNK_DAYS + 1)
 
@@ -245,13 +236,9 @@ def test_the_collector_groups_entities_by_how_far_back_they_reach(store, now):
 
 
 class _RecorderWithAFloor:
-    """A recorder holding `days` of history and nothing before it.
-
-    Answers a window inside its retention with one carried-forward entry per
-    entity even when nothing changed -- which is what `minimal_response` really
-    does, and what makes "no entries at all" mean "past the purge horizon"
-    rather than "a quiet month".
-    """
+    """A recorder holding `days` of history and nothing before it. Like
+    `minimal_response`, it carries one entry forward per entity even when
+    nothing changed, so "no entries" means "past the purge horizon"."""
 
     def __init__(self, now, days, quiet=()):
         self.now, self.days, self.quiet = now, days, set(quiet)
@@ -275,10 +262,8 @@ def _utc(when: dt.datetime) -> str:
 
 
 def test_a_deep_archive_is_imported_in_windows_down_to_the_recorder_floor(store, now):
-    """One 400-day request would be one 18 MB response on a three-year archive.
-
-    So the bootstrap walks back a chunk at a time and stops where history does.
-    """
+    """The bootstrap walks back a chunk at a time and stops where history does,
+    rather than asking for the whole archive in one request."""
     from occupancy_forecast.sources import ha as ha_mod
 
     ha = _RecorderWithAFloor(now, days=95)
@@ -293,11 +278,9 @@ def test_a_deep_archive_is_imported_in_windows_down_to_the_recorder_floor(store,
 
 
 def test_a_quiet_entity_does_not_stop_the_walk_early(store, now):
-    """A zone nobody entered for a month yields no state CHANGES in that window.
-
-    Stopping on "nothing was appended" would cut its archive off there; the
-    stop signal is an empty response, which only the purge horizon produces.
-    """
+    """A zone nobody entered for a month yields no state CHANGES in that window,
+    so the stop signal is an empty response, which only the purge horizon
+    produces -- not "nothing was appended"."""
     from occupancy_forecast.sources import ha as ha_mod
 
     ha = _RecorderWithAFloor(now, days=95, quiet=["zone.work"])

@@ -1,19 +1,8 @@
 """Talking to Home Assistant, and filling the store from it.
 
-Two things live here:
-
-  `HomeAssistant`  a thin REST client. Inside an add-on it goes through the
-                   Supervisor proxy at http://supervisor/core/api with
-                   SUPERVISOR_TOKEN, which Supervisor injects -- no token for
-                   the user to create, no host to configure. Outside one (tests,
-                   development on a laptop) it falls back to HA_URL + HA_TOKEN.
-
-  `StoreSource`    a `Source` backed by `HistoryStore`, plus the `collect()`
-                   that keeps the store fed.
-
-Deliberately stdlib-only (urllib + json). The add-on already carries pandas and
-scikit-learn; adding aiohttp to make four requests a minute would be silly, and
-stdlib means `sources` imports cleanly in a bare test environment.
+`HomeAssistant` is a thin REST client: the Supervisor proxy inside an add-on,
+HA_URL + HA_TOKEN outside one; stdlib-only, so a bare test environment imports
+it. `StoreSource` is a `Source` over `HistoryStore`, plus `collect()` to feed it.
 """
 
 from __future__ import annotations
@@ -32,68 +21,40 @@ from .store import HistoryStore, _ms
 
 SUPERVISOR_API = "http://supervisor/core/api"
 
-# The collector's own pulse, written on every successful pass.
-#
-# This exists because "nothing was recorded" and "nothing changed" are the same
-# thing in Home Assistant's history, and telling them apart is the whole job of
-# the observability mask. On Influx -- which stores every write, not just
-# changes -- a long silence really does mean the recorder stopped. Here it
-# usually means everyone was asleep: MEASURED, the person entities' gaps have a
-# p95 of 9.2 h and a max of 15.4 h with nothing wrong at all. Judging those by
-# the same 12 h threshold blanked 11% of the timeline as a fake outage.
-#
-# A heartbeat is not a heuristic: if it is there, the add-on was running and
-# Home Assistant was answering.
+# Written every successful pass: "nothing recorded" and "nothing changed" look
+# alike in HA's history, and this says the add-on ran and HA was answering.
 HEARTBEAT_ENTITY = "occupancy_ml.collector"
 
-# How far back to reach on the very first collection. Recorder will usually have
-# far less than this -- 10 days is the stock default -- but an install that has
-# been recording for months should get all of it.
+# First collection: the recorder usually holds far less, but an install that
+# has recorded for months should get all of it.
 BOOTSTRAP_DAYS = 400
 
-# ...asked for in windows this wide, newest first, rather than in one request.
-# The response is parsed whole before a row is stored, and a deep archive is
-# large: measured, six proximity entities cost 0.5 MB per 30 days, so three
-# years of them would be one ~18 MB response to hold in memory on a Pi.
+# ...asked for in windows this wide, newest first: a response is parsed whole,
+# and a deep archive in one request would be held in memory on a Pi.
 BOOTSTRAP_CHUNK_DAYS = 30
 
-# Re-fetch this much on every poll. Writes are idempotent (primary key on
-# entity_id + ts), so overlapping is free and it means a missed poll, a restart
-# or a clock skew heals itself instead of leaving a hole.
+# Re-fetched every poll: writes are idempotent, so overlap is free and a missed
+# poll or a restart heals itself instead of leaving a hole.
 OVERLAP_MINUTES = 90
 
-# Entities are fetched in GROUPS by how far back their watermark reaches,
-# bucketed to this many hours, one history request per group. It used to be
-# one request for all of them from the OLDEST watermark: a work zone nobody
-# entered during a three-week trip dragged every proximity sensor's window out
-# to three weeks, every five minutes, on the box that also runs the recorder.
-# Six hours puts everything that reported today into one request and gives a
-# quiet entity its own, short one.
+# One history request per bucket of watermark age, so a quiet entity's stale
+# watermark does not drag every other entity's window out to weeks.
 WINDOW_BUCKET_HOURS = 6
 
-# An entity with NO rows at all -- excluded from the recorder, or a sensor that
-# has never reported -- asked for BOOTSTRAP_DAYS on every cycle, forever. Now
-# it is asked once, then only for the stretch since it was last asked, and no
-# more often than this.
+# An entity with NO rows is re-asked at most this often, and only for the
+# stretch since the last ask rather than the whole bootstrap window.
 EMPTY_RETRY_SECONDS = 3600
 
-# What gets stored for an entity whose absence is itself a reading. Its own
-# word rather than `unavailable` or `unknown`, because Home Assistant uses both
-# for this and a reader should not have to handle two spellings of one fact.
+# Stored where absence is itself a reading: its own word, because HA uses both
+# `unavailable` and `unknown` for it and a reader should not handle two.
 ABSENT = "absent"
 
-# What gets stored where a reading is merely MISSING. A different fact from
-# ABSENT and so a different word: "no alarm is set" is something we know, and
-# this is something we do not. It exists as a row rather than as silence
-# because the row is what ends the preceding state -- without it the last
-# known state carries forward for as long as the tracker stays quiet.
+# Stored where a reading is merely MISSING, a different fact from ABSENT; a row
+# rather than silence, because the row is what ENDS the preceding state.
 UNKNOWN = "unknown"
 
-# Bumped when a release needs the store rewritten or refilled once. 1 re-pulls
-# presence over the bootstrap window: releases before this dropped every
-# `unknown` from a person or group, so those transitions are missing from
-# every archive already written and the recorder is the only place left that
-# still has them.
+# Bumped when the store needs one refill. 1 re-pulls the presence `unknown`s
+# older releases dropped, while the recorder still holds them.
 STORE_VERSION = 1
 
 
@@ -131,12 +92,7 @@ class HomeAssistant:
     # -- reads --------------------------------------------------------------
 
     def config(self) -> dict:
-        """`/api/config` -- the source of truth for timezone, country and units.
-
-        All three used to be module constants, and two of them crashed the
-        feature build outright when wrong (`tz_convert` on a bad zone,
-        `holidays.country_holidays` on an unsupported country).
-        """
+        """`/api/config`, the source of truth for timezone, country, units."""
         return self._get("/config")
 
     def states(self) -> list[dict]:
@@ -144,21 +100,9 @@ class HomeAssistant:
 
     def history(self, entity_ids: list[str], start: str,
                 stop: str | None = None) -> list[list[dict]]:
-        """`/api/history/period` with `minimal_response`.
+        """`/api/history/period` with `minimal_response`: state CHANGES only.
 
-        `minimal_response` collapses each series to its state CHANGES -- which
-        is exactly the step function the feature builder wants, and a fraction
-        of the payload. Only the first entry of each series carries attributes.
-
-        **`end_time` is always sent, and that is not tidiness.** Without it Home
-        Assistant returns ONE DAY from `start` and says nothing about having
-        done so -- no error, no flag, just a short series that looks complete.
-        Asking for a week and silently getting the first day of it is the kind
-        of wrong that survives review: `night.py` recovered a weekly pattern
-        from what it thought was seven days and was really sixteen hours, so six
-        weekdays had no evidence and the chart shaded one night out of two. The
-        same call bootstraps the archive on a fresh install, where the failure
-        would have been a quietly truncated backfill nobody could recover later.
+        Always sends `end_time`: without it HA silently returns only ONE DAY.
         """
         if stop is None:
             stop = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -169,10 +113,8 @@ class HomeAssistant:
     # -- writes -------------------------------------------------------------
 
     def notify(self, title: str, message: str, notification_id: str) -> None:
-        """Raise a persistent notification.
+        """Raise a persistent notification; an add-on cannot raise a repair.
 
-        An add-on cannot create a repair issue -- `issue_registry` is Core-only
-        -- so this is the closest it can reach for "you should know something".
         Re-using the same `notification_id` replaces rather than stacks.
         """
         self._post("/services/persistent_notification/create",
@@ -223,9 +165,7 @@ def _windows(begin: dt.datetime, now: dt.datetime,
              chunk_days: int = BOOTSTRAP_CHUNK_DAYS):
     """`[begin, now]` as request windows, NEWEST FIRST.
 
-    Newest first is what lets a walk stop: history runs out at the recorder's
-    purge horizon and there is only one of those, so the first empty window
-    means every window below it is empty too.
+    So a walk can stop: past the one purge horizon, every window is empty.
     """
     span = dt.timedelta(days=chunk_days)
     until = now
@@ -262,30 +202,9 @@ class StoreSource:
                 gap_is_a_boundary: Iterable[str] = ()) -> dict:
         """Pull everything new for `entity_ids` from HA into the store.
 
-        The window starts at the oldest per-entity watermark minus an overlap,
-        so an entity added to the config later gets backfilled with whatever
-        recorder still holds rather than starting from now. A window wider than
-        `BOOTSTRAP_CHUNK_DAYS` is walked backwards in chunks and stops at the
-        first empty one, which is the recorder's purge horizon.
-
-        Two kinds of entity keep what would otherwise be dropped, for two
-        different reasons.
-
-        `absence_is_a_reading` names the entities for which `unavailable` and
-        `unknown` are DATA. There is exactly one shape of sensor like that: a
-        next-alarm sensor reads `unavailable` precisely when no alarm is set,
-        which is the more common state and at least as informative as a time.
-        Dropping it would leave an archive that says nothing at all on the days
-        somebody had no alarm -- indistinguishable from the days the sensor was
-        broken, and unrecoverable later, because Home Assistant's recorder will
-        long since have discarded the difference.
-
-        `gap_is_a_boundary` names the presence entities, where the same words
-        mean the opposite: not a reading, but the END of one. Dropped, they
-        left the previous state to be carried forward indefinitely, and a phone
-        that stopped reporting read as everybody-out for as long as it stayed
-        quiet -- straight into the training labels. Stored as UNKNOWN, the
-        interval is uncovered instead, which is what it is.
+        `absence_is_a_reading` (next-alarm) stores `unavailable`/`unknown` as
+        ABSENT, a reading; `gap_is_a_boundary` (presence) stores them as
+        UNKNOWN, which ends the state, or a silent phone reads as everybody-out.
         """
         if not entity_ids:
             return {"added": 0, "entities": 0}
@@ -320,13 +239,8 @@ class StoreSource:
                 bootstrap.add(entity_id)
             self._asked_empty[entity_id] = (mono, now)
 
-        # Bucket by HOW FAR BACK a window reaches, not by where its start lands
-        # on the clock. Flooring the absolute hour splits two entities either
-        # side of a boundary -- one seen five minutes ago and one seen two hours
-        # ago land in different six-hour blocks whenever the older one happens
-        # to cross it -- so the grouping would depend on the time of day the
-        # cycle ran, and "everything that reported today" would be one request
-        # only sometimes.
+        # Bucket by HOW FAR BACK a window reaches, not where its start lands on
+        # the clock, or the grouping depends on the time of day the cycle ran.
         groups: dict[int, list[str]] = {}
         for entity_id, begin in begins.items():
             key = int((now - begin).total_seconds()) // (WINDOW_BUCKET_HOURS * 3600)
@@ -338,9 +252,8 @@ class StoreSource:
         earliest = now
         for _key, ids in sorted(groups.items(), reverse=True):   # oldest window first
             begin = min(begins[e] for e in ids)
-            # Only the bootstrap is chunked. A watermark can be months old on an
-            # entity that rarely changes -- a zone nobody visits -- and chunking
-            # that would turn one request every five minutes into nine, forever.
+            # Only the bootstrap is chunked: a months-old watermark on a quiet
+            # entity would otherwise be nine requests every cycle, forever.
             spans = (_windows(begin, now) if any(e in bootstrap for e in ids)
                      else [(begin, now)])
             for start, until in spans:
@@ -364,11 +277,8 @@ class StoreSource:
                 "since": earliest.isoformat(), "requests": requests}
 
     def liveness_times(self, start: str, stop: str | None = None) -> list[str]:
-        """When we know history was being captured.
+        """When we know history was being captured: the collector's heartbeats.
 
-        Heartbeats cover everything since the add-on was installed. The window
-        before that was backfilled from the recorder and has none, so the
-        tracked entities' own changes stand in for it -- which is the best that
-        can be said about a period nobody was watching.
+        The backfilled prefix has none; `features._liveness` fills it in.
         """
         return [when for when, _ in self.store.states(HEARTBEAT_ENTITY, start, stop)]

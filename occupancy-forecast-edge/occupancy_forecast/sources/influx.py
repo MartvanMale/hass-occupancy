@@ -1,29 +1,8 @@
-"""InfluxDB v2 as a history source. Optional, and only worth it if you already have one.
+"""InfluxDB v2 as a history source, read-only; worth it only if you have one.
 
-The default source is the local store; this exists for installs that have been
-archiving Home Assistant to Influx for months and would otherwise throw that
-history away and start over from the ten days it takes to train at all.
-
-**The awkward part is that Home Assistant writes three different shapes**, and
-which one an entity lands in depends on its domain and whether it has a unit:
-
-  person.alice                         measurement `person.alice`, field `state`  (string)
-  zone.alice_office                    measurement `zone.alice_office`, field `value` (number)
-  sensor.home_alice_distance           measurement `m` -- THE UNIT -- with the
-                                       object_id in an `entity_id` tag, field `value`
-  sensor.home_..._direction_of_travel  measurement `sensor.home_...`, field `state`
-
-The first, second and fourth are addressable from the entity id alone. The third
-is not: you have to know the unit. So the caller passes `units`, resolved from
-Home Assistant's own current state.
-
-That indirection also fixes a real bug in an earlier version: the unit was hardcoded
-to `"m"`, so on an imperial install (where HA writes `"mi"`) the distance
-columns silently went all-NaN and the highest-value feature group vanished
-without a word.
-
-Read-only. `homeassistant` is Home Assistant's source of truth and nothing here
-writes to it.
+HA names a measurement after the entity id, except a sensor with a unit, which
+lands under its UNIT with the object_id in an `entity_id` tag. So the caller
+passes `units` from HA's state; hardcoding "m" blanked imperial distances.
 """
 
 from __future__ import annotations
@@ -66,12 +45,7 @@ class InfluxSource:
     def first_seen(self, entity_ids: list[str]) -> str | None:
         """Earliest timestamp across these entities, or None if there is nothing.
 
-        Without this the feature builder has no idea how far back an Influx goes
-        and has to guess. Guessing high is expensive, not merely wasteful: the
-        table is one row per subject per 30-minute slot across ~700 columns, so
-        a two-year guess against six months of data is a ~600 MB frame of mostly
-        NaN, which on a small box is the difference between training and being
-        killed by the OOM reaper.
+        Guessing too far back builds a mostly-NaN frame, which OOMs a small box.
         """
         selectors = " or ".join(
             f'r._measurement == "{e}"' for e in entity_ids if e)
@@ -119,12 +93,12 @@ from(bucket: "{self.bucket}")
                 stop: str | None = None) -> list[tuple[str, float]]:
         unit = self.units.get(entity_id)
         if unit:
-            # Shape 3: measurement named after the unit, object_id in a tag.
+            # Measurement named after the unit, object_id in a tag.
             object_id = entity_id.split(".", 1)[-1]
             selector = (f'r._measurement == "{unit}" and r.entity_id == "{object_id}" '
                         f'and r._field == "value"')
         else:
-            # Shapes 1/2: the entity gets its own measurement.
+            # No unit: the entity gets its own measurement.
             selector = f'r._measurement == "{entity_id}" and r._field == "value"'
 
         flux = f'''

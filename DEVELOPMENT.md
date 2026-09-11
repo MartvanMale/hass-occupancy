@@ -12,36 +12,24 @@ Every identity string derives from the add-on's slug, via
 _, _, name = slug.partition("_")     # first underscore only
 ```
 
-**That is the fact to hold on to, because it cuts both ways.** It is what keeps
-edge and stable apart — `..._occupancy_forecast` and
-`..._occupancy_forecast_edge` resolve to different topic roots, so the two never
-touch. It is *also* why the repository prefix is invisible, and Supervisor has
-two of those:
+That keeps edge and stable apart, and it also makes the repository prefix
+invisible, of which Supervisor has two:
 
 | how it was installed | example slug | resolves to |
 |---|---|---|
 | from this repository's URL | `28b1f84a_occupancy_forecast` | `occupancy_forecast` |
 | copied into `/addons/` | `local_occupancy_forecast` | `occupancy_forecast` |
 
-So each of the two add-ons can be installed **either way** — four installs are
-possible on one box — and they form **two colliding pairs**. The store copy and
-the local copy of the *same* add-on share a topic root and an MQTT client id.
-Nothing separates them, and the failure is silent: the broker hands a duplicated
-id to whoever connected last and disconnects the other, forever, with nothing in
-any log. No error path catches it, because both instances read their slug from
-Supervisor perfectly well and simply agree on the answer.
-
-**Run one of each pair.** On the maintainer's box that is edge local and stable
-from the store, which is why the two have different deploy triggers:
+So the store copy and the local copy of the *same* add-on share a topic root and
+an MQTT client id, and the broker silently keeps whichever connected last.
+**Never install both copies of one add-on.** On the maintainer's box edge is
+local and stable comes from the store, which is why the two have different
+deploy triggers and why there is no deploy script for stable:
 
 | add-on | slug there | how it updates |
 |---|---|---|
 | edge | `local_occupancy_forecast_edge` | `scripts/deploy-edge.sh` — rsync + rebuild. No commit, no push, no version bump: a local add-on rebuilds from its directory. |
 | stable | `28b1f84a_occupancy_forecast` | bump `occupancy-forecast/config.yaml`'s `version:`, commit, **push**. Supervisor then offers the update, exactly as it does for anyone else who added this repository. |
-
-That pairing is a choice, not a law — but whichever way round you run it, adding
-the second copy of an add-on you already have installed is the mistake to avoid,
-and it is why there is no deploy script for stable.
 
 One name deliberately did **not** follow the rename: the `/data` row keys
 `occupancy_ml.collector` and `occupancy_ml.{slug}_distance`. They are data, not
@@ -59,34 +47,22 @@ history. They now match nothing else in the tree, which is exactly why
   entry can be fixed whenever it is spotted.
 
 `occupancy-forecast/occupancy_forecast/*.py` is produced by `scripts/promote.sh`.
-An edit made there survives only until the next promotion, which then destroys it
-silently.
-
-**Nothing enforces this.** There was a `.githooks/pre-commit` that refused commits
-touching `occupancy-forecast/` without `PROMOTE=1`; it was removed deliberately,
-because it assumed the edge work and the promotion were two separate commits and
-they are not (see the routine below). So the rule is prose, and prose is all there
-is: an edit made directly in the stable tree will be committed without complaint
-and destroyed by the next promotion.
+Nothing enforces this: an edit made in the stable tree commits without complaint
+and the next promotion destroys it silently.
 
 ## The panel
 
 The Ingress panel is a React + TypeScript app in `occupancy-forecast-edge/panel/`.
-`occupancy_forecast/web/` no longer renders it; it only serves the build and
-substitutes the add-on's name into the title.
+`occupancy_forecast/web/` only serves the build and substitutes the add-on's name
+into the title.
 
 **It is never built on the Home Assistant box.** `scripts/build-panel.sh` runs
-Vite in a container here, so `panel/dist/` travels with the Python and the
-Dockerfile only `COPY`s it. Every other add-on on that box reports `build=False`
-— a prebuilt image somebody else compiled — and adding a node stage to the
-Dockerfile would make this the only thing on the machine compiling a frontend
-locally.
+Vite in a container here and the Dockerfile only `COPY`s `panel/dist/`.
 
-**`dist/` is committed. Only `node_modules/` is gitignored.** This repository is
-a valid add-on repository, and an add-on installed from a repository URL is a git
-clone and nothing more — so an ignored bundle is an add-on that cannot be
-installed from the store at all, failing at the `COPY` with a Docker checksum
-error that names neither the panel nor the cause. That is what it did.
+**`dist/` is committed. Only `node_modules/` is gitignored.** An add-on installed
+from a repository URL is a git clone and nothing more, so an ignored bundle fails
+the `COPY` with a Docker checksum error that names neither the panel nor the
+cause.
 
 A committed artifact can be stale, and a stale panel is silent: it installs
 cleanly and serves old code. So `build-panel.sh` writes `panel/dist/.source-hash`
@@ -96,11 +72,8 @@ runs that check, so a green suite means the committed bundle matches its source
 — and a suite that fails there is telling you to run
 `scripts/build-panel.sh occupancy-forecast-edge` and test again. `promote.sh`
 rebuilds both bundles itself — edge's before the rsync, stable's after — so the
-pair is fresh by construction at promotion.
-
-`promote.sh` copies the panel's source and not edge's build output — it runs
-`build-panel.sh occupancy-forecast` afterwards instead, so stable's bundle is
-compiled from stable's own tree *and* lands in the promotion commit.
+pair is fresh by construction at promotion, and stable's bundle is compiled from
+stable's own tree.
 
 The UI has no runtime tests. `tsc --noEmit` runs in `scripts/test.sh`, and
 `panel/src/types.ts` plus `occupancy_forecast/tests/test_api_contract.py` are two
@@ -111,9 +84,7 @@ has to change in both.**
 
 1. Edit under `occupancy-forecast-edge/`.
 2. If the edit touched `panel/`, `scripts/build-panel.sh occupancy-forecast-edge`
-   first: the bundle is committed alongside its source. Then `scripts/test.sh`
-   — must pass. It checks the bundle against the source, so a stale bundle
-   fails the suite rather than shipping silently.
+   first. Then `scripts/test.sh` — must pass.
 3. Add a line to `occupancy-forecast-edge/CHANGELOG.md` under `## Unreleased`,
    filed under `### Added`, `### Changed`, `### Fixed` or `### Removed` — the
    same headings the stable changelog uses. That section is the queue; at
@@ -131,27 +102,19 @@ has to change in both.**
    mechanism, the measurement and the alternative you rejected are worth
    recording, but they go in the **commit message**, where the reader is
    somebody reading the diff.
-4. `scripts/deploy-edge.sh` — rsyncs to the HA box and rebuilds the add-on.
-   **Deploying edge needs no version bump and no push**: edge is a *local* add-on,
-   so `ha addons rebuild` is the trigger. The script stamps the deployed copy with
-   the commit sha so the add-on page says which build is running. (Stable is not
-   local and does not work this way — see the top of this file.)
+4. `scripts/deploy-edge.sh` — rsyncs to the HA box and rebuilds the add-on,
+   stamping the deployed copy with the commit sha so the add-on page says which
+   build is running.
 
 ## Pushing edge work, and promoting to stable
 
 These are two different things, and the difference is what lets a change soak.
 
 **Pushing edge work does not deploy stable.** Stable's only trigger is a changed
-`version:` in `occupancy-forecast/config.yaml`. So edge work can be committed and
-pushed on its own — as often as you like, and however many commits it takes — and
-store users see nothing, as long as the push leaves the generated
-`occupancy-forecast/` tree and its version alone. That is the normal way to let a
-change run on edge for a while before deciding it has earned stable.
-
-Two things to get right on such a push: if the work touched `panel/`, run
-`scripts/build-panel.sh occupancy-forecast-edge` first (`scripts/test.sh` will
-refuse a stale bundle, so a green run is the proof); and keep adding to the
-`## Unreleased` block in `occupancy-forecast-edge/CHANGELOG.md`, which accumulates
+`version:` in `occupancy-forecast/config.yaml`, so edge work can be committed and
+pushed as often as you like and store users see nothing, as long as the push
+leaves the generated `occupancy-forecast/` tree and its version alone. The
+`## Unreleased` block in `occupancy-forecast-edge/CHANGELOG.md` accumulates
 across as many pushes as the soak takes and crosses over in one piece at
 promotion.
 
@@ -170,7 +133,7 @@ the version heading, open a fresh empty `## Unreleased` above it, and copy the
 retitled block into stable. Edge keeps its own copy, so its changelog is the
 whole record of what edge has run rather than only what is still queued. The two
 files must be identical from the first version heading down, and `promote.sh`
-prints the `diff` that checks it.
+prints the `diff` command that checks it.
 
 Keep the generated tree, the version bump and the changelog together in the one
 commit. Split across commits they describe a stable add-on that never existed at
@@ -187,29 +150,23 @@ and `-a` will not pick those up.
 ## Tests and scripts
 
 `scripts/test.sh` runs `tsc --noEmit`, then `check-panel.sh`, then pytest with
-the pinned dependencies the add-on ships. 540 tests in about four minutes: no
-network, no Home Assistant, no broker. Dev-only pins go in `requirements-dev.txt`
-— the shipped image deliberately carries no test framework.
+the pinned dependencies the add-on ships. It takes a few minutes: no network, no
+Home Assistant, no broker. Dev-only pins go in `requirements-dev.txt` — the
+shipped image deliberately carries no test framework.
 
-pytest runs in a locally built `occupancy-forecast-test:<hash>`, tagged with a
-hash of both requirements files. Moving a pin builds a new tag on the next run
-and cannot be served the old one; the old tag is inert and can be deleted at
-leisure.
+pytest runs in `occupancy-forecast-test:<hash>`, tagged from both requirements
+files, so a moved pin cannot be served a stale image.
 
 **Every script here that runs a container sources `scripts/container-guard.sh`,
-and it is not optional.** A container's life belongs to the Docker daemon rather
-than to the client that asked for it, so a script killed mid-run leaves one
-behind — three of them once deadlocked the machine, each pegging the box against
-a suite that takes minutes. The guard gives every container a name, a
-`hass-occupancy.script` label and a `timeout` of its own, traps the signals it
-can, sweeps corpses at the next start, and takes a lock so two runs cannot
-overlap (the second refuses, it does not queue). The in-container `timeout` is
-the load-bearing one: it is the only mechanism that survives a `kill -9` of the
+and it is not optional.** A script killed mid-run leaves its container behind,
+and three orphaned containers once deadlocked this box. The guard names, labels
+and locks every container (a second run refuses, it does not queue) and gives it
+an in-container `timeout`, the only mechanism that survives a `kill -9` of the
 shell. `TEST_TIMEOUT` (seconds, default 900) sets it for the suite.
 
 `docker ps --filter label=hass-occupancy.script` shows what a run has open.
 
-**`scripts/check-pins.sh` — run it whenever a numerical pin moves.** ~75s. It
+**`scripts/check-pins.sh` — run it whenever a numerical pin moves.** It
 installs and runs the wheels on amd64, and disassembles the aarch64 ones, since
 nothing here is an ARM machine: it fails when an object gains ARMv8.1 LSE
 atomics outside libgcc's dispatch, the pyarrow 21.0.0 bug that aborted on a
@@ -232,8 +189,7 @@ those cores have LSE.
 
 `test.sh`, `build-panel.sh`, `check-panel.sh`, `check-pins.sh`,
 `build-image.sh`, `smoke-image.sh` and `promote.sh` work on any Linux with
-Docker — the guard uses `flock` and `nproc`, so macOS would need two shims
-nobody here has written. `deploy-edge.sh` and
+Docker. `deploy-edge.sh` and
 `backfill-store-from-influx.sh` are **author-local**: they rsync to `HOST=ha`, an
 ssh alias for one particular box, so they do nothing useful in a fresh clone.
 
@@ -253,8 +209,7 @@ The local demo instance, and the only supported way to screenshot the panel:
 
 ## Comments
 
-Comments say **why**, and the code says what. This file is already wordy enough;
-the code should not be.
+Comments say **why**, and the code says what.
 
 The budget, and it is a real budget:
 
@@ -299,5 +254,4 @@ This applies to prose in docs too, agents included. Prefer cutting to adding.
 - Never let the add-on write to Home Assistant beyond a persistent notification.
   This is advisory only. Acting on the forecast — taking a house out of heating
   setback, say — belongs in the user's own automations, where they can see it and
-  switch it off. That boundary is the whole blast radius and should stay where it
-  is.
+  switch it off.

@@ -1,31 +1,8 @@
 """What this installation looks like, and the constants that do not vary.
 
-Split into two halves on purpose.
-
-**The modelling constants are universal.** Grid size, horizons, the coverage
-floor, the fold geometry -- these were measured, they are not preferences, and
-they are the same on every install. They stay module constants.
-
-**The identity is per-installation and discovered, never hardcoded.** Which
-people, which zones, which proximity sensors, the timezone, the country, the
-distance unit. In the original this was a block of literals naming two specific
-people and six specific entity ids, which is precisely what made the thing
-unportable.
-
-**A decision cut is per-installation and declared, not discovered.** The
-forecast is a probability; turning it into "they leave in 6 h" needs a line, and
-where that line goes depends on what the answer is wired to rather than on
-anything in the history. Pre-heating an hour early is cheap; dropping the house
-out of comfort on a false departure is not, and no amount of history can measure
-that asymmetry. Those live in `Settings` beside the identity, and for the same
-reason: nothing here can measure them. They change no model, no feature and no
-forecast -- only how the finished curve is read. See `predict._crossing`.
-
-Identity is loaded once at startup by `configure()` and read from module globals
-afterwards, because every other module was written against `config.X` and
-threading a settings object through all of them would be a large, risky diff for
-no behavioural gain. `configure()` raising when it has not been called is the
-guard against action-at-a-distance.
+Modelling constants are universal; identity is per-install and discovered; the
+crossing cuts are per-install and DECLARED, as no history can measure what a
+wrong one costs. `configure()` loads them once and `require()` raises if not.
 """
 
 from __future__ import annotations
@@ -46,55 +23,31 @@ from pathlib import Path
 # Universal: measured, not configured
 # ---------------------------------------------------------------------------
 
-# 30-minute slots. The presence sources update far more often (a person entity
-# writes every few minutes while moving), so the resample exists to put people
-# on a common grid and average away GPS jitter, not to invent resolution.
+# The resample puts people on a common grid and averages away GPS jitter; it
+# does not invent resolution.
 GRID_MINUTES = 30
 SLOTS_PER_DAY = 24 * 60 // GRID_MINUTES  # 48
 
-# A slot needs this much of its duration observed, or it is NaN rather than a
-# guess. Costs ~1% of slots.
+# A slot needs this much of its duration observed, or it is NaN, not a guess.
 MIN_SLOT_COVERAGE = 0.5
 
-# Longest tracker silence that still counts as observation.
-#
-# MEASURED on a two-person household: the gap distribution is bimodal -- a ~5-6 h
-# gap every night as phones doze (worst observed 10.3 h), and rare multi-day
-# holes when recording actually stopped (one was 653 h). 12 h sits an order of
-# magnitude below the outage and comfortably above the doze.
-#
-# Blanking the nightly doze would delete a quarter of the history including
-# every night, which is when occupancy is most predictable. Not blanking a real
-# outage invented three straight weeks of "home" in an early build.
+# Longest silence still counted as observed: above the ~5-6 h nightly phone doze
+# (blanking it deletes every night), far below a real multi-day outage.
 MAX_SILENCE_H = 12
 
-# Hourly out to two days. Two families are fitted over this range -- one model
-# per horizon, and one pooled model with `horizon_h` as a feature -- and the
-# gate picks per horizon. See train.py.
+# Two families are fitted over this range and the gate picks per horizon.
 HORIZONS_H = tuple(range(1, 49))
 
-# The subset that gets its own Home Assistant entity. The full curve rides as a
-# JSON attribute, so this is about not creating 48 near-identical sensors per
-# subject, not about what the model produces.
+# The subset with its own entity; the full curve rides as a JSON attribute, so
+# a subject does not get 48 near-identical sensors.
 SENSOR_HORIZONS_H = (1, 2, 3, 6, 12, 24, 36, 48)
 
-# Default for `Settings.forecast_retention_days` -- how long the record of what
-# was forecast is kept, for the verification chart. Settable on the Setup tab.
-#
-# All 48 horizons are stored, not just SENSOR_HORIZONS_H: the point of that card
-# is a slider across the whole range, and the difference is a few megabytes.
-# 48 horizons x 48 slots x ~3 subjects is ~6.9k rows a day, so 30 days caps the
-# table around 200k rows -- the same order as the archive it sits beside, which
-# is ~2.3 MB a year and never pruned. Unlike the archive this is not training
-# data: nothing refits from it, and a chart of the recent past is its only
-# reader, so keeping it forever would be paying storage for nobody.
+# Default for `Settings.forecast_retention_days`. Not training data, so keeping
+# it forever would be storage for nobody.
 FORECAST_RETENTION_DAYS = 30
 
-# Distance is carried forward with no time cap -- see sources/store.py and the
-# note in features.numeric_on_grid. Proximity only fires when the distance
-# CHANGES, so its silence means "has not moved": measured p50 gap 0.5-3 min while
-# moving against a p90 of 322-1341 min while parked at home. A one-hour cap
-# blanked 67-78% of the column, almost all of it people sitting at home.
+# No time cap: Proximity fires only when the distance CHANGES, so its silence
+# means "has not moved", and a cap mostly blanks people sitting at home.
 DISTANCE_STALE_MIN = None
 
 HOUSE_SLUG = "house"
@@ -102,10 +55,8 @@ HOUSE_SLUG = "house"
 # The state Home Assistant uses for "in the home zone". Universal.
 HOME_STATE = "home"
 
-# The words Home Assistant writes when it has no reading. Universal, and one
-# definition on purpose: the collector, the trigger filter and the slot
-# integrator all have to agree on what "we do not know" looks like, and three
-# spellings of it is how an unknown tracker came to read as away.
+# One definition on purpose: the collector, the trigger filter and the slot
+# integrator have to agree on what "no reading" looks like.
 EMPTY_STATES = frozenset({"unknown", "unavailable", "", "none"})
 
 
@@ -131,12 +82,8 @@ def slugify(entity_id: str) -> str:
 
 @dataclass
 class Subject:
-    """One thing whose occupancy is forecast.
-
-    `slug` is load-bearing in five places -- the subject key, the one-hot ML
-    category, the `other_*` column names, the MQTT topic segment and the ETA
-    model filename -- so it is derived once, de-duplicated, and never allowed to
-    collide with HOUSE_SLUG.
+    """One thing whose occupancy is forecast. `slug` is load-bearing in five
+    places, so it is derived once, de-duplicated, and never equals HOUSE_SLUG.
     """
     slug: str
     entity_id: str          # person.* or the house group
@@ -148,36 +95,17 @@ class Subject:
 
 @dataclass(frozen=True)
 class Zone:
-    """One place the user ticked, and nothing more.
-
-    Deliberately roleless. The previous design hung a single "office zone" off
-    each person, which could not express a second workplace nor a place nobody
-    works -- a supermarket. A zone is now just a place; which of them mean
-    "work" for which person is the model's problem, learned from the columns
-    rather than declared here.
-
-    `name` is the zone's friendly name, snapshotted from the live entity by
-    `runtime.refresh_environment`. It is here because Home Assistant writes a
-    zone's NAME into a person's state, so the name is the only per-person zone
-    signal that exists in history -- see `features._resolve_zone_events`, which
-    is the one place it is read. Snapshotted rather than hardcoded so a rename
-    is picked up on the next boot.
+    """One place the user ticked, deliberately roleless: which mean "work" is
+    the model's problem. `name` is snapshotted because HA writes a zone's NAME
+    into a person's state; see `features._resolve_zone_events`.
     """
     slug: str          # slugify(entity_id): zone.alice_office -> alice_office
     entity_id: str
     name: str
 
 
-# Defaults for the crossing cuts, quoted by the API's error messages and by the
-# panel's copy so that three places cannot drift.
-#
-# `crossing_min_hours` is 2 rather than 1 because 1 is the old bug written down:
-# the forecast grid is hourly and its target is the fraction of a 30-minute slot
-# spent home, so an absence shorter than about an hour cannot be represented at
-# all -- a walk round the block reads as `home_frac` near 0.5 in two adjacent
-# slots and never becomes a departure. A single hour past the line is therefore
-# noise by construction, not a short trip, and there is no real signal for this
-# to suppress. `eta.MIN_JOURNEY_KM` draws the same line in distance.
+# `crossing_min_hours` is 2, not 1: a 30-minute-slot target cannot represent an
+# absence under about an hour, so one hour past the line is noise.
 DEFAULT_DEPARTURE_THRESHOLD = 0.5
 DEFAULT_ARRIVAL_THRESHOLD = 0.5
 DEFAULT_CROSSING_MIN_HOURS = 2
@@ -185,40 +113,19 @@ DEFAULT_CROSSING_MIN_HOURS = 2
 
 @dataclass
 class Settings:
-    """Everything that differs between installations. Persisted to /data/config.json.
-
-    `country` and `holiday_country` look redundant and are not. `country` is
-    Home Assistant's, re-read on every boot, and says where the house *is*.
-    `holiday_country` is the user's, and says which calendar the household
-    actually *keeps* -- an Indian family living in NL may well be at home on
-    Diwali and at work on Koningsdag. Three states, and the difference between
-    the last two is what lets the user's pick survive a restart:
-
-        None  never chosen. Fall back to `country`, which is exactly how this
-              behaved before the setting existed, so every config.json written
-              by an older build keeps working without a migration.
-        ""    chosen, and the choice is "no holidays at all".
-        "IN"  chosen.
-
-    The three crossing cuts are a pair of thresholds and a dwell, and they are
-    settings rather than constants because the cost of a wrong answer is not
-    symmetric and is not knowable from here -- see the module docstring. They
-    reduce the 48 h curve to the two "hours until" sensors and touch nothing
-    else: the curve is identical whatever they are set to. Read them together as
-    a hysteresis band, `departure_threshold <= arrival_threshold`, so that a
-    forecast between the two counts as neither leaving nor arriving.
+    """Everything that differs between installations, persisted to config.json.
+    `holiday_country` None falls back to HA's `country`, "" means no holidays;
+    the crossing cuts are a band, `departure_threshold <= arrival_threshold`.
     """
     people: list[str] = field(default_factory=list)      # person.* entity ids
     zones: list[str] = field(default_factory=list)       # zone.* entity ids, enabled
-    # zone entity -> friendly name, refreshed from the live entities on every
-    # boot by runtime.refresh_environment. The feature build never talks to Home
-    # Assistant, so it cannot look these up for itself.
+    # zone entity -> friendly name, refreshed every boot: the feature build
+    # never talks to Home Assistant, so it cannot look these up itself.
     zone_names: dict[str, str] = field(default_factory=dict)
     house_entity: str | None = None                      # group.* or None -> OR over people
     proximity: dict[str, list[str]] = field(default_factory=dict)  # person -> [distance, direction]
-    # person -> sensor.*_next_alarm. None/{} carry the same distinction as
-    # `holiday_country`: None is "never looked", {} is "looked, and there are
-    # none" or "the user cleared them". Only None is re-discovered.
+    # person -> sensor.*_next_alarm. None is "never looked", {} is "looked and
+    # there are none"; only None is re-discovered.
     next_alarm: dict[str, str] | None = None
     timezone: str = "UTC"
     country: str | None = None                           # Home Assistant's. Never the user's.
@@ -227,18 +134,13 @@ class Settings:
     home_latitude: float | None = None
     home_longitude: float | None = None
     source: str = "store"                                # "store" | "influx"
-    # How the curve is reduced to "hours until away/home". See the docstring.
-    # Optional, and decoration only: a `schedule.*` entity the household already
-    # keeps for its waking hours, used to shade the night on the forecast chart.
-    # It touches no feature, no model and no published entity -- unset, the
-    # chart simply has no grey bands.
+    # A `schedule.*` entity shading the night on the chart; decoration only.
     day_schedule: str | None = None
+    # How the curve is reduced to "hours until away/home". See the docstring.
     departure_threshold: float = DEFAULT_DEPARTURE_THRESHOLD
     arrival_threshold: float = DEFAULT_ARRIVAL_THRESHOLD
     crossing_min_hours: int = DEFAULT_CROSSING_MIN_HOURS
-    # Whole days, and 0 means never prune. Storage, not behaviour: nothing
-    # refits from this table and no published entity reads it. Lowering it
-    # deletes on the next cycle, unrecoverably.
+    # Days; 0 never prunes, and lowering it deletes on the next cycle, for good.
     forecast_retention_days: int = FORECAST_RETENTION_DAYS
 
     def to_json(self) -> str:
@@ -251,13 +153,9 @@ class Settings:
 
     @staticmethod
     def _migrate(raw: dict) -> dict:
-        """Bring an older config.json forward. Runs BEFORE the field filter.
-
-        `office_zones` was `{person entity: zone entity}` -- one workplace each,
-        with the role baked in. Its values are exactly the zones that household
-        cared about, so they become the enabled list and nobody has to re-pick
-        them. The key is dropped rather than kept: two spellings of the same
-        setting is how they drift apart.
+        """Bring an older config.json forward; runs BEFORE the field filter.
+        `office_zones`'s values become the enabled zones and the key is dropped,
+        because two spellings of one setting drift apart.
         """
         if "office_zones" in raw:
             legacy = raw.pop("office_zones") or {}
@@ -268,10 +166,7 @@ class Settings:
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
-        # Flushed to disk BEFORE the rename. A rename is atomic; the bytes
-        # behind it are not, and a power cut between the two leaves an empty
-        # config.json that `load` then refuses -- an add-on that will not
-        # start over a setting it saved fine.
+        # Flushed BEFORE the rename: the rename is atomic, the bytes are not.
         with tmp.open("w") as fh:
             fh.write(self.to_json())
             fh.flush()
@@ -294,21 +189,15 @@ TIMEZONE: str = "UTC"
 
 
 def tzinfo() -> "zoneinfo.ZoneInfo":
-    """`TIMEZONE` as a real tzinfo, for the code that is not pandas.
-
-    Most of this package converts through pandas, which takes the string
-    directly. `night.py` walks a 48-hour grid with stdlib datetimes and needs
-    the object; falls back to UTC rather than raising, for the same reason
-    `features` does -- a bad timezone from Home Assistant is a reason to be
-    wrong by an hour, not a reason to refuse to start.
+    """`TIMEZONE` as a real tzinfo, for the code that is not pandas. Falls back
+    to UTC: a bad timezone should cost an hour of accuracy, not the start-up.
     """
     global _tz_warned
     try:
         return zoneinfo.ZoneInfo(TIMEZONE)
     except Exception as err:  # noqa: BLE001
-        # Said once. Silent, this was an hour-shifted set of labels in one half
-        # of the stack while the other half (`features._localise`) raised on
-        # the same zone, and nothing connected the two.
+        # Said once: silent, this shifted labels by an hour in one half of the
+        # stack while `features._localise` raised on the same zone.
         if _tz_warned != TIMEZONE:
             _tz_warned = TIMEZONE
             _log.warning("timezone %r is not usable (%s); local dates and "
@@ -326,14 +215,9 @@ CROSSING_MIN_HOURS: int = DEFAULT_CROSSING_MIN_HOURS
 
 
 def _crossing_cut(value, default: float | int, low: float, high: float):
-    """One crossing cut, clamped to something servable. Never raises.
-
-    Unlike the `no people` ValueError below, a nonsense cut must not stop the
-    add-on booting. `/data/config.json` can be hand-edited on the box, and that
-    path reaches `configure()` without passing the API's validation at all -- so
-    a publisher whose job is to keep publishing degrades to the nearest sane
-    value and says so, rather than bricking itself. The API rejects the same
-    value loudly, which is where a person actually finds out.
+    """One crossing cut, clamped to something servable; never raises. A
+    hand-edited config.json reaches `configure()` unvalidated, so this clamps
+    and leaves rejecting a bad value loudly to the API.
     """
     try:
         # bool is an int in Python and json.loads turns `true` into one, so it
@@ -364,9 +248,8 @@ def configure(settings: Settings) -> tuple[Subject, ...]:
     people: list[Subject] = []
     for entity_id in settings.people:
         slug = slugify(entity_id)
-        # A person whose entity id slugifies to "house", or two people who
-        # collide, would otherwise produce duplicate (subject, time) keys and
-        # blow up much later inside a pandas reindex.
+        # A slug equal to "house" or another person's would give duplicate
+        # (subject, time) keys and blow up much later in a pandas reindex.
         base, n = slug, 2
         while slug in seen:
             slug, n = f"{base}_{n}", n + 1
@@ -380,9 +263,7 @@ def configure(settings: Settings) -> tuple[Subject, ...]:
     house = Subject(slug=HOUSE_SLUG, entity_id=settings.house_entity or "",
                     is_person=False)
 
-    # Same de-dup as the subjects, and for the same reason: two zones that
-    # slugify alike would mint one column between them and silently merge two
-    # places into one feature.
+    # Two zones that slugify alike would silently merge into one column.
     seen_zones: set[str] = set()
     zones: list[Zone] = []
     for entity_id in settings.zones:
@@ -403,10 +284,8 @@ def configure(settings: Settings) -> tuple[Subject, ...]:
                        else settings.country)
     HOME_COORDS = ((settings.home_latitude, settings.home_longitude)
                    if settings.home_latitude is not None else None)
-    # Clamped, never raised. A cut of exactly 0 or 1 can never be met by a
-    # rounded curve and would leave the sensor permanently unknown, so the
-    # bounds are open at both ends.
     DAY_SCHEDULE = (settings.day_schedule or None) if settings else None
+    # Open at both ends: a rounded curve never meets a cut of exactly 0 or 1.
     DEPARTURE_THRESHOLD = _crossing_cut(
         settings.departure_threshold, DEFAULT_DEPARTURE_THRESHOLD, 0.01, 0.99)
     ARRIVAL_THRESHOLD = _crossing_cut(
@@ -443,11 +322,8 @@ def zone_slugs() -> tuple[str, ...]:
 
 
 def zone_name_map() -> dict[str, str]:
-    """Lowercased friendly name -> zone entity id, for the enabled zones.
-
-    The lookup table behind the one friendly-name match this package makes. A
-    zone with no snapshotted name contributes nothing rather than a ""-keyed
-    entry that would swallow every blank state.
+    """Lowercased friendly name -> zone entity id, for the enabled zones. A zone
+    with no name adds nothing, not a ""-keyed entry that swallows blank states.
     """
     return {z.name.strip().lower(): z.entity_id for z in ZONES if z.name.strip()}
 
@@ -455,10 +331,9 @@ def zone_name_map() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # MQTT
 # ---------------------------------------------------------------------------
-# Supervisor injects the broker's details when the add-on declares
-# `services: ["mqtt:need"]`, and run.sh exports them. There is deliberately NO
-# host default: the original defaulted to a specific LAN address, so an unset
-# variable silently dialled somebody else's broker instead of failing.
+
+# Deliberately NO host default: an unset variable must fail, not silently dial
+# somebody else's broker.
 
 def mqtt_settings() -> dict:
     host = os.environ.get("MQTT_HOST")
@@ -477,54 +352,21 @@ def mqtt_settings() -> dict:
     }
 
 
-# Who may hit the endpoints that CHANGE something.
-#
-# Ingress authenticates the session -- Supervisor will not proxy a request from
-# somebody who is not logged in to Home Assistant -- but it does not
-# authorise. Every user of the house can open the panel, and the panel can
-# retrain the models and rewrite the configuration. `panel_admin` does not help:
-# it hides the sidebar entry, it does not guard the URL.
-#
-# What Supervisor does give us is the user's identity. `_init_header()` in
-# supervisor/api/ingress.py sets `X-Remote-User-Id` on the proxied request AND
-# strips any copy the client sent, so the value cannot be forged from the
-# browser -- it is as trustworthy as the Home Assistant session behind it.
-# There is no admin header: `ATTR_ADMIN` exists on the panel definition and is
-# never forwarded. So this is an allowlist of user ids and not a role check.
-#
-# EMPTY MEANS EVERYONE, deliberately. This option arrives in an add-on that has
-# been running without it, and a default that locked the owner out of their own
-# panel on upgrade would be a worse failure than the one it fixes. Setting it is
-# the opt-in.
+# Ingress authenticates but does not authorise, and forwards no admin flag.
+# Supervisor sets `X-Remote-User-Id` and strips any client copy, so it cannot be
+# forged. EMPTY MEANS EVERYONE, or an upgrade would lock the owner out.
 def admin_users() -> frozenset[str]:
     """Home Assistant user ids allowed to POST. Empty set means unrestricted."""
     raw = os.environ.get("OCCUPANCY_ADMIN_USERS", "")
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-# MQTT topic root, and the MQTT client id derived from it in predict.py.
-#
-# DERIVED FROM THE ADD-ON'S OWN SLUG, so the stable and edge builds separate
-# themselves and cannot be made to collide by editing one and forgetting the
-# other. Supervisor prefixes the slug with its repository (`local_occupancy_forecast`,
-# `a1b2c3d4_occupancy_forecast_edge`), and that first token is dropped -- otherwise
-# moving an add-on from the local folder to the published repository would
-# silently rename every entity it owns.
-#
-# Two of these MUST NOT share a client id: MQTT requires the broker to hand a
-# duplicated id to whoever connected last and silently disconnect the previous
-# holder, so they would fight forever with no error surfacing anywhere. That is
-# exactly what running stable and edge side by side would do.
+# Topic root and client id derive from the slug minus Supervisor's repository
+# token, so stable and edge never share a client id and a move renames nothing.
 DEFAULT_TOPIC_PREFIX = "occupancy_forecast"
 
-# Cached ONLY once Supervisor has answered (or there is no Supervisor to ask).
-# The version before this cached the default on failure too, for the life of
-# the process: a Supervisor that was still coming up when the add-on started --
-# a host reboot is enough -- turned the edge build into a second stable build
-# on MQTT until its next restart, with one ERROR line at boot as the only
-# trace. Now a failed lookup leaves this None, `topic_prefix()` answers the
-# default without remembering it, and everything that would publish under it
-# checks `topic_prefix_resolved()` first.
+# Cached ONLY once Supervisor has answered: caching the default on failure made
+# edge a second stable build on MQTT until its next restart.
 _topic_prefix: str | None = None
 _topic_prefix_error: str | None = None
 
@@ -541,13 +383,9 @@ def _supervisor_slug(token: str, timeout: float) -> str:
 
 def resolve_topic_prefix(attempts: int = 1, delay: float = 0.0,
                          timeout: float = 5.0) -> bool:
-    """Ask Supervisor for this add-on's slug. True once the prefix is known.
-
-    The only place a network call is made for the prefix. Outside an add-on
-    there is no Supervisor and no second instance to collide with, so the
-    default is the answer and is cached at once. Inside one, each failed
-    attempt is logged at ERROR -- it is the line that explains a missing set
-    of entities -- and NOTHING is cached, so the next call asks again.
+    """Ask Supervisor for this add-on's slug; True once the prefix is known.
+    The only network call for it. Outside an add-on the default is cached at
+    once; inside one a failure caches NOTHING, so the next call asks again.
     """
     global _topic_prefix, _topic_prefix_error
     if _topic_prefix is not None:
@@ -585,12 +423,8 @@ def topic_prefix_error() -> str | None:
 
 
 def topic_prefix() -> str:
-    """The MQTT topic root. Never makes a network call.
-
-    While unresolved this returns the default so that names can still be
-    formed -- a log line, a notification title -- but it does not remember it;
-    see `resolve_topic_prefix`. Callers that would write something under the
-    prefix ask `topic_prefix_resolved()` first.
+    """The MQTT topic root, never via the network. Unresolved, it returns the
+    default without remembering it; writers ask `topic_prefix_resolved()` first.
     """
     if _topic_prefix is None and not os.environ.get("SUPERVISOR_TOKEN"):
         resolve_topic_prefix()      # no network outside an add-on; caches
@@ -598,19 +432,8 @@ def topic_prefix() -> str:
 
 
 def display_name() -> str:
-    """This add-on's name for human eyes: `occupancy_forecast_edge` -> "Occupancy Forecast Edge".
-
-    Anywhere a message is addressed to the user -- a notification title, a log
-    line -- it has to say WHICH build wrote it, or two add-ons produce identical
-    text and the reader cannot tell which one is complaining. Derived from the
-    same slug as everything else so there is one thing to get right, not two.
-
-    It ALSO feeds the MQTT device name, and Home Assistant builds entity ids
-    from the device name -- so a casing change here silently orphans every
-    entity the add-on already owns. (`predict._device_label` used to be a
-    second copy of this transform for that reason; one function now.) There
-    used to be an acronym table beside it, because `.title()` turned the old
-    slug's "ml" into "Ml"; the current slug has no acronym and the table matched
-    nothing, so it is gone. Reintroduce one before putting an acronym in a slug.
+    """`occupancy_forecast_edge` -> "Occupancy Forecast Edge", so a message says
+    which build wrote it. It also feeds the MQTT device name, which HA builds
+    entity ids from: a casing change here silently orphans every entity.
     """
     return topic_prefix().replace("_", " ").title()

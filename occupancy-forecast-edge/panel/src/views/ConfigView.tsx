@@ -8,24 +8,15 @@ import { relativeTime } from '../format'
 import { Select } from '../components/Select'
 
 /**
- * Setup: what this installation is, and what it is doing about it.
- *
- * Everything here was `App.tsx` before there was a second view. The split is
- * along the question being asked -- this one answers "is it configured right",
- * the Data tab answers "what is it actually eating" -- and the state still lives
- * in `App`, because the status poll drives the header too and a view that owned
- * it would restart it on every tab switch.
+ * Setup: what this installation is, and what it is doing about it. The state
+ * lives in `App`, which owns the status poll -- see there.
  */
 
 const round = (n: number) => Math.round(n).toString()
 const count = (n: number) => n.toLocaleString()
 
-/**
- * `feature_groups[*].detail` is polymorphic -- a list of entity ids or a
- * sentence, plus the person->zone mapping an older config.json can still be
- * showing before its first save. The page this replaced ran Python's `str()`
- * over it and rendered `['person.alice']` on screen, brackets, quotes and all.
- */
+/** `feature_groups[*].detail` is polymorphic -- a list, a sentence, or the
+ *  person->zone mapping an older config.json can still be showing. */
 function formatDetail(detail: FeatureDetail): string {
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail)) return detail.join(', ')
@@ -73,11 +64,8 @@ function StatusRows({ status }: { status: Status }) {
         />
       )}
 
-      {/* Red, and shown only when it is true, because a stalled worker is the
-          one failure that hides behind every other green light on this page:
-          MQTT stays connected, the listener stays subscribed, and last_error
-          stays null, because a blocked thread is not a raising one. It went
-          unnoticed for 11.5 hours once. */}
+      {/* Red, and shown only when true: a stalled worker hides behind every other
+          green light on this page, because a blocked thread is not a raising one. */}
       {status.worker?.stalled && (
         <Row
           icon="alert"
@@ -90,9 +78,8 @@ function StatusRows({ status }: { status: Status }) {
         />
       )}
 
-      {/* Orange, not red, and the distinction is the reason the row exists: a
-          dead trigger subscription means the five-minute poll carries on, so
-          this is slower rather than broken. It would otherwise be invisible. */}
+      {/* Orange, not red: with the trigger subscription dead the five-minute poll
+          carries on, so this is slower rather than broken. */}
       {listener.connected ? (
         <Row
           icon="listening"
@@ -171,15 +158,8 @@ export interface ConfigViewProps {
   setRetention: (value: string) => void
 }
 
-/**
- * Discrete options rather than a number input.
- *
- * The panel has no styled numeric control, a free-text one needs a
- * partial-input parse dance ("0." is not a number), and impossible values then
- * cannot be typed at all. The cost is that 0.42 is unreachable, which is fine:
- * a 1% distinction on a 48-point hourly curve is not a real one. The server
- * still validates, because the API is reachable without this page.
- */
+/** Discrete options rather than a number input: 0.42 is unreachable, which is
+ *  fine on a 48-point hourly curve. The server still validates. */
 const CUTS = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7].map((v) => ({
   value: v.toFixed(2),
   label: `${Math.round(v * 100)} %`,
@@ -211,11 +191,6 @@ export function ConfigView({
           {status ? <StatusRows status={status} /> : <p className="empty">Loading…</p>}
         </Card>
 
-        {/* "What is serving each horizon" and "Training" were here and are now
-            on Now. Setup is a page you fill in once and leave; those two change
-            on their own and are read against the forecast, not against the
-            settings below. Status stays, because what it reports on is whether
-            the configuration on this page is actually working. */}
         <Card
           title="What this installation has"
           subtitle="A missing signal is not an error — the forecast is just less sharp."

@@ -1,22 +1,9 @@
 #!/usr/bin/env bash
 # One-off: fill an add-on's local store from an InfluxDB archive.
-#
-#   ./scripts/backfill-store-from-influx.sh                    # edge, creds from stable
-#   ./scripts/backfill-store-from-influx.sh local_occupancy_forecast # the other way round
-#
-# A fresh install's store has days of history where Influx has months. This
-# imports the lot in one pass through the add-on's OWN InfluxSource and
-# HistoryStore, so the result is exactly what the influx source would have read.
-# Idempotent, and the add-on need not be stopped. See the .py for why this is
-# not part of the add-on.
-#
-# CREDENTIALS come from another add-on's Supervisor options and are piped
-# container-to-container: the token never reaches this machine, an argv or `ps`.
-# Export INFLUX_URL / INFLUX_ORG / INFLUX_TOKEN (and INFLUX_BUCKET) to override;
-# they go over ssh stdin for the same reason.
-#
-# Afterwards nothing retrains until the next scheduled run -- the script prints
-# the command to trigger one.
+#   ./scripts/backfill-store-from-influx.sh [target_slug] [creds_from_slug]
+# Credentials are piped container to container, so the token never reaches this
+# machine, an argv or `ps`; INFLUX_URL/_ORG/_TOKEN/_BUCKET in the environment
+# override them, over ssh stdin for the same reason. Nothing retrains afterwards.
 set -euo pipefail
 cd "$(dirname "$0")"
 

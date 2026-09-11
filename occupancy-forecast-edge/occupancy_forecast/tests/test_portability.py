@@ -1,6 +1,6 @@
 """The tests that exist because this has to run on somebody else's house.
 
-Every one of these corresponds to a way the original was wired to one specific
+Every one of these guards a way the code could be wired to one specific
 installation. They are the difference between "it works here" and "it works".
 """
 
@@ -23,7 +23,7 @@ from occupancy_forecast.tests.conftest import settings  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Identity is no longer two named people
+# Identity is any number of people
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("count", [1, 2, 3, 5])
@@ -41,15 +41,9 @@ def test_no_people_is_refused_clearly():
 
 
 def test_renaming_a_person_does_not_silently_drop_their_rows():
-    """The bug this port exists to kill.
-
-    `MAY_BE_NAN` used to name `other_mart`/`zone_werk` as string literals while
-    the feature list derived the same names from config. Rename anyone and the
-    two disagreed: their `other_*` column became required, and because
-    `other_<self>` is NaN on every one of that person's own rows by
-    construction, every row for them was dropped. The table emptied and it
-    failed with "no folds" -- pointing at the fold geometry, not the config.
-    """
+    """The bug this port exists to kill: a hardcoded exemption list and a
+    derived feature list that disagree on a rename drop every row for the
+    renamed person."""
     config.configure(settings(people=["person.zoe", "person.quentin"],
                               zones=["zone.lab"],
                               zone_names={"zone.lab": "Lab"}))
@@ -67,9 +61,8 @@ def test_renaming_a_person_does_not_silently_drop_their_rows():
 
 
 def test_a_person_called_house_does_not_collide():
-    """`person.house` used to produce two subjects with the slug `house`, which
-    surfaces much later as a pandas 'cannot reindex on an axis with duplicate
-    labels' from inside the horizon join."""
+    """`person.house` must not give two subjects the slug `house`: that surfaces
+    much later as a duplicate-label reindex error inside the horizon join."""
     subjects = config.configure(settings(people=["person.house", "person.other"],
                                          zones=[], proximity={}))
     slugs = [s.slug for s in subjects]
@@ -117,11 +110,9 @@ class _StoreOnly:
 
 
 def test_builds_with_nothing_optional_present():
-    """One person. No work zone, no house group, no Proximity, no country.
-
-    The bar for "installable by anyone": this must produce a full-width table
-    with every column present, the optional ones NaN rather than missing.
-    """
+    """One person, no zone, no house group, no Proximity, no country. The bar for
+    "installable by anyone": a full-width table with the optional columns NaN
+    rather than missing."""
     config.configure(settings(people=["person.solo"], zones=[],
                               house_entity=None, proximity={}, country=None,
                               units={}))
@@ -151,7 +142,7 @@ def test_builds_with_nothing_optional_present():
 
 def test_an_unsupported_country_does_not_crash_the_build():
     """`holidays.country_holidays` raises NotImplementedError for countries it
-    does not cover, which used to abort the whole feature build."""
+    does not cover, and that must not abort the whole feature build."""
     config.configure(settings(people=["person.solo"], zones=[],
                               house_entity=None, proximity={}, country="ZZ"))
     source = _StoreOnly(_store_with(days=40))
@@ -162,10 +153,7 @@ def test_an_unsupported_country_does_not_crash_the_build():
 # ---------------------------------------------------------------------------
 # The holiday calendar is the household's, not the country's
 # ---------------------------------------------------------------------------
-#
-# Home Assistant's country says where the house is. It does not say which
-# holidays the people in it keep, and an install where those differ -- an Indian
-# family living in NL -- had no way to say so.
+# HA's country says where the house is, not which holidays the people keep.
 
 def _flagged_dates(table) -> set:
     rows = table[table["is_holiday"] == 1]
@@ -180,11 +168,8 @@ def _holiday_table(**overrides):
 
 
 def test_the_chosen_calendar_wins_over_home_assistants_country():
-    """Living in NL, keeping the Indian calendar.
-
-    Jan 1 is a Dutch public holiday and not an Indian one; Jan 14 and Jan 26 are
-    Indian and not Dutch. Disjoint on purpose, so this cannot pass by accident.
-    """
+    """Living in NL, keeping the Indian calendar. Disjoint dates on purpose, so
+    this cannot pass by accident."""
     dutch = _flagged_dates(_holiday_table(country="NL", holiday_country=None))
     assert dt.date(2026, 1, 1) in dutch
     assert dt.date(2026, 1, 26) not in dutch
@@ -196,11 +181,7 @@ def test_the_chosen_calendar_wins_over_home_assistants_country():
 
 def test_no_calendar_is_a_choice_distinct_from_not_having_chosen():
     """"" means "no holidays"; None means "nobody has picked, use HA's".
-
-    The two must not collapse into each other -- if they did, an explicit "none"
-    would be silently re-seeded from Home Assistant on the next restart, which
-    is the bug this whole setting exists to fix.
-    """
+    Collapsing them re-seeds an explicit "none" on the next restart."""
     assert _flagged_dates(_holiday_table(country="NL", holiday_country="")) == set()
     assert dt.date(2026, 1, 1) in _flagged_dates(
         _holiday_table(country="NL", holiday_country=None))
@@ -212,12 +193,8 @@ def test_an_unsupported_chosen_calendar_does_not_crash_the_build():
 
 
 def test_a_chosen_calendar_survives_a_restart():
-    """`refresh_environment` runs on every boot and used to overwrite this.
-
-    Re-reading timezone and coordinates from Home Assistant is right; re-reading
-    the holiday calendar would undo the user's pick every time the add-on
-    restarted, which made the setting useless.
-    """
+    """`refresh_environment` runs on every boot and must not overwrite this, or
+    the setting is useless."""
     from occupancy_forecast import runtime
 
     class _HA:
@@ -258,13 +235,9 @@ def test_the_next_alarm_sensor_is_matched_per_person_and_a_miss_is_fine():
 
 
 def test_a_next_alarm_sensor_is_collected_but_never_served():
-    """It is in the tracked set and out of the feature list, on purpose.
-
-    The whole point of wiring it up before it is useful: a companion-app sensor
-    is enabled long after the recorder started, so it has to start accumulating
-    now to be trainable later. Shipping it now would train a column that is NaN
-    for all but the last few days of the history.
-    """
+    """In the tracked set and out of the feature list, on purpose: a companion-app
+    sensor is enabled long after the recorder started, so it must accumulate now
+    to be trainable later."""
     from occupancy_forecast import features, runtime, train
 
     configured = settings(next_alarm={"person.alice": "sensor.alices_pixel_next_alarm"})
@@ -279,17 +252,9 @@ def test_a_next_alarm_sensor_is_collected_but_never_served():
 
 
 def test_no_alarm_set_is_recorded_rather_than_dropped(tmp_path):
-    """`unavailable` on a next-alarm sensor means "no alarm", which is data.
-
-    Here it is the commoner of the two readings, and an archive that stayed
-    silent on the days nobody set an alarm could not tell those apart from the
-    days the sensor was broken. Home Assistant's recorder keeps ~10 days, so
-    getting this wrong is not repairable after the fact.
-
-    Distinct from the presence entities, which keep the same words for the
-    opposite reason -- not a reading, but the end of one; see
-    `test_presence_gaps`. An entity named in neither list is still dropped.
-    """
+    """`unavailable` on a next-alarm sensor means "no alarm", which is data -- and
+    the commoner of the two readings. Distinct from the presence entities, which
+    keep the same words for the opposite reason; see `test_presence_gaps`."""
     from occupancy_forecast.sources.ha import ABSENT, StoreSource
     from occupancy_forecast.sources.store import HistoryStore
 
@@ -321,12 +286,8 @@ def test_no_alarm_set_is_recorded_rather_than_dropped(tmp_path):
 
 
 def test_never_having_looked_for_a_next_alarm_differs_from_finding_none():
-    """Same three-state reasoning as the holiday calendar.
-
-    None is "never looked" and gets discovered; {} is "looked, found nothing" or
-    "cleared on purpose" and must survive a restart. Collapsing them would
-    re-add a sensor the user removed, every boot.
-    """
+    """Same three-state reasoning as the holiday calendar: None is "never looked",
+    {} is "looked, found nothing" and must survive a restart."""
     from occupancy_forecast import runtime
 
     class _HA:
@@ -370,12 +331,9 @@ def test_a_bad_timezone_says_which_one():
 # ---------------------------------------------------------------------------
 
 def test_haversine_matches_a_proximity_reading():
-    """Checked against Home Assistant's own Proximity sensors: within 4-10 m.
-
-    The tolerance is GPS accuracy, not the formula's. The coordinates are
-    synthetic -- the same offshore point the fixture uses as `home`, and a
-    second one about 43 km away.
-    """
+    """Checked against HA's own Proximity sensors: within 4-10 m, which is GPS
+    accuracy rather than the formula's. Coordinates are the fixture's synthetic
+    offshore point."""
     home = (52.0, 4.5)
     away = (52.3, 4.9)
     assert abs(discover.haversine_m(home, home)) < 1
@@ -416,22 +374,9 @@ def _newest_rows(days: int = 30):
 
 
 def test_a_record_is_published_with_no_models_at_all():
-    """The first seven weeks of every install.
-
-    TWO bugs meet here and the fix for each is the other one's trap.
-
-    An early build skipped a subject whose curve came out empty, so with no
-    models at all NOTHING was published -- a fresh install showed no entities
-    and no explanation for seven weeks. That was fixed by serving untrained
-    cold-start baselines, which put a number on screen that no model had
-    earned, which is the thing this add-on no longer does.
-
-    So: no curve, but still a record. `current`, `current_at`, `predicted_at`
-    and the proximity ETA are observations, not model output; publishing them
-    keeps the entities in Home Assistant's registry reading `unknown`, which is
-    true, rather than absent, which is unanswerable. Do not "fix" the empty
-    curve by putting a baseline back in it.
-    """
+    """The first seven weeks of every install: no curve, but still a record.
+    `current`, `current_at`, `predicted_at` and the ETA are observations, not
+    model output -- do not "fix" the empty curve by putting a baseline in it."""
     from occupancy_forecast import predict as predict_mod
 
     results = predict_mod.predict_rows({}, _newest_rows())  # no models whatsoever
@@ -454,14 +399,9 @@ def _dedicated(horizon: int, ships: bool, **metrics) -> dict:
 
 
 def test_a_horizon_whose_baseline_won_is_not_published(monkeypatch):
-    """The gate's verdict is acted on, not merely recorded.
-
-    The artifact still carries a complete, usable `fallback` spec for a horizon
-    that lost -- `train` writes it as evidence of how the ladder's winner was
-    calibrated. This pins that serving IGNORES it. Without this test a stale
-    artifact plus a helpful refactor could quietly resurrect the old path,
-    because everything it needs is still sitting there in the pickle.
-    """
+    """The gate's verdict is acted on, not merely recorded. The artifact still
+    carries a usable `fallback` spec for a horizon that lost; this pins that
+    serving IGNORES it."""
     from occupancy_forecast import predict as predict_mod, train as train_mod
 
     rows = _newest_rows()
@@ -480,14 +420,9 @@ def test_a_horizon_whose_baseline_won_is_not_published(monkeypatch):
 
 
 def test_a_shipping_horizon_the_row_cannot_answer_is_a_hole(monkeypatch, caplog):
-    """A stale sensor deletes an hour of the forecast, and says so.
-
-    This used to fall back to the baseline -- "a stale sensor should degrade
-    the answer, not delete it" -- which meant a sensor that had stopped
-    reporting produced a plausible number, and nothing anywhere said that
-    anything was wrong. `_model_curve` swallows the failure with a bare
-    `except`, so the warning is the only place it can surface.
-    """
+    """A stale sensor deletes an hour of the forecast, and says so. `_model_curve`
+    swallows the failure with a bare `except`, so the warning is the only place
+    it can surface."""
     import logging
     from occupancy_forecast import predict as predict_mod, train as train_mod
 
@@ -536,17 +471,9 @@ def _published_state(curve: dict) -> dict:
 
 
 def test_an_unserved_horizon_publishes_an_explicit_null():
-    """The one failure mode nothing else here would catch.
-
-    Home Assistant IGNORES an empty MQTT payload. A horizon left out of the
-    state dict renders `{{ value_json.p_home_24h }}` as the empty string, HA
-    declines to act on it, and the sensor keeps whatever number it last had --
-    forever, with a fresh `predicted_at` sitting beside it saying the forecast
-    is current. That is a worse lie than the baseline this change removed.
-
-    `null` renders as "None", which `PAYLOAD_NONE` maps to `unknown`. Same
-    mechanism the two crossing sensors have relied on since they were written.
-    """
+    """HA IGNORES an empty MQTT payload, so an absent key leaves the sensor
+    holding its last number forever with a fresh `predicted_at` beside it.
+    `null` renders as "None", which `PAYLOAD_NONE` maps to unknown."""
     state = _published_state({1: 0.9})
     assert state["p_home_1h"] == 90.0
     assert "p_home_24h" in state, "an absent key is an empty payload, which HA ignores"
@@ -554,13 +481,9 @@ def test_an_unserved_horizon_publishes_an_explicit_null():
 
 
 def test_the_published_state_carries_every_sensor_horizon():
-    """Including with nothing trained at all.
-
-    Discovery configs are retained and static, so a config can outlive the
-    model that justified it. If the state topic ever stopped carrying a key
-    some `value_template` points at, that entity would go stale rather than
-    unknown -- and it would do it on day one, where nobody is watching.
-    """
+    """Including with nothing trained at all: discovery configs are retained and
+    static, so a config can outlive the model that justified it and the entity
+    would go stale rather than unknown."""
     for curve in ({}, {1: 0.9, 6: 0.2}):
         state = _published_state(curve)
         assert {f"p_home_{h}h" for h in config.SENSOR_HORIZONS_H} <= set(state)
@@ -602,8 +525,7 @@ def test_ten_days_yields_folds_rather_than_none():
 
 def test_a_single_person_household_can_clear_the_row_floor():
     """MIN_TEST_ROWS = 200 was silently a three-subject assumption: one person
-    yields 48 rows a day, so a lone installer could never have cleared a 200-row
-    window however long they waited."""
+    yields 48 rows a day."""
     times = _times(10, n_subjects=1)
     geometry = evaluate.fold_geometry(times, n_subjects=1)
     assert geometry["min_test_rows"] < 200
@@ -619,16 +541,10 @@ def test_few_folds_demand_a_bigger_effect():
 
 
 # ---------------------------------------------------------------------------
-# Two builds of this add-on run side by side, so identity must derive from the slug
+# Two builds of this add-on run side by side, so identity derives from the slug
 # ---------------------------------------------------------------------------
-#
-# The stable and edge add-ons share this code and are installed at the same
-# time. Everything that names something -- an MQTT topic, a client id, an HA
-# unique_id, a notification, a log line -- has to come from the add-on's own
-# slug, or the two silently share it. `NOTIFY_COLLECTING` was the one that got
-# away: a module constant, so both add-ons raised and dismissed the same
-# persistent notification and took it off each other. These tests are here so
-# that the next one does not.
+# Anything that names something -- a topic, a client id, a unique_id, a
+# notification, a log line -- or the two builds silently share it.
 
 def _with_prefix(monkeypatch, prefix):
     """Pin `topic_prefix()` without a Supervisor to ask."""
@@ -656,10 +572,8 @@ def test_the_notification_title_says_which_build_wrote_it(monkeypatch):
     assert config.display_name() == "Occupancy Forecast Edge"
 
 
-# How the prefix is LEARNED. A Supervisor that is still coming up when the
-# add-on starts -- a host reboot is enough -- used to leave the edge build
-# running as a second stable build on MQTT until its next restart, because the
-# default was cached on failure exactly as an answer would have been.
+# How the prefix is LEARNED. A failure must not be cached as an answer, or a
+# Supervisor still coming up leaves edge running as a second stable build.
 
 def _unresolved(monkeypatch):
     monkeypatch.setattr(config, "_topic_prefix", None)
@@ -780,32 +694,20 @@ def test_a_broker_failure_is_logged_rather_than_served(monkeypatch):
     assert broker.last_error_public == log.SEE_THE_LOG
 
 
-# A literal that ESCAPES the add-on must derive from the slug. A literal that
-# stays inside it need not: `/data` is private per add-on, so two builds writing
-# the same row key into their own SQLite files are not sharing anything. The
-# test therefore allows the store-local names by exact string, which still fails
-# on any NEW literal.
+# A literal that ESCAPES the add-on must derive from the slug; one that stays
+# inside /data need not, since /data is private per add-on.
 STORE_LOCAL_NAMES = {
-    # Row keys in /data/history.db. Note the dot: these imitate an entity id to
-    # sit in the same column as real ones, and are never sent to Home Assistant.
-    # They keep the historical `occupancy_ml.` namespace ON PURPOSE -- the
-    # archive is years of rows already written under it and cannot be re-supplied,
-    # so renaming these would make the add-on stop reading its own history. They
-    # no longer match the prefix at all, which is why this set is now belt and
-    # braces rather than the thing doing the work.
+    # Row keys in /data/history.db, never sent to HA. They keep the historical
+    # `occupancy_ml.` namespace because the archive cannot be re-supplied.
     '"occupancy_ml.collector"',              # sources/ha.py, the liveness heartbeat
     'f"occupancy_ml.{slug}_distance"',       # discover.py, a synthesised distance
 }
 
 
 def test_no_escaping_identity_string_is_hardcoded():
-    """Grep for the default prefix outside the places allowed to spell it.
-
-    A literal `"occupancy_forecast..."` that reaches MQTT, a unique_id or a
-    notification is an identity that does not move when the slug does -- so the
-    stable and edge builds share it and quietly fight over it. That is exactly
-    what `NOTIFY_COLLECTING` did.
-    """
+    """Grep for the default prefix outside the places allowed to spell it. A
+    literal that reaches MQTT, a unique_id or a notification does not move when
+    the slug does."""
     package = Path(__file__).resolve().parents[1]
     prefix = config.DEFAULT_TOPIC_PREFIX     # derived, so a rename cannot outrun it
     offenders = []
@@ -827,13 +729,8 @@ def test_no_escaping_identity_string_is_hardcoded():
 
 
 def test_a_config_written_before_the_crossing_cuts_still_loads():
-    """No `_migrate` entry is needed, and this is why.
-
-    `from_json` filters to the dataclass fields, so a key that simply is not
-    there takes the dataclass default. `_migrate` exists to RENAME a key; adding
-    one needs nothing. The defaults are therefore also the upgrade behaviour for
-    every /data/config.json already on a box.
-    """
+    """No `_migrate` entry is needed: `from_json` filters to the dataclass fields,
+    so a missing key takes the default. `_migrate` exists to RENAME a key."""
     text = json.dumps({
         "people": ["person.alice"],
         "zones": [],
@@ -846,14 +743,9 @@ def test_a_config_written_before_the_crossing_cuts_still_loads():
 
 
 def test_an_office_zones_config_migrates_to_a_ticked_list():
-    """The upgrade path off the per-person work zone.
-
-    `office_zones` was `{person: zone}` -- one workplace each, the role baked
-    in. Its values are exactly the zones that household cared about, so they
-    become the ticked list and nobody has to re-pick them. The old key is
-    dropped rather than carried, because two spellings of one setting is how
-    they drift apart.
-    """
+    """The upgrade path off the per-person work zone. `office_zones`' values are
+    exactly the zones that household cared about, so they become the ticked list;
+    the old key is dropped, because two spellings of one setting drift apart."""
     text = json.dumps({
         "people": ["person.alice", "person.bob"],
         "office_zones": {"person.alice": "zone.alice_office",
@@ -877,16 +769,8 @@ def test_an_explicit_zone_list_wins_over_the_legacy_key():
 
 def test_history_always_asks_for_an_end_time():
     """Without `end_time`, Home Assistant returns ONE DAY from `start` and says
-    nothing about having done so -- no error, no flag, just a short series that
-    looks complete.
-
-    It cost a real bug: `night.py` recovered a weekly pattern from what it
-    believed were seven days and was really sixteen hours, so six weekdays had
-    no evidence and the forecast chart shaded one night out of two. The same
-    call bootstraps the archive on a fresh install, where a silently truncated
-    backfill is not recoverable later -- Home Assistant's recorder will have
-    discarded the difference.
-    """
+    nothing about having done so. The same call bootstraps the archive on a fresh
+    install, where a silent truncation is not recoverable later."""
     from occupancy_forecast.sources import ha as ha_mod
 
     asked = []

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Run the suite against the edge tree, the source of truth; occupancy-forecast/
 # is generated from it. In a container so the Python and the pinned deps are the
-# ones the add-on ships. No network, no Home Assistant, no broker -- the tests
-# run against a synthetic household, which keeps real entity ids out of the code.
+# ones the add-on ships. No network, no Home Assistant, no broker.
 # Minutes, not seconds: a caller that gives up after two never sees the end.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -41,9 +40,7 @@ EOF
 fi
 
 # pyarrow sizes its pool from hardware_concurrency(), which reads the Proxmox
-# host's threads and not this container's cores. Safe only because every
-# train_all in the suite passes n_jobs=1: loky skips its own per-worker pin when
-# this is already set, and a fan-out would multiply the two.
+# host's threads. Safe only because every train_all in the suite passes n_jobs=1.
 threads=$(( $(nproc) > 3 ? $(nproc) - 2 : 1 ))
 
 limit=${TEST_TIMEOUT:-900}

@@ -1,24 +1,8 @@
 """Work out what this Home Assistant actually has, and propose a configuration.
 
-The original named two people and six sensors as literals. This asks.
-
-Everything optional degrades to an all-NaN feature column, which
-HistGradientBoosting handles natively and the ship gate prices -- so a house
-with one person, no work zones and no Proximity integration still trains and
-still serves. It just gets less skill, and the status page says so.
-
-**Synthesised proximity is the one that is worth the trouble.** Distance-to-home
-was the single biggest feature win (+17% Brier at 1 h), and it comes from the
-Proximity integration, which many installs will not have. It can be computed
-instead from `person.*` GPS attributes against the home coordinates -- verified
-to within 4-10 m of the real sensors.
-
-The catch, and it is a real one: **synthesised distance can only be recorded
-going forward.** A person moving across town does not change their *state*, so
-the recorder holds no intermediate positions to backfill from -- their history
-is a handful of zone transitions with attributes attached. Installs with
-Proximity get months of distance history immediately; installs without it start
-accumulating from the moment the add-on is installed.
+Everything optional degrades to an all-NaN column, so a house with one person
+and no Proximity still trains. Synthesised distance is recorded only GOING
+FORWARD: moving across town changes no state, so there is nothing to backfill.
 """
 
 from __future__ import annotations
@@ -45,12 +29,7 @@ def haversine_m(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def zone_names(states: list[dict] | None, wanted: list[str]) -> dict[str, str]:
-    """Zone entity -> friendly name, for the enabled zones.
-
-    A zone that has vanished from Home Assistant keeps whatever name was last
-    snapshotted rather than dropping out: its history is still full of that
-    name, and forgetting it would strand those rows in `zone_other`.
-    """
+    """Zone entity -> friendly name, for the enabled zones HA still has."""
     if not states:
         return {}
     by_id = {s["entity_id"]: s for s in states}
@@ -88,9 +67,7 @@ def candidates(states: list[dict]) -> dict:
         "people": named(by_domain.get("person", [])),
         "zones": named(zones),
         "groups": named(groups),
-        # Optional, and only ever decoration: a schedule the household already
-        # keeps for "when are we awake" lets the forecast chart shade the night.
-        # Nothing about the model reads it.
+        # Decoration only: it shades the chart's night, and no model reads it.
         "schedules": named(by_domain.get("schedule", [])),
         "has_proximity": bool(_proximity_sensors(states)),
         "countries": holiday_countries(),
@@ -102,15 +79,9 @@ _LOWER_WORDS = {"and", "of", "the"}
 
 
 def holiday_countries() -> list[dict]:
-    """Every calendar the `holidays` package can supply, for the panel's picker.
+    """Every calendar `holidays` can supply, for the panel's picker, or [].
 
-    Read from the registry rather than `list_supported_countries()` because the
-    registry carries a name alongside each code, and because the supported list
-    also contains alias codes (`UK` for `GB`) that would show up as a duplicate
-    entry the user cannot tell apart.
-
-    An empty list is a usable answer: the panel then says the picker is
-    unavailable, which beats a 500 on the status page over a cosmetic list.
+    From the registry: the supported list's alias codes show as duplicates.
     """
     try:
         from holidays.registry import COUNTRIES
@@ -129,10 +100,7 @@ def holiday_countries() -> list[dict]:
 def is_supported_country(code: str) -> bool:
     """Whether `holidays` covers this code. Unknown-because-uninstalled is True.
 
-    The check exists to give the user a 400 instead of a silently flat
-    `is_holiday` column. If the library cannot be imported at all we cannot
-    honestly say the code is wrong, so we let it through -- `_holiday_flags`
-    already degrades to zeros rather than crashing the feature build.
+    Then we cannot honestly call it wrong; `_holiday_flags` degrades to zeros.
     """
     try:
         from holidays.utils import list_supported_countries
@@ -155,9 +123,7 @@ def _proximity_sensors(states: list[dict]) -> dict[str, str]:
 def match_proximity(person_entity: str, states: list[dict]) -> list[str | None]:
     """Find this person's Proximity pair, or [None, None].
 
-    Matched on the person's slug appearing in the sensor id, which is how the
-    Proximity integration names them (`sensor.home_alice_distance`). A miss is
-    not a problem -- it just means the distance gets synthesised.
+    A miss is not a problem: it just means the distance gets synthesised.
     """
     slug = slugify(person_entity)
     sensors = _proximity_sensors(states)
@@ -169,16 +135,9 @@ def match_proximity(person_entity: str, states: list[dict]) -> list[str | None]:
 
 
 def match_next_alarm(person_entity: str, states: list[dict]) -> str | None:
-    """Find this person's companion-app next-alarm sensor, or None.
+    """Find this person's next-alarm sensor by their slug in the id, or None.
 
-    Matched on the person's slug appearing in the sensor id, the same way
-    `match_proximity` works -- the companion app names its sensors after the
-    device (`sensor.alices_phone_next_alarm`), which usually carries the
-    person's name but is not guaranteed to. A miss is not a problem: the column
-    goes NaN and the ship gate prices it at nothing.
-
-    Nothing is served off this yet -- see `features.BUILT_NOT_SHIPPED`. It is
-    discovered and collected now so that the history exists later.
+    Nothing is served off it yet: see `features.BUILT_NOT_SHIPPED`.
     """
     slug = slugify(person_entity)
     return next((s["entity_id"] for s in states
@@ -188,11 +147,9 @@ def match_next_alarm(person_entity: str, states: list[dict]) -> str | None:
 
 
 def units_for(states: list[dict], entity_ids: list[str]) -> dict[str, str]:
-    """entity_id -> unit_of_measurement.
+    """entity_id -> unit_of_measurement, for the Influx source.
 
-    Needed by the Influx source, which addresses numeric sensors by their UNIT
-    rather than their entity id. Hardcoding this to "m" is why the original
-    silently produced an all-NaN distance column on an imperial install.
+    Influx keys numeric sensors by UNIT; hardcoding "m" broke imperial installs.
     """
     wanted = set(entity_ids)
     return {s["entity_id"]: s["attributes"]["unit_of_measurement"]
@@ -242,11 +199,9 @@ def synthetic_distance_entity(slug: str) -> str:
 
 
 def sample_distances(ha, settings: Settings) -> list[tuple[str, int, str]]:
-    """Current distance-to-home per person, as store rows.
+    """Current distance-to-home per person, as store rows, each collection pass.
 
-    Called on every collection pass. Only produces rows for people who have no
-    real Proximity sensor -- there is no point shadowing a better source -- and
-    only when the person entity is currently reporting GPS.
+    Only for people with no real Proximity sensor who are reporting GPS now.
     """
     import datetime as dt
 

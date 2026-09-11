@@ -1,9 +1,7 @@
 """Is this person going out today.
 
-The tests that earn their keep here are the causality ones. The per-weekday rate
-is both a feature and the baseline the model must beat, so a leak inflates the
-model and deflates nothing -- it would read as skill, which is exactly what it
-must never be allowed to do.
+The tests that earn their keep are the causality ones: the per-weekday rate is
+both a feature and the baseline, so a leak reads as skill.
 """
 
 import datetime as dt
@@ -83,8 +81,7 @@ def test_an_installation_with_no_zones_answers_rather_than_raising():
 
 def test_the_weekday_rate_never_reads_the_day_it_predicts():
     """The leak that would matter most, because `wday_rate` is the baseline as
-    well as a feature. Every Monday a day out: the FIRST Monday must still
-    have no rate, and the rate on Monday k must be built from k-1 Mondays."""
+    well as a feature: the rate on Monday k must be built from k-1 Mondays."""
     config.configure(make_settings(zones=["zone.alice_office"],
                                    zone_names={"zone.alice_office": "Alice Office"}))
     mondays = {(dt.date(2026, 1, 5) + dt.timedelta(days=7 * k)).isoformat()
@@ -120,8 +117,7 @@ def test_a_person_never_sees_their_own_out_column_as_a_partner():
 
 def test_the_baseline_rate_is_shrunk_toward_the_person_s_own_rate():
     """An unshrunk weekday rate emits 0.00 and 1.00 off three observations, and
-    a baseline that makes confident mistakes is an easy thing for a model to
-    beat for reasons that are not skill."""
+    a baseline that makes confident mistakes is beaten without skill."""
     train = pd.DataFrame({
         "out": [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
         "wday_rate": [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
@@ -136,9 +132,8 @@ def test_the_baseline_rate_is_shrunk_toward_the_person_s_own_rate():
 
 
 def test_the_gate_needs_the_effect_size_and_not_just_a_win():
-    """A model a hair better than the baseline does not ship. Measured on this
-    household, permuted labels produce skills up to +19%, so a bare win is
-    inside the noise."""
+    """A model a hair better than the baseline does not ship: a bare win is
+    inside the noise a permutation test produces."""
     days = pd.DataFrame({"subject": ["alice"] * 4,
                          "candidate": [True] * 4,
                          "out": [1.0, 0.0, 1.0, 0.0]})
@@ -204,9 +199,6 @@ def test_too_little_history_publishes_no_routine_at_all():
 def test_today_falls_back_to_the_overall_hours_on_a_thin_weekday():
     """Thin means SOME office days but too few to take a median from -- not
     none, which is a different answer entirely (see the `never` test below).
-
-    Two Wednesdays in twelve weeks: enough to know she sometimes goes in, not
-    enough for that weekday's own median to mean anything.
     """
     config.configure(make_settings(zones=["zone.alice_office"],
                                    zone_names={"zone.alice_office": "Alice Office"}))
@@ -235,8 +227,7 @@ def test_today_is_none_for_someone_with_no_routine():
 
 def test_an_hour_becomes_a_moment_on_the_local_date():
     """The sensors carry `device_class: timestamp`, so a fractional hour has to
-    land on a real local moment -- including on the far side of a DST change,
-    where an hour offset from UTC would be an hour wrong."""
+    land on a real local moment -- including on the far side of a DST change."""
     at = pd.Timestamp("2026-07-01T09:00", tz="UTC")
     assert outing.at_hour(at, None) is None
     stamp = pd.Timestamp(outing.at_hour(at, 8.5))
@@ -248,11 +239,9 @@ def test_an_hour_becomes_a_moment_on_the_local_date():
 @pytest.mark.parametrize("day", ["2026-03-29", "2026-10-25"])
 @pytest.mark.parametrize("hour", [8.0, 17.5])
 def test_an_hour_is_still_that_hour_on_a_dst_transition_day(day, hour):
-    """The two days a year the old arithmetic got wrong. `midnight + Timedelta`
-    on a tz-aware stamp is absolute time, so 8.0 rendered as 09:00 on the
-    spring-forward day and 07:00 on the fall-back day (Europe/Amsterdam, the
-    fixture's zone). The sensors carry `device_class: timestamp`; an automation
-    reading them would have fired an hour out."""
+    """`midnight + Timedelta` on a tz-aware stamp is absolute time, so 8.0 would
+    render as 09:00 on the spring-forward day and 07:00 on the fall-back day
+    (Europe/Amsterdam, the fixture's zone) -- an hour out for any automation."""
     at = pd.Timestamp(f"{day}T12:00", tz=config.TIMEZONE).tz_convert("UTC")
     local = pd.Timestamp(outing.at_hour(at, hour)).tz_convert(config.tzinfo())
     assert (local.hour, local.minute) == (int(hour), int(round((hour % 1) * 60)))
@@ -272,14 +261,9 @@ def test_a_routine_survives_a_round_trip_and_a_corrupt_file(tmp_path):
 
 
 def test_a_weekday_they_never_go_in_on_publishes_no_hour_at_all():
-    """The difference between "we cannot say" and "we know they do not".
-
-    A real household had seventeen observed Thursdays and zero office days
-    among them.
-    Falling back to the overall median published `08:00` on those Thursdays --
-    a number nobody earned, and one an automation reading the timestamp without
-    the probability beside it would act on.
-    """
+    """The difference between "we cannot say" and "we know they do not". The
+    overall median would publish a number nobody earned, which an automation
+    reading the timestamp would act on."""
     routine = outing.fit_routine(_routine_days())
     # A Monday: twelve of them observed, alice never in the outing.
     monday = pd.Timestamp("2026-03-30T06:00", tz=config.TIMEZONE).tz_convert("UTC")
@@ -300,10 +284,8 @@ def test_a_weekday_they_never_go_in_on_publishes_no_hour_at_all():
 
 def _table_with_return(zone_out_slot: int, home_back_slot: int | None,
                        day: str = "2026-01-06") -> pd.DataFrame:
-    """One day: in a zone until `zone_out_slot`, home again at `home_back_slot`.
-
-    `home_back_slot` of None means they were not home again before midnight.
-    """
+    """One day: in a zone until `zone_out_slot`, home again at `home_back_slot`
+    (None: not home again before midnight)."""
     config.configure(make_settings(zones=["zone.alice_office"],
                                    zone_names={"zone.alice_office": "Alice Office"}))
     slots = config.SLOTS_PER_DAY
@@ -331,9 +313,8 @@ def _table_with_return(zone_out_slot: int, home_back_slot: int | None,
 
 
 def test_the_return_hour_is_when_they_got_home_not_when_they_left_the_zone():
-    """It used to be the last slot in the zone plus one, with a comment claiming
-    that was "~20 minutes before they are home". That was a guess. Somebody who
-    stops on the way home is home when they are home."""
+    """Somebody who stops on the way home is home when they are home, not when
+    they left the zone."""
     # In the zone until slot 33 (16:30), home again at slot 37 (18:30).
     days = _labelled(_table_with_return(zone_out_slot=33, home_back_slot=37))
     row = days[days["date"] == pd.Timestamp("2026-01-06")].iloc[0]
@@ -374,10 +355,8 @@ def _routine_for(weekday_hours: dict[int, tuple[float, float]]) -> dict:
 
 
 def test_the_time_comes_from_the_day_the_change_falls_on_not_today():
-    """The wrinkle that makes this worth writing down. A departure sixteen hours
-    out lands TOMORROW, and one person here never goes out on a Thursday while
-    going out on 88% of Fridays -- reading today's routine would answer the
-    wrong question."""
+    """A departure sixteen hours out lands TOMORROW, so reading today's routine
+    would answer the wrong question."""
     from occupancy_forecast import predict
 
     # Thursday 2026-09-03 at 17:00 local. Nothing on Thursdays; 08:00 Fridays.
@@ -394,9 +373,8 @@ def test_the_time_comes_from_the_day_the_change_falls_on_not_today():
 
 
 def test_it_falls_back_to_the_crossing_where_that_day_has_no_hour():
-    """A weekday they never go out on has no hour to give. The model still says
-    a change is coming, so the row must still say something -- the crossing's
-    own rounded hour, marked as such."""
+    """A weekday they never go out on has no hour to give, but the model still
+    says a change is coming -- so the crossing's own rounded hour, marked so."""
     from occupancy_forecast import predict
 
     thursday = pd.Timestamp("2026-09-03T17:00", tz=config.TIMEZONE).tz_convert("UTC")

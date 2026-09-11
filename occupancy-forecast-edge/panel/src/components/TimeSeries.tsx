@@ -6,19 +6,10 @@ import { runs as contiguous } from './geometry'
 import { useChartPointer } from './useChartPointer'
 
 /**
- * A line over time, in inline SVG.
- *
- * No charting library, for the reason `Icon.tsx` gives about `@mdi/js`: the
- * whole of one would arrive in the bundle to draw two shapes, and an Ingress
- * panel cannot assume the browser can reach a CDN to fetch it. Both scales here
- * are linear, so the entire chart is `Array.map` into a `<path d>`.
- *
- * `preserveAspectRatio="none"` is what makes it responsive without measuring
- * anything: the viewBox stretches to whatever width the card gives it. The cost
- * is that the transform is anisotropic, so nothing inside may be a shape whose
- * proportions matter -- no circles, no text. Labels live in the `.scale` row
- * below, as they do under the horizon strip, and `vector-effect:
- * non-scaling-stroke` keeps the line 2px however far the box is stretched.
+ * A line over time, in inline SVG. No charting library: the whole of one in the
+ * bundle for two shapes, and an Ingress panel cannot reach a CDN.
+ * `preserveAspectRatio="none"` makes it responsive without measuring, at the
+ * cost of an anisotropic transform -- no circles, no text, labels in `.scale`.
  */
 
 export interface Point {
@@ -36,9 +27,8 @@ function pathFor(points: Point[], lo: number, hi: number): string {
   let pen = false
   points.forEach((p, i) => {
     if (p.v === null) {
-      // A break, not a bridge. `slot_fraction` returns NaN for a slot it did
-      // not observe, and joining across it would draw a straight line through
-      // hours nobody has any evidence about.
+      // A break, not a bridge: joining across an unobserved slot draws a
+      // confident line through hours nobody saw.
       pen = false
       return
     }
@@ -52,15 +42,10 @@ function pathFor(points: Point[], lo: number, hi: number): string {
 
 export interface TimeSeriesProps {
   points: Point[]
-  /** The full sentence a screen reader gets. Never let the encoding rest on the
-   *  pixels alone: this is the whole chart, for the one reader who cannot see
-   *  it, so it says everything the marks say. */
+  /** The full sentence a screen reader gets. Never let the encoding rest on the pixels alone. */
   summary: string
-  /** The line printed under the chart, when it should be shorter than the
-   *  sentence above. A sighted reader already has the marks and the legend and
-   *  wants the numbers; a screen reader has neither and needs the prose. They
-   *  were one string, which meant trimming the visible one silently trimmed the
-   *  accessible one. Defaults to `summary` where the two are the same. */
+  /** The line printed under the chart, when it should be shorter than `summary`.
+   *  They were one string, so trimming the visible one silently trimmed the accessible one. */
   caption?: string
   startLabel: string
   endLabel: string
@@ -114,9 +99,8 @@ export function TimeSeries({
               those cannot live in a box with a non-uniform transform. */}
           <line className="grid" x1="0" y1={H / 2} x2={W} y2={H / 2} />
 
-          {/* Unobserved stretches, drawn before the line so it sits on top.
-              The band is the second channel: the break in the line says it, the
-              shading says it again, and the summary says it in words. */}
+          {/* Unobserved stretches, drawn before the line so it sits on top. The
+              band is the second channel; the break in the line is the first. */}
           {runs.map(([a, b]) => {
             const x1 = n === 1 ? 0 : (a / (n - 1)) * W
             const x2 = n === 1 ? W : ((b + 1) / (n - 1)) * W
@@ -128,8 +112,7 @@ export function TimeSeries({
                 vectorEffect="non-scaling-stroke" />
 
           {/* A vertical line is the one primitive whose meaning survives an
-              anisotropic transform, which is why the crosshair is one and the
-              readout beside it is HTML. */}
+              anisotropic transform; the readout beside it is HTML. */}
           {pointer.index !== null && (
             <line className="crosshair" vectorEffect="non-scaling-stroke"
                   x1={(pointer.index / Math.max(1, n - 1)) * W}
@@ -147,9 +130,8 @@ export function TimeSeries({
         )}
       </div>
 
-      {/* Scale at the ends, legend in the middle -- the same three-part footer
-          the horizon strip uses, and for the same reason: identity must never
-          rest on colour alone. */}
+      {/* Scale at the ends, legend in the middle: identity must never rest on
+          colour alone. */}
       <div className="scale">
         <span className="num">{startLabel}</span>
         <span className="legend" aria-hidden="true">

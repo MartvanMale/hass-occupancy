@@ -1,8 +1,7 @@
 """Composition root: assemble settings, Home Assistant and a history source.
 
-Everything else takes what it needs as an argument. This is the one place that
-knows how the pieces fit together, so a test can build its own combination
-without touching a network.
+Everything else takes what it needs as an argument, so a test can build its own
+combination without touching a network.
 """
 
 from __future__ import annotations
@@ -22,10 +21,8 @@ def load_settings(ha: HomeAssistant | None = None,
                   path: Path = config.CONFIG_PATH) -> config.Settings:
     """Saved settings, or a proposal from what Home Assistant currently has.
 
-    First run has no config.json, so rather than refusing to start, the add-on
-    proposes something workable and shows it on the configuration page for the
-    user to confirm. An install with one person and nothing else still gets a
-    running system.
+    First run has no config.json, so the add-on proposes something workable for
+    the user to confirm rather than refusing to start.
     """
     settings = config.Settings.load(path)
     if settings is None:
@@ -35,17 +32,9 @@ def load_settings(ha: HomeAssistant | None = None,
 
 
 def refresh_environment(settings: config.Settings, ha: HomeAssistant) -> config.Settings:
-    """Re-read the things that belong to Home Assistant, not to the user.
+    """Re-read what is Home Assistant's to change; never the holiday calendar.
 
-    Timezone, country, home coordinates and sensor units are HA's to tell us,
-    and all four can change without anyone touching this add-on's settings.
-    Re-reading them every startup is cheaper than a support thread.
-
-    The holiday calendar is the one that is *not* HA's, though it starts there.
-    HA's country is a fine first guess and seeds the setting on a fresh install,
-    so nobody who never opens the panel notices a change. Once chosen it is the
-    user's, and re-reading it here would silently undo their pick on the next
-    restart -- which is the whole reason the setting was unusable before.
+    HA's country only seeds it; re-reading would silently undo the user's pick.
     """
     core = ha.config()
     settings.timezone = core.get("time_zone") or "UTC"
@@ -55,9 +44,7 @@ def refresh_environment(settings: config.Settings, ha: HomeAssistant) -> config.
     settings.home_latitude = core.get("latitude")
     settings.home_longitude = core.get("longitude")
 
-    # The add-on option wins over the persisted value: which history source to
-    # read is infrastructure, set in Supervisor, not part of the household
-    # identity the user edits on the panel.
+    # The add-on option wins: a history source is infrastructure, not identity.
     settings.source = os.environ.get("OCCUPANCY_SOURCE") or settings.source
 
     numeric = [pair[0] for pair in settings.proximity.values() if pair and pair[0]]
@@ -66,22 +53,13 @@ def refresh_environment(settings: config.Settings, ha: HomeAssistant) -> config.
     if numeric:
         settings.units = discover.units_for(states, numeric)
 
-    # A zone's friendly name is the only per-person zone signal that exists in
-    # history (features._resolve_zone_events), so the snapshot has to track
-    # renames. Re-read here for the same reason as the timezone: it is Home
-    # Assistant's to change, and nobody will think to come and re-save.
+    # A zone's name is the only per-person zone signal in history, and HA's to
+    # rename, so the snapshot is re-read like the timezone.
     if settings.zones:
         settings.zone_names = discover.zone_names(states, settings.zones)
 
-    # Discovered once, for anyone who has not looked yet rather than only on a
-    # fresh install: the setting arrived after the add-on shipped, so every
-    # existing config.json is missing it, and a phone sensor nobody notices is
-    # one that never accumulates the history it needs.
-    #
-    # `is None`, not falsiness. An empty dict means somebody looked and found
-    # nothing, or cleared the list on purpose; re-running discovery over that
-    # would undo the choice on the next restart. Same three-state reasoning as
-    # `holiday_country` above.
+    # `is None`, not falsiness: an empty dict means somebody looked and found
+    # nothing, and re-running discovery over that would undo the choice.
     if states is not None and settings.next_alarm is None:
         found = {p: discover.match_next_alarm(p, states) for p in settings.people}
         settings.next_alarm = {p: e for p, e in found.items() if e}
@@ -92,9 +70,7 @@ def build_source(settings: config.Settings, ha: HomeAssistant,
                  store: HistoryStore | None = None):
     """The history source named by the settings.
 
-    `store` is the default and works anywhere. `influx` exists for installs that
-    already archive Home Assistant and would otherwise discard months of history
-    and wait six weeks for a model.
+    `influx` lets an install that already archives HA keep the months it has.
     """
     if settings.source == "influx":
         url = os.environ.get("INFLUX_URL")
@@ -113,10 +89,7 @@ def build_source(settings: config.Settings, ha: HomeAssistant,
 def forecast_log() -> HistoryStore:
     """Where the add-on records what it published, whatever the source is.
 
-    The same file and the same class as the archive -- the `forecasts` table
-    lives beside `states` -- but it is deliberately not reached through the
-    source: `.store` is what tells the rest of the add-on it is NOT on Influx,
-    and an Influx install needs this table without inheriting any of that.
+    Never reached through the source: `.store` is what says "not on Influx".
     """
     return HistoryStore(config.HISTORY_DB)
 
@@ -126,16 +99,12 @@ def tracked_entities(settings: config.Settings) -> list[str]:
     wanted: list[str] = list(settings.people)
     if settings.house_entity:
         wanted.append(settings.house_entity)
-    # Kept even though no feature reads a zone's own count any more: history
-    # not collected is history gone forever, and the count is the fallback if
-    # the name join ever has to be replaced.
+    # No feature reads a zone's count, but uncollected history is gone forever.
     wanted.extend(settings.zones)
     for pair in settings.proximity.values():
         wanted.extend(e for e in (pair or []) if e)
-    # Collected but not served yet -- see features.BUILT_NOT_SHIPPED. A phone
-    # sensor is typically enabled long after the recorder started, so the only
-    # way it is ever useful is for collection to start well before the feature
-    # does.
+    # Collected but not served yet (features.BUILT_NOT_SHIPPED): collection has
+    # to start well before the feature does.
     wanted.extend(e for e in (settings.next_alarm or {}).values() if e)
     return sorted(set(wanted))
 
@@ -143,9 +112,7 @@ def tracked_entities(settings: config.Settings) -> list[str]:
 def absence_entities(settings: config.Settings) -> list[str]:
     """Entities whose `unavailable` is a reading rather than a gap.
 
-    Only the next-alarm sensors so far: they read `unavailable` exactly when no
-    alarm is set, which is the commoner state and every bit as informative as a
-    time. See `sources.ha.HistoryStore.collect`.
+    Next-alarm sensors, which read `unavailable` exactly when no alarm is set.
     """
     return sorted(e for e in (settings.next_alarm or {}).values() if e)
 
@@ -153,10 +120,7 @@ def absence_entities(settings: config.Settings) -> list[str]:
 def presence_entities(settings: config.Settings) -> list[str]:
     """Entities whose `unknown` ends the previous state rather than being a gap.
 
-    The people and the house group. Passed rather than matched on a `person.`
-    prefix: the house entity is not always a `group.*`, and a prefix test is
-    one more place wired to how one installation happens to be set up. See
-    `sources.ha.StoreSource.collect`.
+    Listed, not prefix-matched: the house entity is not always a `group.*`.
     """
     wanted = list(settings.people)
     if settings.house_entity:
@@ -167,12 +131,7 @@ def presence_entities(settings: config.Settings) -> list[str]:
 def trigger_entities(settings: config.Settings) -> list[str]:
     """The subset of `tracked_entities` whose change is worth re-predicting for.
 
-    Deliberately NOT the full tracked set. That includes the proximity distance
-    and direction-of-travel sensors, which rewrite every few minutes for as
-    long as somebody is driving -- and whose contribution to the forecast is
-    averaged over a 30-minute slot anyway, so re-running on each one would buy
-    nothing and cost a feature rebuild every time. Presence and the zones are
-    the signals where a change actually moves the answer.
+    Not proximity: it rewrites every few minutes, and a slot averages it anyway.
     """
     wanted: list[str] = list(settings.people)
     if settings.house_entity:
@@ -182,13 +141,7 @@ def trigger_entities(settings: config.Settings) -> list[str]:
 
 
 def bootstrap(path: Path = config.CONFIG_PATH):
-    """Everything, wired. Returns (settings, ha, source, forecast_log).
-
-    The log is built whatever the source is: it holds what this add-on
-    PUBLISHED, which has no relationship to where history is read from. On
-    `store` it is the same object the source reads through; on `influx`
-    `build_source` ignores it and only the forecast table is ever written.
-    """
+    """Everything, wired. Returns (settings, ha, source, forecast_log)."""
     ha = home_assistant()
     settings = refresh_environment(load_settings(ha, path), ha)
     settings.save(path)

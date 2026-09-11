@@ -1,19 +1,8 @@
 """The contract between the panel and the API.
 
-The panel is a TypeScript app, so it cannot be tested from pytest -- but what it
-*reads* can be. `panel/src/types.ts` declares the shape of every response it
-consumes; this file asserts that a live response actually carries those fields.
-The two lists are the contract, and nothing checks them against each other
-automatically: **if you add or rename a field, change it in both places.**
-
-That split is deliberate. A rename that lands only in Python fails here. A
-rename that lands only in TypeScript fails `tsc --noEmit`, because the consuming
-component stops compiling. Between them they cover what asserting on generated
-markup used to cover, which was the only real test the old server-rendered page
-had.
-
-Everything runs against the synthetic household in conftest, as the rest of the
-suite does; nothing here needs a broker, a Home Assistant or a model on disk.
+`panel/src/types.ts` declares the shape of every response the panel consumes;
+this file asserts that a live response carries those fields. Nothing checks the
+two against each other automatically: **add or rename a field in both places.**
 """
 
 import numpy as np
@@ -54,9 +43,8 @@ SETTINGS_KEYS = {"people", "zones", "house_entity", "holiday_country",
                  "departure_threshold", "arrival_threshold", "crossing_min_hours",
                  "forecast_retention_days"}
 
-# The Data tab. Every one of these is a discriminated union on the panel side:
-# `{available: false, reason}` or `{available: true, ...}`, which is what makes
-# tsc refuse to compile a view that forgets the empty state.
+# The Data tab. Each is a discriminated union on the panel side (`available`
+# false-with-reason or true), so tsc refuses a view that forgets the empty state.
 UNAVAILABLE_KEYS = {"available", "reason"}
 ARCHIVE_KEYS = {"available", "span", "entities"}
 ARCHIVE_SPAN_KEYS = {"first", "last", "rows", "days", "bytes"}
@@ -113,16 +101,14 @@ def mature(monkeypatch):
     """A trained installation with some horizons publishing nothing."""
     monkeypatch.setitem(server._state, "settings", make_settings())
     monkeypatch.setitem(server._state, "models", {
-        # One of each family and one that lost its bake-off, which is the shape
-        # a real installation has: the dedicated fit wins the near horizons,
-        # the pooled one the far ones, and the far end falls off the gate.
+        # One of each family and one that lost its bake-off: the shape a real
+        # installation has, with the far end falling off the gate.
         1: {"metrics": {"ships": True, "kind": "dedicated"}},
         6: {"metrics": {"ships": True, "kind": "pooled"}},
         24: {"metrics": {"ships": False, "kind": None,
                          "best_baseline": "persistence"}},
-        # 36 deliberately absent. A partial train leaves trained and untrained
-        # horizons side by side, and the panel tells them apart by whether
-        # `best_baseline` has an entry -- so one of each has to be here.
+        # 36 deliberately absent: the panel tells trained from untrained by
+        # whether `best_baseline` has an entry, so one of each has to be here.
     })
     return server._status()
 
@@ -136,16 +122,14 @@ def test_status_carries_every_field_the_panel_reads(fresh, mature):
 
 
 def test_the_forecast_the_now_tab_reads_is_the_one_that_was_published(monkeypatch):
-    """The Overview tab replaces a hand-built Lovelace view, and the whole reason it
-    can is that it reads what went to MQTT rather than recomputing. If it
-    recomputed, the panel and the Home Assistant entities could disagree about
-    the same instant, and the user would have no way to tell which was right."""
+    """The Overview tab reads what went to MQTT rather than recomputing: if it
+    recomputed, the panel and the HA entities could disagree about the same
+    instant."""
     monkeypatch.setitem(server._state, "settings", make_settings())
     monkeypatch.setitem(server._state, "last_predict", "2026-09-02T10:00:00+00:00")
     monkeypatch.setitem(server._state, "forecast", [{
         "subject": "alice", "current": 1.0, "curve": {"1": 0.9, "3": 0.4},
-        # Half an hour older than `predicted_at`, which is the normal case and
-        # the reason the chart anchors its clock labels here: the horizons are
+        # Older than `predicted_at`, and the chart's clock anchor: horizons are
         # measured from the feature row's slot, not from when the maths ran.
         "observed_at": "2026-09-02T09:30:00+00:00",
         "next_departure_h": 3, "next_arrival_h": None, "eta_minutes": None,
@@ -166,9 +150,8 @@ def test_the_forecast_the_now_tab_reads_is_the_one_that_was_published(monkeypatc
     # The combined answer the card renders, present even when the forecast in
     # memory predates it -- `.get` on the server side, null here.
     assert "next_change" in payload["subjects"][0]
-    # And it arrives SPARSE. +2 h went unserved, and the endpoint must not
-    # helpfully fill it in: the panel draws a hole there, and a densified curve
-    # would put a number under it that no model produced.
+    # And it arrives SPARSE: the panel draws a hole at the unserved +2 h, and a
+    # densified curve would put a number there that no model produced.
     assert payload["subjects"][0]["curve"] == {"1": 0.9, "3": 0.4}
 
 
@@ -190,14 +173,9 @@ def test_the_panel_can_name_the_add_on_that_served_it(monkeypatch):
 
 
 def test_served_by_is_a_horizon_to_verdict_mapping(fresh, mature):
-    """What the horizon strip draws. The keys are strings because JSON has no
-    integer keys, and the panel sorts them numerically on the way in.
-
-    Keyed by the WHOLE grid, not by the loaded artifacts. A fresh install has
-    no artifacts and would otherwise send an empty map, leaving the strip with
-    nothing to draw on the one day it most needs to explain itself; and a
-    horizon whose pickle failed to load would drop out of the denominator, so
-    the card would read "42 of 46" with no hint that two went missing."""
+    """What the horizon strip draws. Keyed by the WHOLE grid, not the loaded
+    artifacts -- a fresh install would otherwise send an empty map, and a
+    failed pickle would drop out of the denominator."""
     for status in (fresh, mature):
         assert set(status["served_by"]) == {str(h) for h in config.HORIZONS_H}
         # The line that fails if "baseline:<name>" ever comes back. Nothing
@@ -212,14 +190,10 @@ def test_served_by_is_a_horizon_to_verdict_mapping(fresh, mature):
 
 
 def test_best_baseline_names_the_winner_only_where_a_model_lost(fresh, mature):
-    """Two horizons publish nothing for two different reasons, and the strip
-    draws the same grey cell for both -- so the tooltip is where they are told
-    apart. A model that lost has a bake-off to report; a horizon that was never
-    trained has nothing to say, and says it by being absent.
-
-    Absence as the signal, the same convention `model_kind` uses one field up.
-    A null would mean "trained, and the winner has no name", which is not a
-    state that exists."""
+    """Two horizons publish nothing for two different reasons and draw the same
+    grey cell, so the tooltip tells them apart. Absence is the signal; a null
+    would mean "trained, winner has no name", which is not a state that
+    exists."""
     assert fresh["best_baseline"] == {}
 
     beaten = mature["best_baseline"]
@@ -229,13 +203,9 @@ def test_best_baseline_names_the_winner_only_where_a_model_lost(fresh, mature):
 
 
 def test_model_kind_names_the_family_without_disturbing_served_by(fresh, mature):
-    """Two families serve one API. `served_by` keeps the two values the horizon
-    strip counts and the panel has always split on; WHICH family answered rides
-    beside it, keyed only by the horizons a model actually serves.
-
-    Folding the family into `served_by` -- "model:pooled" -- would have been the
-    obvious move and would have broken every `=== 'model'` in the panel
-    silently, which is the kind of thing this file exists to stop."""
+    """`served_by` keeps the two values the strip counts; WHICH family answered
+    rides beside it. Folding the family in as "model:pooled" would break every
+    `=== 'model'` silently."""
     assert fresh["model_kind"] == {}
 
     kinds = mature["model_kind"]
@@ -248,9 +218,9 @@ def test_model_kind_names_the_family_without_disturbing_served_by(fresh, mature)
 
 
 def test_feature_group_details_keep_the_three_shapes_the_panel_formats(mature):
-    """`detail` is a list, a mapping or a sentence depending on the group, which
-    is why the panel has a `formatDetail` rather than interpolating it. The old
-    page did interpolate it and rendered `['person.alice']` on screen."""
+    """`detail` is a list, a mapping or a sentence, which is why the panel has a
+    `formatDetail`. The old page interpolated it and rendered a Python list on
+    screen."""
     groups = mature["feature_groups"]
     assert groups
     for info in groups.values():
@@ -258,9 +228,8 @@ def test_feature_group_details_keep_the_three_shapes_the_panel_formats(mature):
         assert isinstance(info["detail"], (str, list, dict))
 
     assert isinstance(groups["presence"]["detail"], list)
-    # A sentence now, not a person->zone mapping: a zone belongs to the
-    # household rather than to one person, and the row has a rename count to
-    # report that no mapping could carry.
+    # A sentence, not a person->zone mapping: a zone belongs to the household,
+    # and the row carries a rename count that no mapping could.
     assert isinstance(groups["zones"]["detail"], str)
 
 
@@ -287,10 +256,8 @@ def test_the_saved_settings_round_trip_through_the_form():
 
 
 def test_every_settable_field_the_form_sends_is_on_a_validator_allowlist():
-    """`typed_patch` drops what it does not recognise, silently. A field added
-    to the form and forgotten here never saves and never errors -- so the two
-    halves of `ConfigPatch` are checked against each other rather than trusted.
-    """
+    """`typed_patch` drops what it does not recognise, silently: a field added
+    to the form and forgotten here never saves and never errors."""
     from occupancy_forecast import server
 
     settable = SETTINGS_KEYS - {"holiday_country"}          # optional in the patch
@@ -480,17 +447,9 @@ def test_the_feature_inventory_and_series_carry_what_the_cards_read(tmp_path):
 
 
 def test_an_empty_fold_reaches_the_panel_as_a_null_and_not_a_zero():
-    """`_scores_by_fold` emits an entry for every fold INDEX, empty ones
-    included, because `ships` walks the list positionally against the baseline
-    ladder's and a skipped fold would shift every later comparison by one. The
-    padding carries NaN, which serialises to null.
-
-    The panel typed those fields as plain numbers, so `tsc` had no reason to
-    object, and `f.brier.toFixed(3)` on a padded fold threw
-    `Cannot read properties of null` and blacked out the whole Data tab. The
-    fold list is the one place in this API that is legitimately sparse; this
-    pins it so `panel/src/types.ts` cannot quietly go back to claiming
-    otherwise.
+    """`_scores_by_fold` emits an entry for every fold INDEX, because `ships`
+    walks the list positionally. The padding is NaN, which serialises to null
+    -- the fold list is the one place in this API that is legitimately sparse.
     """
     import math
 
@@ -541,16 +500,10 @@ def test_the_metrics_carry_every_field_the_quality_cards_read(tmp_path):
 
 
 def test_a_nan_in_the_metrics_reaches_the_panel_as_null_not_as_a_500(tmp_path):
-    """`metrics.json` is written with `allow_nan=True` and read back with a
-    float NaN in it: a single-class fold has no AUC, a horizon with no baseline
-    rung has no `best_baseline_brier`, an empty fold pads every score. FastAPI
-    renders responses with `allow_nan=False`, so a NaN that reaches a handler's
-    return value is a 500 for the whole endpoint -- which is what a synthetic
-    household's own artifact did for four horizons' quality cards.
-
-    Rendered through the same response class the app uses, because the suite
-    ships no HTTP client and this is the layer the bug lived in.
-    """
+    """`metrics.json` is written with `allow_nan=True`; FastAPI renders with
+    `allow_nan=False`, so a NaN reaching a handler's return value is a 500 for
+    the whole endpoint. Rendered through the app's own response class, as the
+    suite ships no HTTP client."""
     import json
 
     from fastapi.responses import JSONResponse
@@ -589,8 +542,7 @@ def test_a_nan_in_the_metrics_reaches_the_panel_as_null_not_as_a_500(tmp_path):
 
 def test_every_explorer_endpoint_answers_rather_than_raising_on_day_one():
     """The convention the whole tab depends on: a fresh install has no archive
-    and no models, and that is a sentence to render, not a 404 for the console.
-    `_status` already answers this way for `history` on an Influx source."""
+    and no models, and that is a sentence to render, not a 404 for the console."""
     from occupancy_forecast import explore
 
     class NoStore:

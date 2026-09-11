@@ -1,32 +1,8 @@
-"""Reading the add-on's own data back out, for the panel's Data tab.
+"""The Data tab's view of the add-on's own data; `server.py` wraps it thinly.
 
-Everything the model eats is on disk already -- the raw archive in
-`/data/history.db`, the feature table in `/data/features.parquet`, the scores in
-`/data/models/metrics.json` -- and until this module there was no way to look at
-any of it without shelling into the container. The endpoints in `server.py` are
-thin wrappers over the functions here, which is what makes them testable without
-an HTTP client (the shipped image carries no httpx, and `test_server.py` says so).
-
-Two rules hold everything here together.
-
-**Nothing in this module computes a feature.** It calls `features.slot_fraction`,
-`features.numeric_on_grid` and `train.features_for` and reports what they say.
-The failure mode being avoided is specific and quiet: an explorer that derives
-`home_frac` its own way shows a number the model never saw, and the page is then
-worse than no page, because it is confidently wrong. `test_explore.py` asserts
-the agreement rather than trusting this docstring.
-
-**Nothing here reads a whole parquet.** `feature_inventory` reads the footer,
-where pyarrow has already written per-column null counts and min/max; the series
-endpoint reads three columns. The table is well over a thousand columns wide, so an
-unqualified `pd.read_parquet` would turn a panel tab into a several-second stall
-and a spike in RSS on a machine that is also running Home Assistant.
-
-Missing data is an answer, not an error. Every function returns
-`{"available": False, "reason": <sentence>}` rather than raising or 404ing: a
-fresh install genuinely has no models and no feature table, that is the normal
-state for the first ten days, and a 404 in the browser console reads as a bug in
-the add-on rather than as the truthful "not yet".
+Nothing here computes a feature: it calls `features`/`train` and reports what
+they say, since an explorer deriving `home_frac` its own way is worse than no
+page. Nothing reads a whole parquet; missing data is `unavailable(reason)`.
 """
 
 from __future__ import annotations
@@ -39,16 +15,12 @@ from .sources.ha import HEARTBEAT_ENTITY
 
 _log = log.get(__name__)
 
-# How far back an entity view reaches by default, and the most it will reach.
-# The cap is not about the database -- it is about the response: 90 days of
-# 30-minute slots is 4,320 points, which draws and transfers comfortably.
+# The cap is about the response, not the database.
 DEFAULT_DAYS = 7
 MAX_DAYS = 90
 
-# Raw transitions returned with an entity, at most. A person entity is a few
-# hundred a week and a synthesised distance sensor is one per collection pass,
-# so this only bites on the latter -- and there the TAIL is what anyone
-# inspecting wants, so that is what gets kept.
+# Raw transitions per entity; the TAIL is what anyone inspecting wants, so
+# that is what gets kept.
 MAX_EVENTS = 2000
 
 
@@ -67,15 +39,8 @@ def _clamp_days(days: int | None) -> int:
 def _classify(entity_id: str, values: list[tuple[str, int]]) -> str:
     """What kind of series this is, from a peek at its commonest values.
 
-    By shape rather than by name: matching on `sensor.*_distance` would be
-    guessing at the user's naming, and a person who calls their proximity sensor
-    something else would get the wrong chart. Every value parsing as a float is
-    a fact about the data.
-
-    The heartbeat is the one exception, and it is not a guess: this package
-    writes that row itself, so it owns the name. It is every-value-"ok" and
-    would otherwise be classified as presence, which would offer to chart the
-    fraction of each slot the collector spent at home.
+    By shape, not name: matching `sensor.*_distance` would guess at the user's
+    naming. The heartbeat is the exception, because this package owns its name.
     """
     if entity_id == HEARTBEAT_ENTITY:
         return "heartbeat"
@@ -90,13 +55,7 @@ def _classify(entity_id: str, values: list[tuple[str, int]]) -> str:
 
 
 def _role(entity_id: str, settings) -> str:
-    """What the add-on uses this entity FOR.
-
-    Derived from the settings and from `discover.synthetic_distance_entity`,
-    never from matching on the entity id's text -- the same reason `_classify`
-    looks at values. The one exception is the collector's own heartbeat, which
-    this package writes itself and therefore does own the name of.
-    """
+    """What the add-on uses this entity FOR: from settings, never its name."""
     if entity_id == HEARTBEAT_ENTITY:
         return "heartbeat"
     if entity_id in settings.people:
@@ -118,21 +77,9 @@ def _role(entity_id: str, settings) -> str:
 
 
 def archive_inventory(source, settings) -> dict:
-    """What is in `/data/history.db`, entity by entity.
+    """What is in `/data/history.db`, entity by entity, bar our own heartbeat.
 
-    `tracked` is the field this card exists for. An entity in the archive that
-    nothing reads is invisible otherwise, and so is the opposite and worse case:
-    a person configured on the Setup tab whose entity has never produced a row,
-    where the model is quietly training on a household with a member missing.
-
-    The collector's own heartbeat is left out. It is neither of those things --
-    it is this package's bookkeeping, not a signal anybody configured -- and
-    listing it did active harm: `tracked` is false for it, so it was drawn with
-    an "unused" chip and it was the entity the "not read" count was counting,
-    under a sentence explaining that such entities are left over from an earlier
-    configuration. It is not left over and there is nothing to act on. The row
-    is still in the archive and `entity_series` still serves it; `_classify` and
-    `_role` still name it, so a direct call gets a truthful answer.
+    `tracked` is the point: archived but unread, or configured but never seen.
     """
     store = getattr(source, "store", None)
     if store is None:
@@ -169,11 +116,7 @@ def archive_inventory(source, settings) -> dict:
 def entity_series(source, settings, entity_id: str, days: int | None = None) -> dict:
     """One entity: what arrived, and what the feature builder makes of it.
 
-    The two halves are the point. The raw transitions are what Home Assistant
-    reported; the gridded series is `features.slot_fraction` over exactly those
-    events, which is the number that reaches the model. Seeing them together is
-    how a gap in the top half is recognisable as the blank slot it causes in the
-    bottom one, rather than as a flat line somebody has to take on trust.
+    Together, a gap in the raw transitions shows as the blank slot it causes.
     """
     store = getattr(source, "store", None)
     if store is None:
@@ -188,9 +131,8 @@ def entity_series(source, settings, entity_id: str, days: int | None = None) -> 
     slots = features.grid(start, stop)
     kind = _classify(entity_id, store.value_counts(entity_id, limit=4))
 
-    # Seeded, so a slot at the very start of the window is not blank merely
-    # because the last change happened before it. That is the same reason
-    # `_subject_frame` seeds its own read.
+    # Seeded, so a slot at the start of the window is not blank merely because
+    # the last change happened before it.
     events = store.seeded_states(entity_id, start.isoformat(), stop.isoformat())
     raw_rows = len(events)
     truncated = raw_rows > MAX_EVENTS
@@ -248,8 +190,7 @@ def _is_float(value) -> bool:
 def _is_distance(entity_id: str, settings) -> bool:
     """Whether this series is a distance in metres, and so should be shown in km.
 
-    Both sources of one are asked by identity: the synthesised entity this
-    package names itself, and the first half of a configured proximity pair.
+    Asked by identity: the synthesised entity, or a proximity pair's first half.
     """
     if entity_id in {discover.synthetic_distance_entity(s.slug) for s in config.PEOPLE}:
         return True
@@ -259,9 +200,8 @@ def _is_distance(entity_id: str, settings) -> bool:
 
 
 def _num(value) -> float | None:
-    """NaN out to JSON as null. `float('nan')` is not valid JSON, and FastAPI
-    does not emit it: its response class renders with `allow_nan=False`, so a
-    NaN that reaches a handler's return value is a 500, not a bare `NaN`."""
+    """NaN out to JSON as null: FastAPI renders with `allow_nan=False`, so a
+    NaN reaching a handler's return value is a 500, not a bare `NaN`."""
     if value is None:
         return None
     value = float(value)
@@ -271,18 +211,8 @@ def _num(value) -> float | None:
 def _json_safe(value):
     """`value` with every NaN (and infinity) replaced by None, recursively.
 
-    `metrics.json` is written with `json.dumps` at its default `allow_nan=True`,
-    so a fold with one class (`auc` undefined), a horizon where no baseline
-    rung ran (`best_baseline_brier`), or an empty fold pads its per-fold entry
-    with a literal `NaN`, which `json.loads` reads back as a float. Anything
-    that then returns it through FastAPI is a 500 for the whole endpoint --
-    measured on a synthetic household's own artifact, where four horizons'
-    quality cards could not load. Applied at this boundary rather than fixed
-    at the writer, so an artifact already on disk is served rather than
-    retrained.
-
-    Numbers are passed through untouched otherwise: this rounds nothing, so a
-    value the panel formats itself arrives as it was written.
+    `metrics.json` is written with `allow_nan=True`, and a NaN back out through
+    FastAPI is a 500; cleaned here so an artifact already on disk still serves.
     """
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
@@ -295,35 +225,21 @@ def _json_safe(value):
 
 # --- the feature table ----------------------------------------------------
 
-# Columns worth offering as a chart: the origin block, which is the part a reader
-# can name. Everything else is 48 parallel copies of the same target-relative
-# ideas, one per horizon; those are summarised by family and never listed one by
-# one, because it is 85 KB of JSON nobody reads and a thousand-entry dropdown is
-# not a way to find anything. No count is written down here on purpose -- it
-# moves whenever a family is added, and the panel derives it from `columns`
-# minus `browsable` rather than being told.
+# Chartable: the origin block, the part a reader can name. The rest are 48
+# per-horizon copies, summarised by family rather than listed.
 BROWSABLE_FAMILIES = ("target", "state", "proximity", "calendar", "zone",
                       "cross_subject", "not_shipped")
 
-# Points in a feature series before it is thinned. 400 days of 30-minute slots
-# is 19,200 per subject, which is more resolution than a 1000px chart can draw.
+# Points in a feature series before it is thinned: more than a chart can draw.
 MAX_POINTS = 4000
 
 MAX_SERIES_DAYS = 400
 
 
 def feature_inventory(path) -> dict:
-    """What is in `/data/features.parquet`, by family, WITHOUT reading it.
+    """What is in `/data/features.parquet`, by family, from its footer ONLY.
 
-    Parquet's footer already carries a per-row-group, per-column null count and
-    min/max, and `features.write` does nothing to disable them. So the whole of
-    this answer -- a thousand columns, their null fractions and their ranges -- comes
-    out of the metadata. An unqualified `pd.read_parquet` here would be a
-    several-second stall and 134 MiB of RSS on a box that is also running Home
-    Assistant, every time somebody opened a tab.
-
-    `test_explore.py` makes `pd.read_parquet` raise and asserts this still
-    answers, which is what keeps that true under future edits.
+    A `pd.read_parquet` here would stall the box that also runs Home Assistant.
     """
     import pyarrow.parquet as pq
 
@@ -333,8 +249,7 @@ def feature_inventory(path) -> dict:
     try:
         meta = pq.ParquetFile(path).metadata
     except Exception as err:  # noqa: BLE001
-        # pyarrow names the path and its own internals, and this endpoint needs
-        # no login -- so the panel says to look and the log says what.
+        # pyarrow's error names the path, and this endpoint needs no login.
         _log.warning("the feature table could not be read: %s", err, exc_info=True)
         return unavailable("the feature table could not be read — the add-on log "
                            "has the error")
@@ -364,14 +279,10 @@ def feature_inventory(path) -> dict:
         "rows": rows,
         "columns": len(names),
         "row_groups": meta.num_row_groups,
-        # A row is one subject in one slot, and the slot length is this. The
-        # panel used to print its own literal 30 beside the row count, which is
-        # the sort of duplication that is right until the day it is not.
+        # A row is one subject in one slot, and the slot length is this.
         "grid_minutes": config.GRID_MINUTES,
-        # False when pyarrow wrote no column statistics. The families below are
-        # read off the schema and are still right; only the null fractions and
-        # ranges go missing. Degrading here is the point -- the alternative is
-        # reading 134 MiB to fill in a percentage.
+        # False when pyarrow wrote no column statistics: the families still come
+        # off the schema, and only null fractions and ranges go missing.
         "statistics": bool(stats),
         "families": [{
             "family": f,
@@ -423,9 +334,7 @@ def _mtime(path) -> str:
 def feature_series(path, subject: str, column: str, days: int | None = None) -> dict:
     """One column of the feature table, for one subject, over time.
 
-    Three columns of the parquet, never the table -- the same `columns=` trick
-    `train.load` uses, and which the changelog records as three quarters of the
-    training time when it was introduced there.
+    Three columns of the parquet, never the table.
     """
     import pyarrow.parquet as pq
 
@@ -435,9 +344,8 @@ def feature_series(path, subject: str, column: str, days: int | None = None) -> 
     if subject not in config.all_slugs():
         return unavailable(f"{subject} is not a subject in this installation")
 
-    # Validated against the schema before it is handed to pyarrow. An
-    # unchecked name here is an unvalidated string reaching a file reader, and
-    # the error it produces is a stack trace rather than an answer.
+    # Checked against the schema first: an unchecked name is an unvalidated
+    # string reaching a file reader.
     schema = pq.read_schema(path)
     if column not in schema.names:
         return unavailable(f"{column} is not a column in the feature table")
@@ -479,12 +387,9 @@ def feature_series(path, subject: str, column: str, days: int | None = None) -> 
 
 
 def _lag_safety(column: str) -> dict | None:
-    """Whether a daily-lag column may actually be used by its own horizon.
+    """Whether daily lag `tgt{h}h_lag{k}d` is legal for its horizon: `24k >= h`.
 
-    `tgt{h}h_lag{k}d` is written into the parquet for EVERY horizon and is only
-    valid where `24k >= h`. Charting one without saying so would present a
-    column the model is forbidden to read as though it were a live feature,
-    which is the most misleading thing this page could do.
+    It exists for EVERY horizon, so unmarked it would pass for a live feature.
     """
     if features.column_family(column) != "daily_lag":
         return None
@@ -508,21 +413,8 @@ def _lag_reason(horizon: int, days: int) -> str:
 def horizon_recipe(horizon: int, models: dict) -> dict:
     """Which columns horizon `h` actually fits on, and which it may not touch.
 
-    Reads nothing from disk. It exists because the leakage gate in
-    `features.safe_daily_lags` has always been correct and always been
-    invisible: the lag columns sit in the table for every horizon, and only this
-    says which of them the model at +36 h is allowed to look at.
-
-    Calls into `train` rather than rebuilding the list, so the page cannot
-    describe a recipe that has drifted from the one the pickle carries.
-
-    **Which list depends on which family won this horizon.** A pooled model
-    reads one list at every horizon, with `horizon_h` among the columns; a
-    dedicated model reads that horizon's own, which is ~44 columns rather than
-    ~1000. Reporting the pooled list unconditionally was describing the wrong
-    model for every dedicated horizon. Where nothing is served there is no
-    winner to describe, and the pooled list is the honest default -- it is the
-    one the melt this card explains is built from.
+    Calls `train` and reads no disk, so it cannot drift from the pickle's recipe.
+    The list is the winning family's; with nothing served, the pooled one.
     """
     from . import train as train_mod
 
@@ -543,12 +435,8 @@ def horizon_recipe(horizon: int, models: dict) -> dict:
         "available": True,
         "horizon_h": horizon,
         "target": features.TARGET_COLUMN,
-        # Asked per horizon rather than read off the RESIDUAL_BASE constant.
-        # It answers `state_now` every time today, and the card would be
-        # identical either way -- but whether the anchor should vary with the
-        # horizon is a live question (train.py records one measured attempt),
-        # and this way the card follows the answer instead of restating a
-        # constant.
+        # Asked per horizon rather than read off RESIDUAL_BASE, so the card
+        # follows the answer instead of restating a constant.
         "residual_base": train_mod.residual_base(horizon),
         "n_features": len(columns),
         "features": columns,
@@ -558,24 +446,20 @@ def horizon_recipe(horizon: int, models: dict) -> dict:
         "daily_lags": [{
             "days": k,
             # The long name: what the melt copies `tgt{h}h_lag{k}d` INTO, and
-            # only for the lags this horizon is allowed. An unsafe lag has no
-            # value on these rows at all rather than a value nobody reads.
+            # only for the lags this horizon is allowed.
             "column": f"lag{k}d",
             "safe": k in safe,
             "why": None if k in safe else _lag_reason(horizon, k),
         } for k in features.DAILY_LAGS],
         "climatology": f"wclim{features.CLIMATOLOGY_WEEKS}",
-        # What this horizon's fit reads off the parquet. For a dedicated model
-        # that is far fewer columns than it fits on is misleading only if the
-        # two are conflated -- `columns_for` includes the keys and the target.
+        # What this horizon's fit reads off the parquet: for a dedicated model,
+        # `columns_for` adds the keys and the target to what it fits on.
         "columns_read": (len(train_mod.columns_for(horizon))
                          if kind == "dedicated" else len(columns)),
         "embargo_hours": round(
             evaluate.embargo_for(horizon).total_seconds() / 3600, 2),
-        # Three values, and the third is not the second: "none" means a model
-        # was trained for this horizon and lost, `None` means none was ever
-        # trained. Both publish nothing; only one of them has a bake-off to
-        # report. `ships` below carries the same distinction as a bool|None.
+        # Three values: "none" means a model was trained and lost, `None` means
+        # none was ever trained; `ships` carries the same as a bool|None.
         "served_by": ("model" if metrics.get("ships")
                       else "none" if metrics else None),
         "ships": bool(metrics.get("ships")) if metrics else None,
@@ -590,31 +474,10 @@ def verification(source, log, settings, subject: str, horizon_h: int,
                  days: int | None = None) -> dict:
     """What was forecast for each slot at one horizon, against what happened.
 
-    `log` is the forecast record and `source` is the history; they are separate
-    arguments because they are separate questions. This used to read the log
-    through `source.store`, which an Influx install does not have -- so it
-    reported the add-on's own bookkeeping as a consequence of where history
-    comes from, and recorded nothing at all.
-
-    This is the only number the add-on reports that is about the SERVING path.
-    Everything on the Judge step is rolling-origin cross-validation computed at
-    training time over `features.parquet`: it answers "how would a model fitted
-    on folds [0,k) have scored on fold k". It cannot see the nowcast pin, a
-    sensor that went stale at 07:00, or the ship gate deciding this horizon is
-    not worth publishing -- and after "model or nothing" that last one is the
-    whole story, because an unserved horizon leaves a hole here rather than a
-    plausible number.
-
-    So the live Brier and the backtest Brier are different quantities and are
-    meant to be read side by side. A large gap between them is a finding about
-    the deployment, not a bug in this function.
-
-    Truth comes from `features.presence_events` + `features.slot_fraction` --
-    the same two calls `entity_series` makes and the same ones the feature
-    builder makes. Deriving it any other way here would show a number the model
-    never saw, which this module's docstring forbids for good reason. It also
-    means the house is handled correctly: with no group configured its presence
-    is the OR over the people, and `presence_events` already knows that.
+    The only SERVING-path score: cross-validation cannot see the nowcast pin, a
+    stale sensor or the ship gate, so a gap between the two Briers is a finding.
+    Truth is `presence_events` + `slot_fraction`, as the feature builder makes it.
+    `log` is its own argument because an Influx install has no `source.store`.
     """
     if subject not in config.all_slugs():
         return unavailable(f"{subject} is not a subject in this installation")
@@ -678,10 +541,7 @@ def verification(source, log, settings, subject: str, horizon_h: int,
 def _verification_summary(slots: int, served: int, scores) -> str:
     """One sentence, and it leads with the holes rather than the accuracy.
 
-    A horizon that is only published a third of the time is a more important
-    fact about it than its Brier over the third that was, and stating the score
-    first invites reading it as the horizon's record when it is the record of
-    its good days.
+    A horizon published a third of the time matters more than its Brier there.
     """
     if served == 0:
         return ("nothing was published at this horizon over the window -- the "
@@ -697,29 +557,22 @@ def _verification_summary(slots: int, served: int, scores) -> str:
 
 # --- model quality --------------------------------------------------------
 
-# The scalars that fit in a list. `per_fold`, `reliability`, `baselines` and
-# `fallback` are the bulky ones and are served only for the horizon being looked
-# at -- all 48 with their curves attached is about 250 KB for a card that shows
-# one of them at a time.
+# Scalars only: `per_fold`, `reliability`, `baselines` and `fallback` are
+# served just for the horizon being looked at.
 SCALARS = ("horizon_h", "brier", "log_loss", "auc", "mae_frac", "base_rate",
            "n_folds", "n_scored", "n_train_final", "best_baseline",
            "best_baseline_brier", "skill_vs_best_baseline_pct",
            "folds_beating_best_baseline", "sign_test_p", "ships",
            "brier_fold_min", "brier_fold_max",
-           # Which family won and what the other one scored. Cheap, and without
-           # them the two-family split is invisible everywhere except a
-           # training log -- the table is the only place the crossover between
-           # them can be read off.
+           # Which family won and what the other scored; without them the
+           # two-family split is invisible outside a training log.
            "kind", "rival_brier", "rival_kind")
 
 
 def _read_summary(models_dir) -> dict | None:
-    """`metrics.json`, or nothing.
+    """`metrics.json`, or None if it is missing or corrupt.
 
-    Preferred over unpickling the 48 artifacts: one JSON read, no scikit-learn
-    import in the request path, and `write_summary` puts the same `asdict` in
-    both places. A corrupt file is no answer rather than a reason to fail, which
-    is how `train.last_summary` already treats it.
+    Not the 48 pickles: one JSON read, and no scikit-learn in the request path.
     """
     import json
 
@@ -735,12 +588,7 @@ def _read_summary(models_dir) -> dict | None:
 
 
 def metrics_summary(models_dir, models: dict | None = None) -> dict:
-    """How every horizon scored, against the baseline it had to beat.
-
-    All of this has been written to disk on every train since the beginning and
-    none of it has ever been rendered -- the panel could say a horizon ships,
-    but not by how much, nor how much the folds disagreed.
-    """
+    """How every horizon scored, against the baseline it had to beat."""
     summary = _read_summary(models_dir)
     if summary is None:
         # The pickles carry their own copy, so a lost or truncated metrics.json
@@ -779,15 +627,7 @@ def metrics_summary(models_dir, models: dict | None = None) -> dict:
 
 
 def metrics_detail(models_dir, horizon: int, models: dict | None = None) -> dict:
-    """One horizon in full, including the two series nothing has ever drawn.
-
-    `per_fold` is how much the folds disagreed -- a pooled Brier that beats its
-    baseline on the strength of one lucky week is a different claim from one
-    that beats it in eleven weeks out of fifteen. `reliability` is a ten-bin
-    calibration curve, and calibration is the property this add-on actually
-    needs: a model can rank perfectly and still say 0.9 when it means 0.6, which
-    for "pre-heat if they will be home" is a wasted hour of gas.
-    """
+    """One horizon in full, with its per-fold scores and calibration curve."""
     summary = _read_summary(models_dir)
     metrics = None
     if summary:

@@ -12,22 +12,9 @@ import { absoluteTime, DAY_OPTIONS_RECENT, pretty } from '../format'
 /**
  * "Was it right?" -- the same card on both tabs, each owning its own controls.
  *
- * It answers the one question nothing else here can. Every score on the Judge
- * step is rolling-origin cross-validation computed at TRAINING time over the
- * feature table: "how would a model fitted on folds [0,k) have scored on fold
- * k". That is a real number and it is not this one. It cannot see the nowcast
- * pin, a tracker that went quiet at 07:00, or the ship gate deciding a horizon
- * is not worth publishing -- and it is computed from rows the deployed add-on
- * may never have served.
- *
- * So the live Brier here and the backtest Brier there are different quantities,
- * and a gap between them is a finding about the deployment rather than a bug in
- * either. Saying so beside the backtest number is half of why this card exists.
- *
- * Rendered on both Overview and Data, with its own slider on each: on Overview
- * it sits under the 48-hour forecast, which is the natural order -- what the
- * forecast says, then what happened last time it said it. On Data it closes
- * step five, whose subtitle already asks the question.
+ * The live Brier here and the backtest Brier on the Judge step are DIFFERENT
+ * quantities: the backtest cannot see the nowcast pin, a tracker that went
+ * quiet, or the ship gate, and is computed from rows never actually served.
  */
 
 /** The window the log actually keeps, which is not the window being charted.
@@ -44,9 +31,8 @@ export function VerificationCard({ status, defaultHorizon = 6 }: {
   defaultHorizon?: number
 }) {
   const [subject, setSubject] = useState<string>('')
-  // Debounced for the same reason the Data tab's slider is: dragging end to end
-  // is otherwise 48 requests, each of which reads the archive and rebuilds a
-  // grid, and this endpoint is deliberately not cached.
+  // Debounced: dragging end to end is otherwise 48 requests to an endpoint that
+  // is deliberately not cached.
   const [horizonInput, setHorizonInput] = useState<number>(defaultHorizon)
   const horizon = useDebounced(horizonInput, 250)
   const [days, setDays] = useState<string>('7')
@@ -86,15 +72,9 @@ export function VerificationCard({ status, defaultHorizon = 6 }: {
   })()
 
   return (
-    /* No subtitle. That this is the only score measured on the serving path
-       rather than at training time is the whole reason the card exists, and it
-       is written out at length in DOCS.md under "Was it right?" -- which is
-       where a reader who has not met the distinction should meet it, not on a
-       card they see every time they open the panel. */
     <Card title="Was it right?">
-      {/* The same control rows the Data tab's cards use, rather than a bare
-          pair of selects: a `Select` is wide enough to need a line of its own,
-          which is exactly what `Row control` is for. */}
+      {/* `Row control`, not bare selects: a `Select` is wide enough to need a
+          line of its own. */}
       <Row
         icon="people"
         control

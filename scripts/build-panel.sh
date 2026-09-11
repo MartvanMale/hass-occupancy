@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Build the Ingress panel into <tree>/panel/dist, never on the Home Assistant
-# box; the result is committed and the Dockerfile only COPYs it. DEVELOPMENT.md
-# ("The panel") says why. Finishes by stamping dist/ with a hash of its inputs so
-# a stale bundle can be caught later -- scripts/panel-source-hash.sh.
-#
-# `--user` is not optional: without it npm writes node_modules/ and dist/ back
-# root-owned and the next non-root build cannot overwrite them.
+# Build the Ingress panel into <tree>/panel/dist, never on the Home Assistant box;
+# the result is committed and the Dockerfile only COPYs it. Finishes by stamping
+# dist/ with scripts/panel-source-hash.sh so a stale bundle can be caught later.
+# `--user` is not optional, or node_modules/ and dist/ come back root-owned.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . scripts/container-guard.sh

@@ -1,27 +1,8 @@
 """How long until they are home, given where they are and which way they are going.
 
-This answers a different question from the rest of the stack, and the split
-matters. `train`/`predict` answer **"will they be home at t+h?"** -- a
-probability, on an hourly grid. This module answers **"if they are on their way,
-how many minutes?"** -- a duration, at minute resolution.
-
-Both are needed and neither substitutes for the other:
-
-  * The occupancy model cannot resolve better than its horizon grid, so the best
-    it can ever say is "home within the next hour". For pre-heating that is the
-    difference between a warm house and an hour of wasted gas.
-  * This module is CONDITIONAL ON ARRIVING. It is trained only on samples that
-    were actually followed by an arrival, so it has no opinion on whether
-    somebody is coming home at all -- ask it about a person sitting at their
-    desk and it will cheerfully tell you how long the drive would take. The
-    probability has to come from the occupancy model.
-
-Trained on the raw proximity series rather than the 30-minute feature table,
-because quantising an ETA to half an hour throws away most of its value.
-
-MEASURED on a two-person household with a few hundred recorded arrivals each.
-The two people's usual journeys differed enough in length that they need
-separate models -- a single pooled "minutes per km" was wrong for both.
+CONDITIONAL ON ARRIVING: trained only on samples followed by an arrival, so it
+has no opinion on whether anybody is coming; that is the occupancy model's job.
+Uses the raw proximity series: half-hour slots lose most of an ETA's value.
 """
 
 from __future__ import annotations
@@ -50,71 +31,33 @@ ARRIVED_M = 200
 # whatever you do, and the samples are dominated by GPS jitter in the driveway.
 MIN_JOURNEY_KM = 1.0
 
-# How far ahead an arrival may be and still be attributed to the current
-# position. Beyond this the link is not a journey, it is a coincidence -- and
-# training on it teaches the model that being at work predicts arriving in
-# four hours, which is a calendar fact, not a travel time.
+# Beyond this an arrival is a coincidence, not a journey: training on it teaches
+# that being at work predicts arriving in four hours.
 MAX_LEAD_MIN = 180
 
-# Window used to estimate closing speed from the distance trace.
+# Closing-speed window; long enough that a traffic light does not zero it.
 SPEED_WINDOW_MIN = 15
 
-# Below this closing speed, no ETA is served at all.
-#
-# **This enforces at SERVING TIME the condition `MAX_LEAD_MIN` imposes on
-# TRAINING, and without it the sensor is confidently wrong most of the day.**
-# Training only ever sees moments within 180 minutes of an arrival, so the model
-# cannot represent a longer wait -- and nothing in the features distinguishes
-# "stationary at 32 km at 17:50" from "stationary at 32 km at 12:10", which are
-# two hundred minutes apart. Asked the second, it answered 169 minutes: the top
-# of its range, for somebody who had not left her desk.
-#
-# MEASURED against uncensored truth (minutes to the real next arrival, however
-# far off) over ~19,500 moments for one person and ~7,600 for the other:
-#
-#   stationary or moving away   13-27% are truly within 180 min   median 585 min
-#   closing > 1 km/h            38-51%
-#   closing > 5 km/h            57-58%                            median 30-58 min
-#
-# 5 km/h rather than any positive value because the fraction plateaus there and
-# because it is the line between walking about at work and actually travelling.
-# The cost is real -- the sensor is now silent for most of the day -- but it was
-# wrong for most of that time, and where it does answer it is very good indeed:
-# MAE 4.3 and 5.4 minutes while closing, against 11-15 while stationary.
-#
-# The 15-minute window this is measured over is what keeps it steady: a stop at
-# a traffic light does not zero a quarter-hour of approach.
+# Enforces at SERVING the condition `MAX_LEAD_MIN` imposes on TRAINING, or a
+# person at their desk gets an answer near the top of the range. 5 km/h is where
+# the share truly arriving plateaus: walking about at work versus travelling.
 MIN_CLOSING_KMH = 5.0
 
 FEATURES = ["distance_km", "closing_kmh", "dir_towards", "dir_away", "hour", "dow"]
 
-# ETA is per PERSON, never for `house`. A house does not travel; its arrival is
-# whichever person gets back first, so serving derives it as the min of the
-# people rather than fitting a third model on a mixture of commutes that may be
-# very different lengths.
 def eta_subjects() -> tuple[str, ...]:
-    """People with any distance signal at all -- real or synthesised.
-
-    Never the house: a house does not travel, and its arrival is whichever
-    person gets back first, which serving computes as a min() rather than a
-    third model over a mixture of different commutes.
+    """People with any distance signal, real or synthesised. Never the house: a
+    house does not travel, and serving takes the min over the people.
     """
     return tuple(p.slug for p in config.PEOPLE)
 
-# Fold geometry, deliberately looser than evaluate.TEST_DAYS.
-#
-# These samples are journeys, not slots: a person who travels less can yield
-# only ~1200 usable rows across a whole history, so the occupancy folds' 200-row
-# minimum produced ZERO folds for them. 14-day windows with a 50-row floor
-# give ~12.
-# Lower floors mean noisier per-fold numbers, which is why the ship gate below
-# also demands a real effect size and not just a majority.
+# Looser than the occupancy folds, whose floor gave ZERO folds for a person who
+# travels little; noisier folds are why the gate also demands an effect size.
 FOLD_DAYS = 14
 FOLD_MIN_ROWS = 50
 
-# Minimum improvement over constant-speed for the model to be served. An ETA
-# that is 5% better than "distance divided by average speed" does not change a
-# pre-heating decision and is not worth the moving parts.
+# Minimum skill over constant speed: an ETA 5% better than that does not change
+# a pre-heating decision.
 MIN_SKILL_PCT = 15.0
 
 
@@ -137,11 +80,8 @@ class EtaMetrics:
 
 
 def _distance_entity(subject: str) -> tuple[str | None, str | None]:
-    """(distance, direction) entity ids for one person, real or synthesised.
-
-    Never raises for an unconfigured person -- it used to be a bare dict lookup
-    and threw KeyError, which callers then had to catch by exception type rather
-    than by asking.
+    """(distance, direction) entity ids for one person, real or synthesised;
+    (None, None) for an unconfigured one, never a KeyError.
     """
     from .discover import synthetic_distance_entity
     try:
@@ -155,9 +95,7 @@ def _distance_entity(subject: str) -> tuple[str | None, str | None]:
 
 def traces(source, subject: str, start: str, stop: str | None = None) -> pd.DataFrame:
     """Raw distance and direction for one subject, on the union of their events.
-
-    No resampling: the proximity sensor already fires every 0.5-3 minutes while
-    somebody is moving, and it is the moving samples this module cares about.
+    No resampling: the sensor already fires every 0.5-3 minutes while moving.
     """
     distance_entity, direction_entity = _distance_entity(subject)
     if distance_entity is None:
@@ -186,18 +124,14 @@ def traces(source, subject: str, start: str, stop: str | None = None) -> pd.Data
 
 
 def feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """The model's inputs for every observation. No target, no filtering.
-
-    Shared by training and serving on purpose: if the two computed
-    `closing_kmh` even slightly differently, the served number would be drawn
-    from a distribution the model never saw, and nothing would say so.
+    """The model's inputs for every observation, shared by training and serving:
+    a `closing_kmh` computed differently would be one the model never saw.
     """
     if frame.empty:
         return pd.DataFrame(columns=FEATURES)
 
-    # Everything below works in epoch nanoseconds. Mixing a tz-aware index with
-    # the tz-naive datetime64 that .values and .rolling() hand back is a
-    # TypeError waiting to happen, and the arithmetic is clearer this way.
+    # Epoch nanoseconds: mixing a tz-aware index with the tz-naive datetime64
+    # that .values and .rolling() hand back is a TypeError waiting to happen.
     stamp = frame.index.asi8.astype("float64")
 
     # Closing speed: km lost per hour over the trailing window. Positive means
@@ -224,11 +158,8 @@ def feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_samples(frame: pd.DataFrame) -> pd.DataFrame:
-    """Training rows: features plus minutes-until-the-next-arrival.
-
-    Rows with no arrival inside `MAX_LEAD_MIN` are dropped -- which is exactly
-    the conditional-on-arriving caveat in the module docstring, and the reason
-    this cannot be read as "are they coming home".
+    """Training rows: features plus minutes until the next arrival. Rows with no
+    arrival inside `MAX_LEAD_MIN` are dropped, hence conditional on arriving.
     """
     out = feature_frame(frame)
     if out.empty:
@@ -250,18 +181,9 @@ def build_samples(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def current_row(source, subject: str, lookback_h: int = 6) -> pd.DataFrame | None:
-    """The newest feature row for one subject, or None if there is nothing usable.
-
-    None in two cases, and both mean "the model was never trained on this".
-
-    **Already home** (inside `MIN_JOURNEY_KM`): "how long until you get home"
-    has no meaning.
-
-    **Not travelling** (closing slower than `MIN_CLOSING_KMH`): the model is
-    conditional on being ON a journey home, and `MAX_LEAD_MIN` enforces that in
-    training by discarding anything more than three hours out. Serving without
-    the same condition asks it a question it has never seen and gets an answer
-    near the top of its range -- see the constant for the measurement.
+    """The newest feature row for one subject, or None where the model was never
+    trained: already home, or not travelling, since serving without the closing
+    speed condition asks what `MAX_LEAD_MIN` removed from training.
     """
     start = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=lookback_h))
     frame = traces(source, subject, start.strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -277,12 +199,9 @@ def current_row(source, subject: str, lookback_h: int = 6) -> pd.DataFrame | Non
 
 
 def _estimator() -> HistGradientBoostingRegressor:
-    """Small, and fitted on log-minutes.
-
-    Log because the target spans 1 to 180 minutes and the errors that matter are
-    proportional -- being ten minutes out on a two-hour drive is fine, on a
-    twelve-minute one it is the whole answer. Squared error on raw minutes would
-    optimise almost entirely for the long journeys.
+    """Small, and fitted on log-minutes: the errors that matter are
+    proportional, and ten minutes out is fine on a two-hour drive, not on a
+    twelve-minute one.
     """
     return HistGradientBoostingRegressor(
         max_iter=200, learning_rate=0.06, max_leaf_nodes=15,
@@ -314,9 +233,8 @@ def train_one(source, subject: str, start: str | None = None,
     if not folds:
         raise ValueError(f"{subject}: no folds from {len(samples)} samples")
 
-    # Baseline: constant speed, the implied km/h of the training half. This is
-    # the "distance divided by how fast we usually get home" answer, and the
-    # model has to beat it or it is not earning its keep.
+    # Baseline: constant speed, the implied km/h of the training half; the model
+    # has to beat it.
     fold_mae, base_mae, per_fold = [], [], []
     for fold in folds:
         tr, te = samples.iloc[fold.train_idx], samples.iloc[fold.test_idx]
@@ -371,13 +289,8 @@ def save(model, metrics: EtaMetrics, models_dir: Path = MODELS_DIR) -> Path:
 
 
 def load_models(models_dir: Path = MODELS_DIR) -> dict[str, dict]:
-    """The ETA artifacts this build can serve.
-
-    The feature list travels in the artifact and is the contract: an artifact
-    fitted on a different `FEATURES` is refused here, with a line saying so,
-    rather than handed to scikit-learn to fail inside `predict_minutes` on
-    every cycle -- which used to be swallowed, so the sensor read `unknown`
-    forever and nothing said why.
+    """The ETA artifacts this build can serve. The stored feature list is the
+    contract: a mismatch is refused here with a line, not failed every cycle.
     """
     out = {}
     stale = []

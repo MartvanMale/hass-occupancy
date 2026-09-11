@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """Serve the panel against a demo `/data`, with no Home Assistant and no broker.
 
-`runtime.bootstrap()` re-reads timezone, country and the home's LATITUDE AND
-LONGITUDE from Home Assistant, so pointing it at a real install would put real
-coordinates on screen. This substitutes a client answering from a fictional
-household; everything else is the real add-on. No broker and no listener are the
-add-on's documented degraded paths, not special cases added here.
-
-    scripts/demo-serve.py --data ~/occupancy-demo/data --port 8099
+`runtime.bootstrap()` re-reads the home's LATITUDE AND LONGITUDE from Home
+Assistant, so pointing it at a real install would put real coordinates on screen;
+this substitutes a client answering from a fictional household.
 """
 from __future__ import annotations
 
@@ -21,9 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "occupancy-forecast
 from occupancy_forecast import config, runtime  # noqa: E402
 from occupancy_forecast.sources import HistoryStore, StoreSource  # noqa: E402
 
-# What Home Assistant would report. The extra unticked person and zone are here
-# so the Config view shows a CHOICE rather than a list of exactly what is already
-# enabled, which is what that page actually looks like on a real install.
+# What Home Assistant would report. The extra unticked person and zone make the
+# Setup view show a CHOICE, as it does on a real install.
 ENTITIES = [
     ("person.alice", "home", "Alice"),
     ("person.bob", "not_home", "Bob"),
@@ -36,10 +31,8 @@ ENTITIES = [
     ("sensor.home_alice_direction_of_travel", "stationary", "Alice direction of travel"),
     ("sensor.home_bob_distance", "8100", "Bob distance from home"),
     ("sensor.home_bob_direction_of_travel", "away_from", "Bob direction of travel"),
-    # The companion app's next-alarm sensors. `runtime.refresh_environment`
-    # rediscovers these from the live states on every start, so they have to be
-    # here as well as in the archive -- otherwise the Setup view reports "no
-    # companion-app next-alarm sensor found" about an entity the store is full of.
+    # Next-alarm sensors: `runtime.refresh_environment` rediscovers these from live
+    # states on every start, so they must be here as well as in the archive.
     ("sensor.phone_alice_next_alarm", "absent", "Alice phone next alarm"),
     ("sensor.phone_bob_next_alarm", "absent", "Bob phone next alarm"),
     ("schedule.household_day", "on", "Household day"),
@@ -67,16 +60,9 @@ class DemoHomeAssistant:
                 for entity, state, name in ENTITIES]
 
     def history(self, entity_ids, start, stop=None) -> list[list[dict]]:
-        """Nothing, except the day schedule the night shading is built from.
-
-        `StoreSource.collect` calls this to top up the archive, and the demo's
-        archive is complete and static -- so answering anything there would
-        write invented rows into it. The one exception is `night.night_bands`,
-        which asks for a single `schedule.*` entity and recovers the household's
-        week from its history, because Home Assistant will not say what a
-        schedule is going to do next. It is asked for on its own, which is what
-        makes the two cases safe to tell apart.
-        """
+        """Nothing, except the day schedule the night shading is built from, which
+        is always asked for on its own. `StoreSource.collect` calls this to top up
+        a complete, static archive, so any other answer would write invented rows."""
         if list(entity_ids) != [DAY_SCHEDULE]:
             return []
 
@@ -85,9 +71,8 @@ class DemoHomeAssistant:
         end = (dt.datetime.fromisoformat(stop) if stop
                else dt.datetime.now(dt.timezone.utc)).astimezone(zone)
 
-        # A day either side, so the state in force at the window's first sample
-        # is a real event rather than a missing one -- `night.weekly_pattern`
-        # skips any slot it cannot resolve, and a skipped slot is unshaded.
+        # A day either side, so the state in force at the first sample is a real
+        # event: `night.weekly_pattern` leaves any slot it cannot resolve unshaded.
         changes: list[dt.datetime] = []
         day = begin.date() - dt.timedelta(days=1)
         while day <= end.date() + dt.timedelta(days=1):
@@ -97,9 +82,8 @@ class DemoHomeAssistant:
             changes.append(midnight + dt.timedelta(hours=SLEEP_HOUR))
             day += dt.timedelta(days=1)
 
-        # Sorted as datetimes, not as strings: the ISO offset changes at a DST
-        # transition, so "+01:00" and "+02:00" do not sort in time order, and
-        # `night._sample` walks the list assuming they do.
+        # Sorted as datetimes, not strings: the ISO offset changes at a DST
+        # transition, and `night._sample` assumes time order.
         changes.sort()
         return [[{"state": "on" if at.hour < SLEEP_HOUR else "off",
                   "last_changed": at.isoformat()}

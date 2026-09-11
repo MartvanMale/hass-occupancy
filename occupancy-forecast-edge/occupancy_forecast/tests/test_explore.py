@@ -1,12 +1,8 @@
-"""What the Data tab reads, and the two promises it has to keep.
+"""What the Data tab reads, and its two promises.
 
-The promises are that nothing here recomputes a feature its own way, and that
-nothing here reads a 134 MiB table to answer a question about its columns. Both
-are easy to break by accident and neither is visible when it breaks -- a second
-definition of `home_frac` shows a plausible wrong number, and a full read just
-makes the tab slow. So both are asserted rather than described.
-
-Everything runs against the synthetic household in conftest.
+Nothing here recomputes a feature its own way, and nothing reads the whole
+table to answer a question about its columns. Both are invisible when they
+break, so both are asserted rather than described.
 """
 
 import datetime as dt
@@ -25,12 +21,9 @@ def _ms(when: dt.datetime) -> int:
 
 
 class FakeSource:
-    """A source that owns a store.
-
-    `explore` mostly reaches through `.store`, but `verification` goes via
-    `features.presence_events`, which asks the SOURCE -- so this delegates the
-    two reads that protocol requires, exactly as `sources.ha.StoreSource` does.
-    A fake thinner than the protocol would have let a broken call site pass.
+    """A source that owns a store. `explore` reaches through `.store`, but
+    `verification` goes via `features.presence_events`, which asks the SOURCE
+    -- so this delegates both.
     """
 
     def __init__(self, store):
@@ -78,10 +71,8 @@ def test_the_inventory_names_every_entity_and_says_which_are_tracked(stocked):
 
 
 def test_the_collectors_own_heartbeat_is_not_in_the_inventory(stocked):
-    """It is bookkeeping, not a signal, and `tracked` is false for it -- so
-    listing it drew an "unused" chip and, worse, made it the entity the card's
-    "N not read" count was counting, under a sentence saying such entities are
-    left over from an earlier configuration. Neither is true of the heartbeat.
+    """The heartbeat is bookkeeping, not a signal. Listing it drew an "unused"
+    chip and made it the entity the "N not read" count was counting.
     """
     result = explore.archive_inventory(FakeSource(stocked), make_settings())
     assert HEARTBEAT_ENTITY not in {e["entity_id"] for e in result["entities"]}
@@ -93,9 +84,8 @@ def test_the_collectors_own_heartbeat_is_not_in_the_inventory(stocked):
 
 
 def test_a_configured_entity_with_no_rows_still_appears(stocked):
-    """The worse half of the same question. person.bob is configured and has
-    never produced a row, so a GROUP BY over the table cannot mention him -- and
-    a household training with a member missing is exactly what wants saying."""
+    """person.bob is configured and has never produced a row, so a GROUP BY over
+    the table cannot mention him -- and a member missing is what wants saying."""
     result = explore.archive_inventory(FakeSource(stocked), make_settings())
     bob = next(e for e in result["entities"] if e["entity_id"] == "person.bob")
     assert bob["rows"] == 0
@@ -113,13 +103,9 @@ def test_kinds_are_read_off_the_values_not_the_entity_id(stocked):
 
 
 def test_the_heartbeat_is_its_own_kind_and_not_a_presence_series(stocked):
-    """Its value is "ok" on every row, so shape alone calls it presence -- and
-    charting it would draw the fraction of each slot the collector spent at
-    home. This package writes that row, so it may name it.
-
-    Asserted through `entity_series` rather than the inventory, which no longer
-    lists it: the endpoint is still reachable by entity id, so the guard has to
-    hold there. Dropping it from one card is not the same as deleting it.
+    """Its value is "ok" on every row, so shape alone calls it presence.
+    Asserted through `entity_series` rather than the inventory: the endpoint is
+    still reachable by entity id.
     """
     result = explore.entity_series(FakeSource(stocked), make_settings(),
                                    HEARTBEAT_ENTITY, days=2)
@@ -169,9 +155,8 @@ def test_a_presence_entity_grids_to_the_same_home_frac_the_features_do(stocked):
 
 
 def test_an_unobserved_slot_is_null_and_never_a_zero(stocked):
-    """`slot_fraction` returns NaN for a slot it did not see, because an
-    unobserved slot is not an empty house. It has to reach the browser as null:
-    a zero would draw as "away" and read as fact."""
+    """An unobserved slot is not an empty house. It has to reach the browser as
+    null: a zero would draw as "away" and read as fact."""
     result = explore.entity_series(FakeSource(stocked), make_settings(),
                                    "person.alice", days=30)
     values = [g["v"] for g in result["gridded"]]
@@ -215,9 +200,8 @@ def test_a_window_cannot_be_widened_past_the_cap(stocked, asked, expected):
 
 
 def test_the_raw_events_are_capped_from_the_recent_end(store):
-    """When there are more transitions than fit, the tail is what anyone
-    inspecting wants -- taking the head would show the oldest data and call it
-    a truncation."""
+    """The tail is what anyone inspecting wants; taking the head would show the
+    oldest data and call it a truncation."""
     now = dt.datetime.now(dt.timezone.utc)
     store.append([("person.alice", _ms(now - dt.timedelta(seconds=i * 10)),
                    "home" if i % 2 else "not_home")
@@ -261,9 +245,9 @@ def parquet(tmp_path):
 
 
 def test_the_column_inventory_never_reads_the_table(parquet, monkeypatch):
-    """The promise that keeps the tab fast. Everything the inventory reports is
-    in the parquet footer; if a future edit reaches for the data pages, this is
-    what catches it -- not a stopwatch on a 134 MiB file nobody has in a test."""
+    """The promise that keeps the tab fast: everything the inventory reports is
+    in the parquet footer. If a future edit reaches for the data pages, this
+    catches it."""
     def boom(*_args, **_kwargs):
         raise AssertionError("feature_inventory must not read the table")
 
@@ -306,9 +290,9 @@ def test_a_missing_feature_table_says_it_has_not_been_built(tmp_path):
 
 
 def test_an_unreadable_feature_table_does_not_hand_the_error_back(tmp_path, caplog):
-    """`/api/explore/features` needs no login -- `admin_only` guards the POSTs
-    and nothing else -- and pyarrow's message names the path it failed on. So
-    the panel gets a sentence and the log gets the exception."""
+    """`/api/explore/features` needs no login and pyarrow's message names the
+    path it failed on, so the panel gets a sentence and the log gets the
+    exception."""
     path = tmp_path / "features.parquet"
     path.write_bytes(b"not a parquet file")
     caplog.set_level("WARNING")
@@ -323,9 +307,8 @@ def test_an_unreadable_feature_table_does_not_hand_the_error_back(tmp_path, capl
 
 
 def test_a_feature_series_reads_three_columns_not_the_table(parquet, monkeypatch):
-    """It does read data -- but only the three columns it names, which is the
-    same trick `train.load` uses and which the changelog records as three
-    quarters of the training time."""
+    """It does read data -- but only the three columns it names, the same trick
+    `train.load` uses."""
     seen = {}
     real = pd.read_parquet
 
@@ -393,12 +376,8 @@ def test_the_recipe_matches_what_the_model_actually_fits(horizon):
 
 @pytest.mark.parametrize("horizon", config.HORIZONS_H)
 def test_the_recipe_names_the_anchor_the_fit_actually_uses(horizon):
-    """The card must name the anchor the fit uses, whatever that turns out to be.
-
-    `train.residual_base` answers `state_now` at every horizon today. Asserting
-    against the function rather than against that string is the point: if it is
-    ever made to vary again, this test follows it instead of quietly describing
-    half the horizons as anchored on something they are not."""
+    """Asserted against `train.residual_base` rather than the string it returns
+    today: if the anchor is ever made to vary, this test follows it."""
     from occupancy_forecast import train
 
     recipe = explore.horizon_recipe(horizon, {})
@@ -413,12 +392,9 @@ def test_the_recipe_reads_nothing_from_disk(monkeypatch):
 
 
 def test_a_horizon_reports_what_is_serving_it():
-    """Three values, and the third is not the second.
-
-    "none" is a model that was trained here and lost; `None` is a horizon
-    nothing has ever been fitted for. Both publish nothing, so both draw the
-    same grey cell -- but only one of them has a bake-off to show, which is
-    what `best_baseline` and the Data tab hang off.
+    """Three values, and the third is not the second: "none" is a model that
+    was trained and lost, `None` a horizon never fitted. Only one has a bake-off
+    to show.
     """
     models = {6: {"metrics": {"ships": True}},
               24: {"metrics": {"ships": False, "best_baseline": "persistence"}}}
@@ -549,17 +525,16 @@ def _slots(days: int):
 @pytest.fixture
 def home_all_week(store):
     """alice at home throughout, seeded before the window so every slot is
-    observed. Truth is then 1.0 everywhere and any hole in the output is the
-    forecast's, which is what these tests are about."""
+    observed: truth is 1.0 everywhere and any hole in the output is the
+    forecast's."""
     now = dt.datetime.now(dt.timezone.utc)
     store.append([("person.alice", _ms(now - dt.timedelta(days=30)), "home")])
     return store
 
 
 def test_verification_puts_the_forecast_on_the_slot_it_was_about(home_all_week):
-    """The join is an equality on the grid. If the write side and the read side
-    disagreed about which slot a forecast was for, everything would still render
-    -- just never line up -- so this asserts the alignment directly."""
+    """The join is an equality on the grid. If the write and read sides disagreed
+    about the slot, everything would still render and never line up."""
     slots = _slots(2)
     home_all_week.append_forecasts(
         [("alice", int(t.timestamp() * 1000), 6, 0.75) for t in slots])
@@ -575,9 +550,8 @@ def test_verification_puts_the_forecast_on_the_slot_it_was_about(home_all_week):
 
 
 def test_a_slot_nothing_was_published_for_is_a_null_and_not_a_zero(home_all_week):
-    """The Part A pairing. An unserved horizon must reach the chart as a hole,
-    because a 0.0 there reads as "certainly away" -- the sharpest lie the panel
-    can tell, and the one the serving rule was changed to stop telling."""
+    """An unserved horizon must reach the chart as a hole, because a 0.0 there
+    reads as "certainly away" -- the sharpest lie the panel can tell."""
     slots = _slots(2)
     published, withheld = slots[:-6], slots[-6:]
     home_all_week.append_forecasts(
@@ -607,9 +581,8 @@ def test_the_holes_lead_the_summary_rather_than_the_score(home_all_week):
 
 
 def test_before_anything_has_come_due_it_says_so(home_all_week):
-    """The normal state for the first `horizon` hours after a deploy, and
-    forever for a horizon the model never earns. Not a 404, not an empty chart
-    with a 0.000 Brier under it."""
+    """The normal state for the first `horizon` hours after a deploy. Not a 404,
+    not an empty chart with a 0.000 Brier under it."""
     result = explore.verification(FakeSource(home_all_week), home_all_week,
                                   make_settings(), "alice", 6, days=2)
     assert result["available"] is False
@@ -640,10 +613,8 @@ def test_an_unknown_subject_or_horizon_is_an_answer(home_all_week):
 
 
 def test_an_influx_installation_is_verified_like_any_other(home_all_week):
-    """The record is the add-on's own output; truth comes from the SOURCE, and
-    `presence_events` reads Influx perfectly well. Asking the source for a
-    store made a card about the serving path unavailable on the one kind of
-    install that was also recording nothing to put in it."""
+    """The record is the add-on's own output and truth comes from the SOURCE,
+    which `presence_events` reads on Influx perfectly well."""
     class Influx:
         """No `.store`, and both reads the protocol requires."""
 

@@ -1,17 +1,7 @@
 # The development build. See DEVELOPMENT.md for how this tree relates to
-# ../occupancy-forecast and how each is deployed.
-#
-# `version` stays the plain `-dev` string: deploy-edge.sh stamps the DEPLOYED
-# copy with the commit sha, so bumping this file would put a version diff in
-# every commit for no gain.
-#
-# 0.2.1 and not 0.2.0: 0.2.0 was tagged, pushed and installed before it was
-# found not to start, and then reverted. Nobody should ever be offered a second,
-# different 0.2.0.
-#
-# If the slug cannot be read from Supervisor the add-on falls back to stable's
-# prefix and logs a warning -- that is a silent MQTT collision, so do not
-# ignore the line.
+# ../occupancy-forecast and how each is deployed. `version` stays the plain
+# `-dev` string: deploy-edge.sh stamps the DEPLOYED copy with the commit sha.
+# A slug that cannot be read falls back to stable's prefix -- a silent MQTT collision.
 name: Occupancy Forecast Edge
 version: "0.2.3-dev"
 slug: occupancy_forecast_edge
@@ -35,9 +25,7 @@ panel_title: Occupancy Edge
 advanced: true
 stage: experimental
 
-# Supervisor restarts the add-on when this stops answering 2xx. /health returns
-# 503 while the worker is stalled -- the failure this add-on once sat in for
-# eleven hours with every other signal green.
+# Supervisor restarts on a non-2xx; /health returns 503 while the worker is stalled.
 watchdog: "http://[HOST]:[PORT:8099]/health"
 
 services:
@@ -63,23 +51,17 @@ options:
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
   source: list(store|influx)
-  # HA user ids allowed to POST (save config, train, reload). EMPTY MEANS
-  # EVERYONE: ingress proves who the caller is, not whether they may retrain
-  # the house.
+  # EMPTY MEANS EVERYONE: ingress proves who the caller is, not whether they may retrain the house.
   admin_users:
     - str
-  # `str?`, not `url?`: the default is "" (the option is only read when source
-  # is influx) and Supervisor's `url` validator rejects an empty string, which
-  # made every install with the default options fail validation at start.
+  # `str?`, not `url?`: the default is "" and Supervisor's url validator rejects
+  # an empty string.
   influx_url: str?
   influx_org: str?
   influx_bucket: str?
   influx_token: password?
-  # An MQTT broker that is not a Supervisor add-on. When mqtt_host is set these
-  # five win over the Supervisor mqtt service; when it is empty the service is
-  # used as before. A broker outside Supervisor (EMQX or Mosquitto on another
-  # host) registers no service, so without these the add-on could only ever
-  # publish through the Mosquitto add-on.
+  # A broker that is not a Supervisor add-on registers no service; set mqtt_host
+  # and these five win.
   mqtt_host: str?
   mqtt_port: port?
   mqtt_user: str?

@@ -1,6 +1,5 @@
-# Editor-side half of the line-ending and whitespace policy; .gitattributes is
-# the half git enforces. Advisory only -- it acts when a file is opened and
-# saved, so it cannot catch a bad commit, only stop one being written.
+# Editor-side half of the line-ending policy; .gitattributes is the half git
+# enforces. Advisory only: it stops a bad save, not a bad commit.
 root = true
 
 [*]
@@ -14,9 +13,8 @@ indent_size = 2
 [{*.py,*.sh,Dockerfile}]
 indent_size = 4
 
-# IBM Plex's licence verbatim, CRLF as shipped. It is inside the
-# panel/dist/.source-hash input set, so a save that trims or re-ends it fails
-# scripts/test.sh on both trees -- before git ever sees the edit.
+# IBM Plex's licence verbatim, CRLF as shipped: it is inside the .source-hash
+# input set, so a save that re-ends it fails scripts/test.sh.
 [OFL.txt]
 end_of_line = crlf
 insert_final_newline = false
