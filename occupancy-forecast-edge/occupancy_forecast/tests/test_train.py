@@ -27,8 +27,9 @@ HORIZON = 6
 TEST_HORIZONS = (1, HORIZON, 24, 25, 48)
 
 
-def _feature_table(days: int = 160) -> Path:
-    """A synthetic occupancy table with a real daily rhythm in it."""
+def _feature_table(days: int = 80) -> Path:
+    """A synthetic occupancy table with a real daily rhythm in it. 80 days is
+    five full-geometry folds; the verdicts do not move at 160, the cost triples."""
     rng = np.random.default_rng(0)
     slots = pd.date_range("2026-01-01", periods=days * config.SLOTS_PER_DAY,
                           freq=f"{config.GRID_MINUTES}min", tz="UTC", name="time")
@@ -77,7 +78,7 @@ def _feature_table(days: int = 160) -> Path:
     return path
 
 
-# Built lazily so importing the module does not do 15 folds of real work, and
+# Built lazily so importing the module does not do five folds of real work, and
 # so the conftest fixture has configured an installation first.
 _CACHE: dict = {}
 
@@ -331,14 +332,24 @@ def test_the_house_is_a_training_subject_in_both_families():
     assert f"other_{config.HOUSE_SLUG}" in train.base_features()
 
 
-def test_every_horizon_gets_a_verdict_from_one_model(tmp_path):
+def _trained() -> tuple[Path, dict]:
+    """One `train_all` for every test that only reads what it wrote. Lazy like
+    `_fitted`, not a module fixture: those run before conftest configures."""
+    if "trained" not in _CACHE:
+        models_dir = Path(tempfile.mkdtemp())
+        summary = train.train_all(_fitted()["path"], models_dir,
+                                  horizons=TEST_HORIZONS, n_jobs=1)
+        _CACHE["trained"] = (models_dir, summary)
+    return _CACHE["trained"]
+
+
+def test_every_horizon_gets_a_verdict_from_one_model():
     """One fit, 48 gates. The gate is a property of the evaluation, and
     `horizons_shipping`/`served_by` are what a promotion is judged on."""
-    path = _fitted()["path"]
-    summary = train.train_all(path, tmp_path, horizons=TEST_HORIZONS, n_jobs=1)
+    models_dir, summary = _trained()
 
     assert list(summary) == [str(h) for h in TEST_HORIZONS]
-    assert (tmp_path / train.POOLED_NAME).exists()
+    assert (models_dir / train.POOLED_NAME).exists()
     for horizon in TEST_HORIZONS:
         m = summary[str(horizon)]
         assert m["horizon_h"] == horizon
@@ -353,7 +364,8 @@ def test_a_dedicated_artifact_from_an_earlier_train_does_not_survive_a_failed_ho
     failed THIS train must lose last train's: it would pass the version check
     and serve while metrics.json says it has no candidate."""
     path = _fitted()["path"]
-    failing = TEST_HORIZONS[0]
+    horizons = (1, HORIZON)          # one to fail, one to survive it
+    failing = horizons[0]
     stale = tmp_path / train.DEDICATED_NAME.format(horizon=failing)
     tmp_path.mkdir(parents=True, exist_ok=True)
     with stale.open("wb") as fh:
@@ -369,11 +381,11 @@ def test_a_dedicated_artifact_from_an_earlier_train_does_not_survive_a_failed_ho
         return real(path_, horizon, windows)
     monkeypatch.setattr(train, "train_dedicated", flaky)
 
-    summary = train.train_all(path, tmp_path, horizons=TEST_HORIZONS, n_jobs=1)
+    summary = train.train_all(path, tmp_path, horizons=horizons, n_jobs=1)
     assert not stale.exists(), "last train's pickle for the failed horizon is gone"
     assert f"{failing}h dedicated" in train.last_summary(tmp_path)["failed"]
     # The others were written by this run and rewritten with their verdicts.
-    for horizon in TEST_HORIZONS[1:]:
+    for horizon in horizons[1:]:
         assert (tmp_path / train.DEDICATED_NAME.format(horizon=horizon)).exists()
         assert str(horizon) in summary
 
@@ -517,13 +529,12 @@ def test_both_families_are_cut_on_the_same_windows():
         assert len(m.per_fold) == len(windows)
 
 
-def test_a_mixed_models_dict_serves_both_families(tmp_path):
+def test_a_mixed_models_dict_serves_both_families():
     """`load_models` hides the split, and `_model_curve` answers for both."""
     from occupancy_forecast import predict as predict_mod
 
     path = _fitted()["path"]
-    train.train_all(path, tmp_path, horizons=TEST_HORIZONS, n_jobs=1)
-    models = predict_mod.load_models(tmp_path)
+    models = predict_mod.load_models(_trained()[0])
     assert models, "nothing loaded"
     assert set(models) <= set(TEST_HORIZONS)
     for artifact in models.values():
@@ -539,18 +550,17 @@ def test_a_mixed_models_dict_serves_both_families(tmp_path):
     assert all(0.0 <= v <= 1.0 for v in curve.values())
 
 
-def test_one_call_answers_for_a_dedicated_and_a_pooled_horizon(tmp_path):
+def test_one_call_answers_for_a_dedicated_and_a_pooled_horizon():
     """The mixture itself: synthetic data may give every horizon one family, so
     the two artifacts are built by hand to make `_model_curve` take both
     branches in one call."""
     from occupancy_forecast import predict as predict_mod
 
-    path = _fitted()["path"]
-    train.train_all(path, tmp_path, horizons=TEST_HORIZONS, n_jobs=1)
-    models = predict_mod.load_models(tmp_path)
+    path, models_dir = _fitted()["path"], _trained()[0]
+    models = predict_mod.load_models(models_dir)
     # Off disk rather than out of `models`, which names a pooled horizon only
     # if the gate happened to give the pooled fit one.
-    pooled = predict_mod._load_artifact(tmp_path / train.POOLED_NAME)
+    pooled = predict_mod._load_artifact(models_dir / train.POOLED_NAME)
     assert pooled is not None, "the pooled fit produced no artifact"
 
     one, two = sorted(models)[0], sorted(models)[-1]
