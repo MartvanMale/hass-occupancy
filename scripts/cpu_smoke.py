@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
 """Import and exercise the pinned numerical stack, reporting the CPU it ran on.
 
-Run via scripts/check-pins.sh. Two things that are not decoration: a flushed
-line before each step, because SIGILL kills the process silently and the last
-line printed is the diagnosis; and the CPU's feature flags, because a pass on a
-core with LSE says nothing about a Cortex-A72.
+Run via scripts/check-pins.sh or scripts/smoke-image.sh. The flushed line before
+each step is the diagnosis, since SIGILL kills silently. --require-no-lse
+refuses a core with LSE: a dropped QEMU_CPU falls back to -cpu max, which has
+it, and the emulated-Pi run would pass having modelled nothing.
 """
 
 from __future__ import annotations
 
+import ctypes
+import os
 import platform
 import sys
 import tempfile
 from pathlib import Path
 
-LSE_FLAGS = {"atomics", "lse"}
+# Not /proc/cpuinfo: this is the bit libgcc dispatches on, and qemu-user < 8.2 lies.
+AT_HWCAP = 16
+HWCAP_ATOMICS = 1 << 8
 
 
 def step(message: str) -> None:
     print(f"  ... {message}", flush=True)
+
+
+def has_lse() -> bool | None:
+    """True or False from AT_HWCAP; None where getauxval cannot be called."""
+    try:
+        libc = ctypes.CDLL(None)
+        libc.getauxval.restype = ctypes.c_ulong
+        libc.getauxval.argtypes = [ctypes.c_ulong]
+        return bool(libc.getauxval(AT_HWCAP) & HWCAP_ATOMICS)
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 def cpu_flags() -> set[str]:
@@ -39,8 +54,15 @@ def describe_cpu() -> tuple[str, list[str]]:
     flags = cpu_flags()
     notes = []
 
+    emulated = os.environ.get("QEMU_CPU")
+    if emulated:
+        notes.append(f"under qemu-user modelling {emulated}, not on real silicon.")
+
     if machine in ("aarch64", "arm64"):
-        if flags & LSE_FLAGS:
+        lse = has_lse()
+        if lse is None:
+            notes.append("could not read AT_HWCAP, so LSE here is unknown.")
+        elif lse:
             notes.append(
                 "this core has ARMv8.1 LSE, so a pass says NOTHING about a Pi 4 "
                 "(Cortex-A72 is ARMv8.0 and traps on them). Use QEMU_CPU="
@@ -64,6 +86,20 @@ def main() -> int:
     for note in notes:
         print(f"  note: {note}")
     print()
+
+    if "--require-no-lse" in sys.argv:
+        # AT_HWCAP bit 8 means something else on x86.
+        if platform.machine() not in ("aarch64", "arm64"):
+            print(f"FAILED: --require-no-lse is an aarch64 check, but this is "
+                  f"{platform.machine()}.", file=sys.stderr)
+            return 2
+        lse = has_lse()
+        if lse is not False:
+            print("FAILED: --require-no-lse, but AT_HWCAP reports LSE "
+                  f"{'present' if lse else 'unreadable'}. This run would prove "
+                  "nothing about a Cortex-A72.", file=sys.stderr)
+            return 2
+        print("  ARMv8.0 confirmed: AT_HWCAP carries no atomics.\n")
 
     # Imported one at a time so the step line above names whichever import dies.
     step("import numpy")

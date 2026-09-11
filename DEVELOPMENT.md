@@ -218,9 +218,22 @@ whichever architecture the developer's machine is. The aarch64 half is a diff
 against `scripts/arm-baseline.json`; `--update-baseline` is honest only once the
 pin has run on a real Pi.
 
-`test.sh`, `build-panel.sh`, `check-panel.sh`, `check-pins.sh` and
-`promote.sh` work on any Linux with Docker — the guard uses `flock` and `nproc`,
-so macOS would need two shims nobody here has written. `deploy-edge.sh` and
+**`scripts/build-image.sh <tree>` then `scripts/smoke-image.sh <tree>`** build
+the real add-on image (`BUILD_FROM` read from that tree's `build.yaml`), run the
+pinned stack inside it, and boot the server until `/health` answers with the
+`code.fingerprint` of the tree it was built from. `check-pins.sh` tests the
+pins; this tests the Dockerfile — the 0.2.0 class, which would not start.
+
+`.github/workflows/ci.yml` runs the suite and both scripts on amd64 and aarch64.
+Two advisory jobs run only when a pin, the `Dockerfile` or `build.yaml` moves:
+`pins-arm` (`check-pins.sh --only arm`) and `cortex-a72`, the stack under
+qemu-user modelling a Pi 4. **A green arm64 runner does not clear a Pi 4** —
+those cores have LSE.
+
+`test.sh`, `build-panel.sh`, `check-panel.sh`, `check-pins.sh`,
+`build-image.sh`, `smoke-image.sh` and `promote.sh` work on any Linux with
+Docker — the guard uses `flock` and `nproc`, so macOS would need two shims
+nobody here has written. `deploy-edge.sh` and
 `backfill-store-from-influx.sh` are **author-local**: they rsync to `HOST=ha`, an
 ssh alias for one particular box, so they do nothing useful in a fresh clone.
 

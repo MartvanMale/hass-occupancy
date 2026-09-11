@@ -5,7 +5,8 @@
 # name lets the trap kill this one, and callers wrap the container command in
 # `timeout` for the case where neither the trap nor the sweep ever runs.
 GUARD_LABEL=hass-occupancy.script
-GUARD_LOCK=/tmp/hass-occupancy-scripts.lock
+# Overridable so a CI runner cannot be mistaken for a local run holding it.
+GUARD_LOCK="${GUARD_LOCK:-/tmp/hass-occupancy-scripts.lock}"
 GUARD_NAME=""
 
 # Never `exit` from here and never let a failure escape: this runs on the way out
