@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Print one sha256 over everything Vite reads to produce <tree>/panel/dist. The
-# bundle is committed, so it can be stale, and nothing in a minified filename
-# says which source built it: hash the inputs instead, stamp it at build time
-# (build-panel.sh) and compare it back (check-panel.sh).
-#
-# `sort -z` for reproducibility, since find returns directory order. LC_ALL=C
-# because sort collates by locale and the digest is over the ORDER -- without it
-# the check passes or fails depending on whose shell ran it.
+# Print one sha256 over everything Vite reads to produce <tree>/panel/dist, so a
+# stale committed bundle can be caught: stamped by build-panel.sh, compared by
+# check-panel.sh. `sort -z` and LC_ALL=C: the digest is over the ORDER, so without
+# them the check passes or fails by whose shell ran it.
 set -euo pipefail
 export LC_ALL=C
 cd "$(dirname "$0")/.."

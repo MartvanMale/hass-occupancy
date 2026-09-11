@@ -1,32 +1,8 @@
 """Price a candidate feature against a control, honestly.
 
-**Why this exists rather than "edit, retrain, compare".** Both `train.read_wide`
-and `train.load_for` refuse a parquet that lacks a named feature, so the naive
-experiment is edit -> rebuild -> train -> compare, and the two arms then differ
-by a rebuild: a different newest row, possibly a different fold edge.
-`train.shared_windows` exists because a comparison cut two ways is not a
-comparison. So every candidate is BUILT into the parquet always
-(`features.SHIPPED_EXTRAS`) and this flips which are SERVED, in-process, over
-one table and one set of windows.
-
-**Why the metrics here are not the ship gate's.** The gate scores a pooled Brier
-over all 48 horizons, and MEASURED on this household only **1.2% of rows** sit in
-an hour where the occupancy climatology moves by 0.30 or more. A change that
-repairs those rows perfectly moves the pooled number by a few thousandths --
-well under `min_ship_skill_pct`. The gate is the right instrument for "does this
-model beat its baseline" and the wrong one for "did the timing get sharper".
-
-Two metrics instead, one pre-registered as primary:
-
-  1. **Departure-hour error**, through the SHIPPED reduction rule. The published
-     `sensor.*_hours_until_away` is `predict._crossing` walking the curve, so a
-     three-hour smear is a three-hour error in the number a person reads. This
-     reuses that function rather than inventing a timing metric.
-  2. **Transition-slot Brier**, stratified per fold from that fold's TRAINING
-     rows only.
-
-Never writes to `config.FEATURES_PATH` or `config.MODELS_DIR`; it can run beside
-a live add-on.
+Every candidate is BUILT into the parquet (`features.SHIPPED_EXTRAS`) and this
+flips which are SERVED over one table and one set of folds, scoring timing that
+the ship gate's pooled Brier cannot see. Never writes to the add-on's own paths.
 """
 from __future__ import annotations
 
@@ -41,18 +17,15 @@ from . import config, evaluate, features, log, predict, train
 
 _log = log.get(__name__)
 
-# One origin per person-day, so the units are near-independent -- ~500
-# person-days is the real sample size however many rows the melt produces.
-# 22:00 local the evening before puts a 07:00 departure at +9 h, inside the mid
-# band where the pooled family serves.
+# One origin per person-day, so the units are near-independent; 22:00 puts a
+# 07:00 departure at +9 h, inside the band the pooled family serves.
 ORIGIN_HOUR = 22
 
 # A cell needs enough observations before its slope is allowed to mean anything.
 MIN_CELL_OBSERVATIONS = 6
 
-# The transition stratum is the top decile of |slope| -- a quantile rather than
-# an absolute cut, so the stratum's size is stable across folds and subjects and
-# there is no tuned constant to argue about.
+# The top decile of |slope|: a quantile, so the stratum's size is stable across
+# folds and there is no tuned constant to argue about.
 TRANSITION_QUANTILE = 0.90
 
 
@@ -62,11 +35,8 @@ def _local(times: pd.Series) -> pd.Series:
 
 def _cells(frame: pd.DataFrame) -> pd.DataFrame:
     """`(subject, dow, slot) -> mean binarised occupancy`, from whatever is given.
-
-    Callers pass a fold's TRAINING rows only. Computing this over the whole
-    history would mean the CHOICE of which rows to score had seen the test
-    period's answers -- it would not favour either arm, since both are scored on
-    identical rows, but the number would not reproduce on live data.
+    Callers pass a fold's TRAINING rows only: over the whole history the CHOICE
+    of which rows to score would depend on the test period's answers.
     """
     local = _local(frame["time"])
     out = pd.DataFrame({
@@ -102,17 +72,9 @@ def _target_cell(scored: pd.DataFrame) -> pd.DataFrame:
     }, index=scored.index)
 
 
-# Only origins whose next departure is inside this many hours count.
-#
-# Added after a first run, and the reason is worth recording rather than
-# quietly fixing: unconditioned, the metric's observed IQR was 10-34 h and its
-# MAE ~9.7 h, because for a household that is mostly home the "first sustained
-# crossing in 48 h" is often a day and a half out. That is a real question and
-# it is not THIS question, which is about a 07:00 departure tomorrow morning.
-#
-# Conditioning on the OBSERVED horizon is safe here and would not be safe in
-# general: `observed_h` is computed from the outcome alone, so the same origins
-# are selected for every arm, and no arm can influence its own inclusion.
+# Unconditioned, "first sustained crossing in 48 h" is often a day and a half
+# out, a different question. Conditioning on the OBSERVED horizon is safe: it
+# comes from the outcome alone, so no arm can influence its own inclusion.
 MAX_OBSERVED_H = 24
 
 # What counts as "the curve is late" rather than "the curve is a bit off".
@@ -121,11 +83,8 @@ LATE_HOURS = 3
 
 def departure_errors(scored: pd.DataFrame, anchors: pd.DataFrame) -> pd.DataFrame:
     """Predicted minus observed departure hour, one row per (subject, origin).
-
-    Both curves go through `predict._crossing` with the configured thresholds,
-    so the metric is the sensor rather than a proxy for it. Origins where either
-    curve never crosses are dropped -- an unproven crossing is the same "unknown"
-    the sensor publishes, and scoring it as a number would invent one.
+    Both curves go through `predict._crossing`, so the metric is the sensor
+    rather than a proxy; an origin where either never crosses is dropped.
     """
     rows = []
     keyed = anchors.set_index(["subject", "time"])[train.RESIDUAL_BASE]
@@ -155,12 +114,9 @@ def departure_errors(scored: pd.DataFrame, anchors: pd.DataFrame) -> pd.DataFram
 
 def stratified_brier(scored: pd.DataFrame, wide: pd.DataFrame,
                      windows: list) -> dict[str, dict]:
-    """Brier inside and outside the transition stratum, defined per fold.
-
-    The stratum comes from each fold's TRAINING rows, so its membership shifts
-    slightly between folds. That is why the per-fold sign test is the inference
-    and the pooled number is only the effect size -- the same asymmetry
-    `train.fold_record_allows` already encodes.
+    """Brier inside and outside the transition stratum, defined per fold from
+    TRAINING rows, so membership shifts between folds: the per-fold sign test is
+    the inference and the pooled number only the effect size.
     """
     cell = _target_cell(scored)
     scored = scored.assign(dow=cell["dow"], slot=cell["slot"])
@@ -197,10 +153,8 @@ def stratified_brier(scored: pd.DataFrame, wide: pd.DataFrame,
         rate = summary["base_rate"]
         report[name] = {
             "brier": summary["brier"], "n": summary["n"], "base_rate": rate,
-            # The Brier a constant base-rate forecast would score on exactly
-            # these rows. Without it a stratified number means nothing: cells in
-            # the transition stratum sit near p=0.5 and flat cells near 0 or 1,
-            # so p(1-p) differs threefold before any model is involved.
+            # Without the base-rate spread a stratified Brier means nothing:
+            # transition cells sit near p=0.5 and flat cells near 0 or 1.
             "spread": rate * (1.0 - rate),
         }
     report["cut"] = {"median": float(np.median(cuts)) if cuts else float("nan"),
@@ -211,10 +165,8 @@ def stratified_brier(scored: pd.DataFrame, wide: pd.DataFrame,
 def run_arm(path: Path, windows: list, extras: tuple[str, ...],
             horizons: tuple[int, ...], n_jobs: int | None) -> pd.DataFrame:
     """Train the pooled family with `extras` served, return its out-of-fold runs.
-
-    The estimator is thrown away. What is being measured is the feature list, not
-    a model anybody is going to serve, and keeping it would only invite somebody
-    to serve it.
+    The estimator is thrown away: what is measured is the feature list, and
+    keeping it would invite somebody to serve it.
     """
     before = features.SHIPPED_EXTRAS
     features.SHIPPED_EXTRAS = extras
@@ -229,13 +181,7 @@ def run_arm(path: Path, windows: list, extras: tuple[str, ...],
 
 
 def compare_strata(strata: dict[str, dict], control: str) -> dict[str, dict]:
-    """Per-fold sign test on each stratum's Brier, arm against control.
-
-    The pooled Brier is the effect size and this is the inference -- the same
-    asymmetry `train.fold_record_allows` encodes, and the reason it matters here
-    is that the stratum's membership shifts slightly between folds because it is
-    defined from each fold's own training rows.
-    """
+    """Per-fold sign test on each stratum's Brier, arm against control."""
     out = {}
     for arm, report in strata.items():
         if arm == control:
@@ -256,10 +202,8 @@ def compare_strata(strata: dict[str, dict], control: str) -> dict[str, dict]:
 
 def compare(errors: dict[str, pd.DataFrame], control: str) -> dict[str, dict]:
     """Per-fold sign test of each arm's median departure error against control.
-
-    Signed error, not absolute: the symptom is a curve that is LATE, and an arm
-    that halved the lateness while doubling the scatter would look identical on
-    an absolute metric.
+    Signed, not absolute: the symptom is a LATE curve, and halving the lateness
+    while doubling the scatter would look identical on an absolute metric.
     """
     base = errors[control]
     out = {}
@@ -289,10 +233,8 @@ def main(argv: list[str] | None = None) -> None:
                         default=list(config.HORIZONS_H))
     parser.add_argument("--origin-hour", type=int, default=ORIGIN_HOUR)
     parser.add_argument("--n-jobs", type=int, default=None)
-    # Configured from the saved settings, NOT `runtime.bootstrap`. A probe runs
-    # offline against a copy of the archive; requiring a live Home Assistant to
-    # measure a feature would mean the only place it could run is the box it
-    # must not touch.
+    # From the saved settings, not `runtime.bootstrap`: requiring a live Home
+    # Assistant would mean it could only run on the box it must not touch.
     parser.add_argument("--config", type=Path, default=config.CONFIG_PATH)
     args = parser.parse_args(argv)
 
@@ -365,27 +307,15 @@ def main(argv: list[str] | None = None) -> None:
 
 
 # --- the departure-timing comparison ---------------------------------------
-#
-# The two numbers this settles were never comparable. "2.5 h" came from a
-# weekday lookup scored on days a departure was OBSERVED; "7.4 h" came from the
-# occupancy curve scored on origins where `_crossing` happened to cross. They
-# differ in origin hour, in what counts as a departure, in units, and -- worst --
-# in SELECTION: dropping origins whose predicted curve never crosses lets an arm
-# choose the events it is judged on.
-#
-# So: one event set, taken from the LABEL. Candidate days with an observed
-# departure, defined from the outcome alone, so no arm can influence its own
-# inclusion. Every arm reduces to the same quantity, the local hour of the first
-# departure.
+# One event set, from the LABEL: candidate days with an observed departure, so
+# no arm can influence its own inclusion.
 
 DEPARTURE_ORIGIN_HOUR = 4       # matches `departure.ORIGIN_HOUR`
 
 
 def _curve_hour(row: pd.Series, curve: dict[int, float]) -> float | None:
-    """The hour a curve says they leave, through the SHIPPED reduction rule.
-
-    `predict._crossing` is what produces `sensor.*_hours_until_away`, so using it
-    here measures the sensor rather than a proxy for it.
+    """The hour a curve says they leave, through `predict._crossing`, which is
+    what produces the published sensor.
     """
     crossing = predict._crossing(row, curve, False, config.DEPARTURE_THRESHOLD,
                                  int(config.CROSSING_MIN_HOURS))
@@ -400,27 +330,16 @@ def _summarise(name: str, errors: np.ndarray, misses: int) -> dict:
         "median_ae": float(np.median(np.abs(errors))) if scored else float("nan"),
         "within_1h": float(np.mean(np.abs(errors) <= 1) * 100) if scored else float("nan"),
         "over_3h": float(np.mean(np.abs(errors) >= 3) * 100) if scored else float("nan"),
-        # Signed, because the symptom is a curve that is LATE and an arm that
-        # halved the lateness while doubling the scatter would look identical on
-        # an absolute metric.
+        # Signed, for the reason `compare` gives.
         "median_signed": float(np.median(errors)) if scored else float("nan"),
     }
 
 
 def compare_departure_timing(path: Path, horizons: tuple[int, ...] = tuple(range(1, 21)),
                              n_jobs: int | None = None) -> pd.DataFrame:
-    """Score the occupancy curve and the weekday lookup on the same departures.
-
-    The production arm is the DEDICATED family, because from an 04:00 origin a
-    07:30 departure is +3.5 h and that band is the dedicated family's -- the
-    pooled one serves from +19 h. This is therefore a different part of the stack
-    from the one the feature probes scored.
-
-    A day whose predicted curve never crosses is a MISS, not a dropped row.
-    Both readings are reported: excluding them is "on the events it was willing
-    to call", and imputing that person's own median hour is what a consumer
-    experiences when the sensor says unknown. The gap between the two is the
-    number this comparison has been missing.
+    """Score the DEDICATED family's curve (from 04:00 a 07:30 departure is
+    +3.5 h) and the weekday lookup on the same departures. A curve that never
+    crosses is a MISS, not a dropped row; both readings are reported.
     """
     from . import departure
 
@@ -464,9 +383,8 @@ def compare_departure_timing(path: Path, horizons: tuple[int, ...] = tuple(range
             "subject": event.subject, "date": event.date,
             "truth": event.departure_hour,
             "production": _curve_hour(row, curve),
-            # The lookup, and the flat median it has to justify itself against:
-            # without the second arm a reader cannot tell how much of the
-            # lookup's skill is WEEKDAY and how much is merely "mornings".
+            # Without the flat median nobody can tell how much of the lookup's
+            # skill is WEEKDAY and how much is merely "mornings".
             "weekday_median": event.wday_hour,
             "flat_median": event.all_hour,
         })
@@ -488,9 +406,6 @@ def compare_departure_timing(path: Path, horizons: tuple[int, ...] = tuple(range
     return pd.DataFrame(out)
 
 
-# Last in the file, not in the middle of it. The guard used to sit above the
-# departure-timing block, so running this as a script called `main()` before
-# those definitions existed and the whole comparison was reachable only from a
-# REPL that imported the module.
+# Last in the file, so a script run sees every definition above it.
 if __name__ == "__main__":
     main()

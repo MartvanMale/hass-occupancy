@@ -1,24 +1,9 @@
 import type { ReactNode } from 'react'
 
 /**
- * Which of the 48 horizons the page is talking about.
- *
- * A range, not the `Select` every other control on the tab uses, and the
- * distinction is honest rather than decorative: a `Select` is for a named set --
- * an entity, a subject, a column -- and a horizon is an ordered scalar with 48
- * evenly spaced values that people scrub through to watch the daily lags drop
- * away. Reading that off a dropdown means 48 open-pick-close cycles.
- *
- * Native, styled with `accent-color`, rather than a rebuilt
- * `::-webkit-slider-thumb`. That is already the panel's answer for the
- * checkboxes, it derives from the same token, and -- the real argument -- a
- * native control is rendered by `forced-colors` in system colours for free,
- * where a hand-drawn one would need its own fallback and would be the only
- * invented control on the page.
- *
- * `aria-valuetext` because "24" is not what the number means; a screen reader
- * should say "+24 hours ahead". The tick row is `aria-hidden` -- the value is
- * already announced, and it is a scale, not content.
+ * Which of the 48 horizons the page is talking about. A range, not a `Select`:
+ * a horizon is an ordered scalar people scrub through, and native gets a
+ * forced-colors rendering for free. `aria-valuetext` says "+24 hours ahead".
  */
 export function HorizonSlider({ value, onChange, max = 48, summary }: {
   value: number

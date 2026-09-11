@@ -1,0 +1,21 @@
+# Editor-side half of the line-ending policy; .gitattributes is the half git
+# enforces. Advisory only: it stops a bad save, not a bad commit.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[{*.py,*.sh,Dockerfile}]
+indent_size = 4
+
+# IBM Plex's licence verbatim, CRLF as shipped: it is inside the .source-hash
+# input set, so a save that re-ends it fails scripts/test.sh.
+[OFL.txt]
+end_of_line = crlf
+insert_final_newline = false
+trim_trailing_whitespace = false

@@ -6,10 +6,8 @@
 
 set -e
 
-# The data source is infrastructure, so the ADD-ON OPTION is authoritative and
-# overrides whatever is persisted in /data/config.json. Without this the option
-# was accepted, shown in the UI, and quietly ignored -- the add-on kept using
-# the store because that is what its saved settings said.
+# The ADD-ON OPTION is authoritative and overrides /data/config.json: the option
+# was otherwise accepted, shown in the UI and ignored.
 export OCCUPANCY_SOURCE="$(bashio::config 'source')"
 
 # log.py maps bashio's seven level names onto Python's five.
@@ -22,18 +20,12 @@ if bashio::config.equals 'source' 'influx'; then
     export INFLUX_TOKEN="$(bashio::config 'influx_token')"
 fi
 
-# Home Assistant user ids allowed to POST to the mutating endpoints. Empty --
-# which is the default, and what every existing install has -- means everyone,
-# exactly as before this option existed. See config.admin_users().
-#
-# `admin_users // []` rather than `admin_users`: on an install that predates the
-# option the key is absent, and jq's `join` on null is a hard error, which under
-# `set -e` is a container that will not start over a setting nobody has touched.
+# Empty means everyone, which is what every existing install has. `admin_users // []`
+# because jq's `join` on an absent key is a hard error, and under `set -e` that
+# is a container that will not start.
 export OCCUPANCY_ADMIN_USERS="$(bashio::config 'admin_users // [] | join(",")')"
 
-# An explicit broker in the options wins over the Supervisor service: a broker
-# outside Supervisor (EMQX or Mosquitto on another host) registers no service,
-# and the MQTT integration in Home Assistant is already pointed at it.
+# An explicit broker wins over the Supervisor service: a broker outside Supervisor registers no service.
 if bashio::config.has_value 'mqtt_host'; then
     export MQTT_HOST="$(bashio::config 'mqtt_host')"
     export MQTT_PORT="$(bashio::config 'mqtt_port')"
@@ -54,35 +46,16 @@ else
     bashio::log.warning "No MQTT broker: no mqtt_host option and no Supervisor mqtt service. Entities will not be published."
 fi
 
-# The add-on's own name, not a literal: this file is shared by the stable and
-# edge builds, so a hard-coded "Occupancy Forecast" makes edge's log claim to be
-# stable's. `|| true` because a log line is never worth failing a start over.
+# The add-on's own name, not a literal: this file is shared, so a hardcoded one
+# makes edge's log claim to be stable's. `|| true`: a log line is not worth a failed start.
 addon_name="$(bashio::addon.name 2>/dev/null || true)"
 bashio::log.info "Starting ${addon_name:-Occupancy Forecast} (source: $(bashio::config 'source'))"
 
-# Everything above this line needs root: bashio reads /data/options.json and
-# Supervisor's service credentials, and neither is readable by the user we are
-# about to become. Everything BELOW it is a forecaster that reads history and
-# writes /data, and has no business being able to modify the image it is running
-# from.
-#
-# `s6-setuidgid` rather than a Dockerfile `USER`: s6-overlay is PID 1 here
-# (`init: false` in config.yaml hands it the entrypoint) and it has to start as
-# root to set its own supervision tree up. Dropping at the last exec is the only
-# place that leaves both halves working.
-#
-# /data arrives root-owned -- it did on every install that predates this, and
-# Supervisor creates it as root on new ones -- so it is handed over once, and
-# then not again, because the test is cheaper than a recursive chown over an
-# archive that only grows.
-#
-# The failure is guarded for the same reason the s6-setuidgid drop below is:
-# under `set -e` a refused chown kills the container before the forecaster ever
-# starts, and that is a worse outcome than running as root. An earlier revision
-# of apparmor.txt covered `/data/**` but not `/data`, so this chown was denied
-# on every installation whose /data was still root-owned and the add-on would
-# not start at all. The profile is fixed; this is the belt, so that a future gap
-# in it degrades the add-on instead of stopping it.
+# Everything above needs root (bashio reads /data/options.json and Supervisor's
+# credentials); everything below is a forecaster with no business writing the
+# image. `s6-setuidgid` rather than a Dockerfile `USER`, because s6-overlay is
+# PID 1 and must start as root -- the last exec is the only place both work.
+# Guarded: under `set -e` a refused chown kills the container, which is worse than running as root.
 if [ "$(stat -c %u /data)" != "$(id -u occupancy)" ]; then
     bashio::log.info "Handing /data to the unprivileged user"
     if ! chown -R occupancy:occupancy /data; then
@@ -91,10 +64,8 @@ if [ "$(stat -c %u /data)" != "$(id -u occupancy)" ]; then
     fi
 fi
 
-# Guarded, because if a future base image drops s6-overlay's command directory
-# the alternative is a container that exits with "s6-setuidgid: not found" and no
-# forecaster at all. Running as root and saying so is the better failure -- and
-# since there are two outcomes, each one logs which it took.
+# Guarded: a base image without s6-setuidgid would otherwise exit with "not found"
+# and no forecaster. Root and saying so is the better failure.
 if command -v s6-setuidgid >/dev/null 2>&1; then
     bashio::log.info "Dropping to user occupancy (uid $(id -u occupancy))"
     exec s6-setuidgid occupancy python -m occupancy_forecast.server

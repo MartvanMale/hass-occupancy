@@ -1,5 +1,53 @@
 ## Unreleased
 
+### Added
+
+- **How long the forecast record is kept is now a setting**, on the Setup tab
+  under "Forecast record". Type a number of days; **0 keeps everything and
+  never deletes**. It still defaults to 30 days and feeds the "Was it right?"
+  chart only. Shortening it deletes the older rows on the next cycle and they
+  cannot be rebuilt.
+
+### Fixed
+
+- The "Was it right?" chart now works when the add-on reads its history from
+  InfluxDB; until now such installs recorded nothing at all. Existing `influx`
+  installs start empty and fill over the following 30 days. There is still no
+  local history archive on `influx`, so the first two cards on the Data tab
+  still say so.
+- A phone that stops reporting no longer counts as everybody being out. Those
+  stretches are now recorded as unknown and left out of training instead of
+  carrying the last known position forward. One person known to be at home
+  still counts as the house being occupied.
+- The Overview page now counts days of presence actually observed, rather than
+  the age of the oldest thing in the archive, when it says how long is left
+  before training, so a tracker that never reported no longer makes the add-on
+  look ready days early.
+- When something fails, the Data tab and the status API no longer repeat the
+  underlying error. A message from a library can carry the file it was reading
+  or the address of your broker, and both of those are readable by any Home
+  Assistant user rather than only the ones listed in `admin_users`. The panel
+  still says that something failed and when; the error itself now goes to the
+  add-on log, where the Log tab shows it.
+
+### Changed
+
+- The models are rebuilt once on upgrade, because the ones on disk were fitted
+  on the presence data this release corrects. Nothing is published until that
+  finishes -- previously an upgrade like this could have left the sensors
+  reading `unknown` until the next scheduled retrain, up to a week away.
+- On first start after upgrading, the add-on re-reads the last few days of
+  presence from Home Assistant's recorder to recover the gaps earlier versions
+  discarded. This happens once, not on every restart.
+- The first import from Home Assistant no longer asks the recorder for
+  everything at once, which on a long `purge_keep_days` could return tens of
+  megabytes on a small box. How much history you end up with is unchanged.
+- The Overview page no longer says "steady" or "no change expected" when it
+  simply has no prediction to give, and the horizon strip now distinguishes a
+  horizon where the model lost to its baseline from one that has not trained
+  yet. On a fresh install the old wording blamed a comparison that had never
+  run.
+
 ## 0.2.2 - 2026-09-09
 
 ### Added
@@ -31,8 +79,6 @@
   instead of raw keys.
 - Edge is marked advanced and experimental, so it is only offered to users who
   have switched advanced mode on.
-- README sections on what the add-on stores — and that it travels in your
-  backups — and on giving it a read-only, bucket-scoped InfluxDB token.
 
 ### Changed
 
@@ -40,22 +86,7 @@
   the first start after the change and then drops to an unprivileged user; if it
   cannot take ownership it says so in the log and carries on as root, rather than
   refusing to start.
-- `scripts/test.sh` now checks that the committed panel bundle was built from
-  the source beside it. Nothing on any path a person actually took verified that
-  pair before.
-- `scripts/deploy-edge.sh` stamps an uncommitted tree with a hash of its
-  contents, so two different edits can no longer deploy under the same version
-  string.
-- `scripts/deploy-stable.sh` is removed. It targeted a local stable add-on that
-  no longer exists, and created a directory on the box that collided with the
-  store-installed one before failing. Stable deploys by `git push`.
-- Internal tidying, with no change to any published surface: one shared spelling
-  of the slot-of-day calendar, one of the panel's number formatting, and one of
-  the run-length accumulator its charts use.
-- `departure.py` keeps its unshipped model half, now headed with what it
-  measured and why it did not ship, so the record travels with the code.
-- The Dockerfile copies the panel bundle before the Python, so ordinary code
-  edits no longer rebuild the panel layer.
+- Internal tidying, with no change to any entity, option or panel page.
 
 ### Fixed
 
@@ -93,18 +124,13 @@
   after the latest run had dropped it.
 - A model trained before a configuration change is now refused at load, with a
   line saying to retrain, instead of failing silently on every cycle.
-- A latent bug in the dedicated model family that would have discarded its
-  warm-up rows as soon as a new published field was added.
-- The decision to serve a horizon is now a fair comparison. The model and its
-  baselines were scored on slightly different sets of rows, and a fold the model
-  could not score at all counted as a fold it lost.
+- The decision to serve a horizon is now a fair comparison: the model and its
+  baselines are scored on the same rows.
 - The add-on no longer refuses to start when there is nothing to forecast yet —
   no `person` entity, or Home Assistant unreachable. It starts idle with the
   reason on the Setup tab, which is the page you need in order to fix it. Its
   configuration file is also written safely, so a power cut cannot leave an
   empty one behind.
-- The history archive is no longer read and written through one shared database
-  connection that was never closed.
 - The "still learning" notification came back within five minutes of being
   dismissed, for as long as seven weeks. It is now sent only when something has
   actually changed: once a day while collecting, once when training starts, and
@@ -128,17 +154,9 @@
   404 for a horizon that does not exist.
 - A partially built panel no longer crashes start-up; it is skipped with a
   warning.
-- Appending to the history archive no longer runs two full table scans per
-  insert.
-- Four API fields the panel reads were missing from the contract test.
+- Collecting new history is faster on a large archive.
 
 ## 0.1.1 - 2026-09-05
-
-### Added
-
-- A third household in the test data, which comes and goes far less tidily than
-  the two before it. Test-suite only; nothing the add-on does changes.
-- A build check that catches a stale Ingress panel before it can ship.
 
 ### Fixed
 
@@ -204,8 +222,8 @@ First release, so everything is listed as added.
 
 - **Its own history archive.** Home Assistant's recorder keeps about ten days
   and long-term statistics do not cover presence at all, so the add-on keeps its
-  own archive under `/data` from the moment it is installed — about 2 MB a year,
-  never purged. Training starts at ten days. If you already archive to
+  own archive under `/data` from the moment it is installed — about 2.3 MB a
+  year, never purged. Training starts at ten days. If you already archive to
   **InfluxDB**, `source: influx` trains from that history instead and is
   properly trained on the very first run.
 
@@ -235,7 +253,6 @@ First release, so everything is listed as added.
   your heating, check `predicted_at` and ignore a stale one, so that an outage
   degrades to your previous behaviour rather than to a cold house.
 
-- `aarch64` and `amd64`. A 32-bit Pi is not supported: one of the add-on's
-  dependencies has no 32-bit ARM build, so it would compile for forty minutes
-  and then fail. The add-on builds from source on install, so the first install
-  takes several minutes and a few hundred MB.
+- `aarch64` and `amd64` only; a 32-bit Pi is not supported. The add-on builds
+  from source on install, so the first install takes several minutes and a few
+  hundred MB.

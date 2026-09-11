@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Find ARMv8.1 LSE atomics in the aarch64 wheels, for scripts/check-pins.sh.
+"""Find UNGUARDED ARMv8.1 LSE atomics in the aarch64 wheels, for check-pins.sh.
 
-Not a grep: libgcc's outline atomics put dispatch-guarded LSE in every one of
-these wheels. Only UNGUARDED LSE matters -- pyarrow 21.0.0 had it inlined in
-bundled mimalloc, which aborted on a Cortex-A72. Recognising the guarded form
-needs both the helper's symbol name and the ldrb/cbz-then-ldxr/stxr shape, since
-pandas links those helpers with symbols stripped. The gate is a baseline diff
-rather than "must be zero", so a mis-read is a reviewed bump, not a stuck red.
+Not a grep: libgcc's outline atomics put dispatch-guarded LSE in every wheel, and
+only the unguarded form matters -- the pyarrow 21.0.0 bug, inlined in bundled
+mimalloc. The gate is a baseline diff, so a mis-read is a reviewed bump.
 """
 
 from __future__ import annotations
@@ -32,9 +29,8 @@ ABI = "cp313"
 
 OBJDUMP = "aarch64-linux-gnu-objdump"
 
-# ARMv8.1-A Large System Extensions. Undefined on a Cortex-A72, which is
-# ARMv8.0-A. The suffixes are the acquire/release/byte/halfword variants
-# (`casal`, `ldaddb`, ...) and `casp` is the pair form.
+# ARMv8.1-A Large System Extensions, undefined on a Cortex-A72 (ARMv8.0-A). The
+# suffixes are the acquire/release/byte/halfword variants; `casp` is the pair form.
 LSE = re.compile(
     r"^(?:cas[abhlp]*|swp[abhl]*"
     r"|ld(?:add|clr|eor|set|smax|smin|umax|umin)[abhl]*"
@@ -46,9 +42,8 @@ GUARD_SYMBOL = re.compile(
     r"^__aarch64_(?:cas|swp|ld(?:add|clr|eor|set|smax|smin|umax|umin))"
 )
 
-# The ldxr/stxr fallback that every dispatch-guarded helper carries. Its
-# presence just after an LSE instruction is what identifies the helper when the
-# symbol name is gone.
+# The ldxr/stxr fallback every dispatch-guarded helper carries: just after an LSE
+# instruction, it identifies the helper when the symbol name is stripped.
 EXCLUSIVE = re.compile(r"^(?:ld[ax]+r[bh]?|st[lx]+r[bh]?)$")
 
 # How far to look either side of a hit for the dispatch shape. The helpers are
@@ -62,10 +57,9 @@ LOOK_AHEAD = 16
 # ---------------------------------------------------------------------------
 
 def resolve(requirements: Path, workdir: Path) -> list[dict]:
-    """Resolve the full aarch64 closure -- the closure, not just the pinned
-    lines: scikit-learn drags in scipy, unpinned and bundling its own OpenBLAS.
-    `--platform` with `--target` resolves for the target platform, `--dry-run
-    --report` yields the wheel URLs without installing.
+    """Resolve the full aarch64 closure, not just the pinned lines: scikit-learn
+    drags in scipy, unpinned and bundling its own OpenBLAS. `--dry-run --report`
+    yields the wheel URLs without installing.
     """
     report = workdir / "report.json"
     subprocess.run(
@@ -120,11 +114,8 @@ _AUDITWHEEL_HASH = re.compile(r"-[0-9a-f]{8,}(?=\.so)")
 
 
 def normalise(relative: Path) -> str:
-    """A stable name for a shared object across versions of its wheel.
-
-    Without this nothing compares: `libarrow.so.2100` becomes `libarrow.so.2300`,
-    auditwheel rewrites bundled libs as `libopenblas-<hash>.so`, and extensions
-    carry the ABI tag -- all three change on a bump that changed no code.
+    """A stable name for a shared object across versions of its wheel: the soname,
+    auditwheel's `-<hash>` and the ABI tag all change on a bump that changed no code.
     """
     name = relative.name
     name = _SONAME.sub(".so", name)
@@ -142,11 +133,9 @@ class Hit(collections.namedtuple("Hit", "symbol mnemonic")):
 
 
 def scan(path: Path) -> tuple[int, list[Hit]]:
-    """Disassemble one object. Returns (guarded count, unguarded hits).
-
-    Streamed, since libarrow is 45 MB. Deciding whether a hit is guarded needs a
-    window in both directions, so recent instructions are kept in a ring and
-    hits settle once enough following instructions have gone by.
+    """Disassemble one object. Returns (guarded count, unguarded hits). Streamed;
+    a hit settles once enough following instructions have gone by, since whether
+    it is guarded needs a window in both directions.
     """
     process = subprocess.Popen(
         [OBJDUMP, "-d", "--no-show-raw-insn", str(path)],
@@ -195,9 +184,8 @@ def scan(path: Path) -> tuple[int, list[Hit]]:
             if GUARD_SYMBOL.match(symbol):
                 guarded += 1
             else:
-                # The dispatch preamble: load the LSE availability byte and
-                # branch on it. Both halves must be in the window -- an
-                # unrelated cbz is not a guard.
+                # The dispatch preamble: load the LSE availability byte and branch
+                # on it. Both halves must be in the window -- a lone cbz is no guard.
                 window = list(recent)
                 preamble = any(m.startswith("ldrb") for m in window) and any(
                     m.startswith(("cbz", "cbnz", "tbz", "tbnz")) for m in window
@@ -215,10 +203,8 @@ def scan(path: Path) -> tuple[int, list[Hit]]:
 
 
 def scan_tree(root: Path) -> dict[str, dict]:
-    """Scan every shared object under `root`, keyed by normalised name.
-
-    Deduped by content hash: pyarrow ships three byte-identical copies of each
-    bundled lib, and disassembling 45 MB three times is seconds versus minutes.
+    """Scan every shared object under `root`, keyed by normalised name. Deduped by
+    content hash: pyarrow ships byte-identical copies of each bundled lib.
     """
     results: dict[str, dict] = {}
     seen: dict[str, str] = {}
@@ -227,9 +213,7 @@ def scan_tree(root: Path) -> dict[str, dict]:
             if path.is_symlink() or not path.is_file():
                 continue
             # Prefixed with the distribution unless the wheel already lays its
-            # objects out under a directory of that name, which most do --
-            # `pyarrow/pyarrow/libarrow.so` reads as a mistake rather than as
-            # provenance.
+            # objects out under that name: `pyarrow/pyarrow/...` reads as a mistake.
             inside = normalise(path.relative_to(package))
             name = inside if inside.startswith(f"{package.name}/") \
                 else f"{package.name}/{inside}"

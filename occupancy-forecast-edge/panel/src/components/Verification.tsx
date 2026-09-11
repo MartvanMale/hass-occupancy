@@ -8,26 +8,9 @@ import { useChartPointer } from './useChartPointer'
 /**
  * What was forecast for each slot, against what actually happened.
  *
- * Neither existing chart fits, which is why this is a third one rather than a
- * prop on either. `TimeSeries` has exactly the right semantics -- real
- * timestamps, `null` lifts the pen, shaded gap bands, a prose summary -- and is
- * architecturally single-series. `Curves` is multi-series but its x axis is
- * "hours ahead" rather than clock time, its domain is welded to 0-1 for a
- * probability, and it bridges. So this is `TimeSeries`' null handling with
- * `ScoreByHorizon`'s two-`linePath` structure, both of them the shared
- * `geometry.linePath` that already knows a null means pen up.
- *
- * **Two different kinds of hole, and they mean opposite things.** A missing
- * `actual` is the trackers not seeing the house -- the same unobserved slot
- * every chart here already draws as a break. A missing `forecast` is the
- * add-on deliberately saying nothing, because the model did not earn that
- * horizon. Only the second gets a shaded band: it is the serving rule made
- * visible over time, and it is the thing this card was built to show.
- *
- * The dash on the second line is not decoration. Under `forced-colors` both
- * strokes collapse to CanvasText and the dash is the only thing left telling
- * them apart -- the same note `ScoreByHorizon` carries, and the reason the
- * legend keys are words rather than swatches alone.
+ * **Two kinds of hole, meaning opposite things.** A missing `actual` is the
+ * trackers not seeing the house; a missing `forecast` is the add-on saying
+ * nothing. Only the second is shaded -- that is what this card was built to show.
  */
 
 const W = 1000
@@ -45,9 +28,8 @@ export function Verification({ points, summary, startLabel, endLabel, horizon }:
 
   const n = points.length
   const X = (i: number) => (n === 1 ? W / 2 : (i / (n - 1)) * W)
-  // Both series are probabilities, so the domain is fixed at 0-1 rather than
-  // fitted. A fitted axis would rescale the whole card whenever the forecast
-  // happened to be confident, and make two days incomparable side by side.
+  // Both series are probabilities, so the domain is fixed at 0-1 -- a fitted
+  // axis would make two days incomparable.
   const Y = (v: number) => H - v * H
 
   const at = (pick: (p: VerificationPoint) => number | null) =>
@@ -79,9 +61,8 @@ export function Verification({ points, summary, startLabel, endLabel, horizon }:
 
           {/* Drawn first, so both lines sit on top of the shading. */}
           {holes.map(([a, b]) => {
-            // Anchored on the POINTS, exactly as `TimeSeries` bands its
-            // unobserved runs: the shading has to start where the line stops or
-            // the two channels disagree about where the hole is.
+            // Anchored on the POINTS, as `TimeSeries` bands its unobserved runs,
+            // or the two channels disagree about where the hole is.
             const x1 = n === 1 ? 0 : (a / (n - 1)) * W
             const x2 = n === 1 ? W : ((b + 1) / (n - 1)) * W
             return <rect key={a} className="gap" x={x1} y={0}

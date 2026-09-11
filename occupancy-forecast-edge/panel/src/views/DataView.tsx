@@ -25,23 +25,9 @@ import { HorizonQualityCard, QualityCard } from './data/QualityCards'
 
 /**
  * Data: the path a state change takes to become a forecast, in five steps.
- *
- * This was seven cards in the same auto-fit grid the other two tabs use, and the
- * grid was fighting the content. Each card was right on its own, but they are
- * not seven independent things -- they are one argument in order, and a layout
- * that reflows them into two or three columns by width is a layout that shuffles
- * the argument. So: `Step`, numbered, one column, read top to bottom.
- *
- * Nothing about what is fetched or drawn changed in that move. The cards are the
- * same cards, in the same order they were declared in; two of them (the column
- * browser, the per-horizon detail) are now the second slab of the step whose
- * subject they were already sharing.
- *
- * Mounted only while its tab is showing, so an installation whose owner never
- * opens it pays for none of it -- no store inventory query, no parquet read.
- * For the same reason nothing here polls: the Status card's ten seconds is for
- * watching MQTT reconnect, and there is nothing on this tab worth a timer.
- * Fetches happen on mount and when a control changes.
+ * One column, read top to bottom -- it is one argument in order, and a grid that
+ * reflows by width shuffles the argument. Mounted only while its tab is showing,
+ * and nothing here polls: fetches happen on mount and when a control changes.
  */
 
 function EntityCard({ series }: { series: EntitySeries | null }) {
@@ -60,10 +46,8 @@ function EntityCard({ series }: { series: EntitySeries | null }) {
       : `It ranges from ${summary.min}${unit ? ` ${unit}` : ''} to ${summary.max}${
           unit ? ` ${unit}` : ''}, averaging ${summary.mean}${unit ? ` ${unit}` : ''}.`
 
-  // Two forms of the same fact. The long one is the chart's `aria-label`; the
-  // short one is what is printed under it, where the breaks in the line already
-  // say what a missing slot looks like. Why a slot counts as unobserved is in
-  // DOCS.md under "The Data tab".
+  // Two forms of the same fact: the long one is the chart's `aria-label`, the
+  // short one is printed under it, where the breaks already show a missing slot.
   const gaps = summary.nulls === 0
     ? 'Every slot in the window was observed.'
     : `${count(summary.nulls)} of ${count(summary.n)} slots were not observed — either nothing ` +
@@ -115,12 +99,8 @@ export function DataView({ status }: { status: Status | null }) {
   const [error, setError] = useState<string | null>(null)
 
   const [inventory, setInventory] = useState<FeatureInventory | null>(null)
-  // Two, not one. `horizonInput` is what the slider shows and what the readout
-  // and the step-five marker follow, so dragging feels attached; `horizon` is
-  // what the fetches key off, and only settles when the drag stops. Without the
-  // split, one end-to-end drag is 48 reads of `metrics.json`, which is not
-  // behind the explore cache. 250 ms: under the ~300 ms where a control starts
-  // to feel unhooked, over a fast keyboard repeat.
+  // Two, not one: `horizonInput` drives the readout so dragging feels attached,
+  // `horizon` keys the fetches and settles only when the drag stops.
   const [horizonInput, setHorizonInput] = useState<number>(24)
   const horizon = useDebounced(horizonInput, 250)
   const [recipe, setRecipe] = useState<HorizonRecipe | null>(null)
@@ -144,19 +124,16 @@ export function DataView({ status }: { status: Status | null }) {
         }
       })
       .catch((e: Error) => setError(e.message))
-    // Once, on mount, with no dependencies: nothing on this tab is polled, and
-    // `picked` is read here only to avoid overwriting a choice the user has
-    // already made -- listing it would refetch the whole inventory on every
-    // change of entity, which is the opposite of what it is for.
+    // Once, on mount: nothing here is polled, and listing `picked` would refetch
+    // the whole inventory on every change of entity.
   }, [])
 
   useEffect(() => {
     if (!picked) return
     let live = true
     setSeries(null)
-    // The one fetch here that re-runs on a control, so the one that can clear
-    // a stale message. After the `picked` guard: an archive that failed to
-    // load never sets `picked`, and its message must stay.
+    // The one fetch that re-runs on a control, so the one that clears a stale
+    // message -- after the `picked` guard, so an archive load failure stays.
     setError(null)
     getEntitySeries(picked, Number(days))
       .then((s) => { if (live) setSeries(s) })
@@ -207,11 +184,8 @@ export function DataView({ status }: { status: Status | null }) {
     return () => { live = false }
   }, [horizon])
 
-  // Picking sets the entity and nothing else. It used to scroll step two into
-  // view as well, on the theory that the choice is made about a card further
-  // down -- but a page that moves under you when you click is a page that has
-  // taken the decision about where to look out of your hands, and the tiles are
-  // worth clicking through in place to compare them.
+  // Picking sets the entity and nothing else: a page that moves under you takes
+  // the decision about where to look out of your hands.
   const pick = useCallback((entityId: string) => setPicked(entityId), [])
 
   const options = archive?.available
@@ -226,30 +200,22 @@ export function DataView({ status }: { status: Status | null }) {
       }))
     : []
 
-  // Every count in the prose below is derived, because all of them move. The
-  // width of the table changes whenever a feature family is added -- it was 988
-  // columns before three candidate families landed and 1,230 after -- and the
-  // horizon count is a config constant this page has no business restating. A
-  // literal here is a number that goes quietly wrong on somebody else's commit,
-  // which is exactly what "the 672 per-horizon columns" had already done.
+  // Every count in the prose below is derived: a literal is a number that goes
+  // quietly wrong on somebody else's commit.
   const width = inventory?.available ? inventory.columns : null
   // Not "per-horizon columns": the two key columns are neither browsable nor
   // per-horizon, so this is honestly "the ones not offered in the picker".
   const unlisted = inventory?.available
     ? inventory.columns - inventory.browsable.length
     : null
-  // `served_by` carries one entry per horizon -- it is what the horizon strip on
-  // Now counts -- so it is also the count of horizons without a second field
-  // saying the same thing twice.
+  // `served_by` carries one entry per horizon, so it is also the horizon count
+  // without a second field saying the same thing.
   const nHorizons = status ? Object.keys(status.served_by).length : null
 
   return (
     <div className="steps">
-      {/* One clause per step, saying what the step SHOWS. The justification --
-          why a lag is withheld, why the folds are embargoed, how a slot is
-          judged observed -- is in DOCS.md under "The Data tab". This is still a
-          walkthrough and still reads in order; it just no longer argues its
-          case on every screen. */}
+      {/* One clause per step, saying what the step SHOWS; the justification is
+          in DOCS.md under "The Data tab". */}
       <p className="lede">
         Every number the forecast rests on, in the order it is made.
       </p>
@@ -410,17 +376,14 @@ export function DataView({ status }: { status: Status | null }) {
                        onPick={setHorizonInput} />
         </Card>
 
-        {/* No subtitle: the two subheads inside it -- "Week by week" and "Does
-            it mean what it says?" -- already label both charts, and the horizon
-            in the title says which one it is. */}
+        {/* No subtitle: the two subheads inside already label both charts, and
+            the title names the horizon. */}
         <Card title={`Horizon +${horizon} h in detail`}>
           <HorizonQualityCard detail={detail} />
         </Card>
 
-        {/* The third entry in this step, and the only one of the three that is
-            not a backtest. The two above say how it SCORED when the models were
-            fitted; this says what the add-on actually published and what
-            happened next. A large gap between them is the finding. */}
+        {/* The only entry in this step that is not a backtest: what the add-on
+            actually published and what happened next. A gap from the two above is the finding. */}
         <VerificationCard status={status} />
       </Step>
     </div>

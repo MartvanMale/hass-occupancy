@@ -1,12 +1,6 @@
-"""Serving-time nowcast tests.
-
-Two things are being guarded. First, that the nowcast actually buys the
-responsiveness it exists for -- the comparison against the un-nowcast grid row
-is the whole point, and a test that only checked the new value would pass just
-as happily if the change did nothing. Second, and more important, that it
-touches ONLY the origin block: everything else in the row is anchored on the
-30-minute slot and drawn from a distribution the models were fitted on, so a
-column quietly moved here is a train/serve skew nobody would ever see.
+"""Serving-time nowcast tests. Two guards: that the nowcast actually buys the
+responsiveness it exists for, and -- more important -- that it touches ONLY the
+origin block, since everything else is anchored on the slot the models saw.
 """
 
 import sys
@@ -52,12 +46,9 @@ def _source(**per_person: list[tuple[str, str]]) -> FakeSource:
 
 
 def _rows() -> pd.DataFrame:
-    """One serving row per subject, as `current_rows` hands them over.
-
-    `state_now` is 0.567 -- what the 19:30 slot reports for a 19:47 departure,
-    which is exactly the case this module exists to fix: over the half-way
-    line, so the house reads occupied for thirteen more minutes.
-    """
+    """One serving row per subject, as `current_rows` hands them over. `state_now`
+    is 0.567: what the 19:30 slot reports for a 19:47 departure, over the
+    half-way line, so the house reads occupied for thirteen more minutes."""
     return pd.DataFrame({
         "subject": ["alice", "bob", "house"],
         "time": [pd.Timestamp("2026-05-01T19:30:00Z")] * 3,
@@ -84,21 +75,15 @@ def test_a_departure_reads_away_within_the_window():
 
 
 def test_a_departure_one_minute_ago_has_not_crossed_yet():
-    """Deliberate. The window is a debounce, and a debounce has to cost something.
-
-    One minute of five is 0.8, still occupied. The trade is a fixed ~2.5-minute
-    worst case in exchange for never swinging on GPS jitter.
-    """
+    """Deliberate: the window is a debounce, and a debounce has to cost something.
+    One minute of five is 0.8, still occupied -- a fixed ~2.5-minute worst case
+    in exchange for never swinging on GPS jitter."""
     assert nowcast.presence_fraction(_trace("19:46"), AT) == pytest.approx(0.8)
 
 
 def test_a_ninety_second_blip_does_not_flip_the_nowcast():
-    """The jitter this window exists to absorb.
-
-    `14:22:11 zone.office -> 14:22:49 not_home -> 14:26:16 zone.office` is the
-    real trace quoted in features.py. A raw instantaneous state would have
-    swung all 48 horizons on it, because `state_now` is `train.RESIDUAL_BASE`.
-    """
+    """The jitter this window exists to absorb: a raw instantaneous state would
+    swing all 48 horizons, because `state_now` is `train.RESIDUAL_BASE`."""
     events = [("2026-05-01T12:00:00Z", "home"),
               ("2026-05-01T19:45:00Z", "not_home"),
               ("2026-05-01T19:46:30Z", "home")]
@@ -114,11 +99,8 @@ def test_no_events_is_none_not_a_guess():
 # ---------------------------------------------------------------------------
 
 def test_the_nowcast_beats_the_grid_row_it_replaces():
-    """The comparison that makes this change worth making.
-
-    Without the un-nowcast assertion this test would pass even if `apply` did
-    nothing at all.
-    """
+    """The comparison that makes this change worth making: without the
+    un-nowcast assertion this test would pass even if `apply` did nothing."""
     rows = _rows()
     assert rows.loc[rows["subject"] == "alice", "state_now"].iloc[0] > 0.5
 
@@ -128,13 +110,9 @@ def test_the_nowcast_beats_the_grid_row_it_replaces():
 
 
 def test_the_nowcast_leaves_the_lag_and_calendar_columns_alone():
-    """The train/serve-skew guard.
-
-    Everything outside the origin block is anchored on the slot and drawn from
-    the distribution the models were fitted on. If one of these ever moves, the
-    served row stops being the kind of row the model saw and nothing else in
-    the system would say so.
-    """
+    """The train/serve-skew guard. Everything outside the origin block is drawn
+    from the distribution the models were fitted on; if one of these moved, the
+    served row would stop being the kind of row the model saw, silently."""
     rows = _rows()
     out = nowcast.apply(rows, _source(alice=_trace("19:42"), bob=_trace()), AT)
     for column in ("time", "coverage", "tgt1h_lag1d", "tgt1h_wclim4",
@@ -152,12 +130,8 @@ def test_the_cross_subject_columns_follow_the_origin():
 
 
 def test_a_subject_with_no_recent_events_keeps_its_grid_value():
-    """A missing nowcast degrades to today's behaviour, never to NaN.
-
-    `state_now` is `train.RESIDUAL_BASE`, so a NaN there deletes all 48
-    horizons for that subject -- the forecast would vanish rather than get
-    slightly older.
-    """
+    """A missing nowcast degrades to today's behaviour, never to NaN: `state_now`
+    is `train.RESIDUAL_BASE`, so a NaN there deletes all 48 horizons."""
     rows = _rows()
     source = FakeSource({"person.alice": _trace("19:42")})   # bob and house silent
     out = nowcast.apply(rows, source, AT)

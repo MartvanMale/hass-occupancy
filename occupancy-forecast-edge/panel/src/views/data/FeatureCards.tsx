@@ -7,17 +7,9 @@ import { TimeSeries, type Point } from '../../components/TimeSeries'
 import { absoluteTime, bytes, count, relativeTime, share } from '../../format'
 
 /**
- * The feature table, in the only three ways it can usefully be looked at.
- *
- * Not as a table: it is a thousand-odd columns wide, and a list of that many
- * column names is no more browsable than the table is. What a reader actually
- * wants is how much of each *kind* of thing there is, what one column looks like
- * over time, and which columns a given horizon is allowed to read.
- *
- * Every count on screen is derived from the inventory, never written down here.
- * The width moves whenever a feature family is added -- it was 988 before three
- * candidate families landed and 1,230 after -- and a literal in this file is a
- * number that goes quietly wrong on somebody else's commit.
+ * The feature table, in the only three ways it can usefully be looked at -- not
+ * as a table, at a thousand-odd columns wide. Every count on screen is derived
+ * from the inventory: a literal here goes quietly wrong on somebody else's commit.
  */
 
 export function FeatureTableCard({ inventory }: { inventory: FeatureInventory | null }) {
@@ -58,16 +50,10 @@ export function FeatureTableCard({ inventory }: { inventory: FeatureInventory | 
   )
 }
 
-/** One family: what it is, how much of it there is, and a bar to read the
- *  second against the others by.
- *
- *  `sqrt`, not a linear share. The families span three orders of magnitude --
- *  `key` has 2 columns and `target calendar` has 384 -- and linearly every
- *  family but the largest three is a bar too short to see, which is a chart
- *  that answers one question and hides eleven. The square root is an area
- *  encoding on a one-dimensional mark, which is a compromise, and it is why the
- *  count is printed above the bar rather than left to it: the NUMBER is what
- *  you read for a value, the bar is what you read for a comparison. */
+/** One family, with a bar to read it against the others. `sqrt`, not linear:
+ *  the families span three orders of magnitude, and linearly all but the largest
+ *  few are invisible. The count is printed above the bar because the NUMBER is
+ *  what you read for a value; the bar is for comparison. */
 function FamilyRow({ family: f, max }: { family: FeatureFamily; max: number }) {
   const none = f.columns === 0
   const width = max > 0 ? Math.sqrt(f.columns / max) * 100 : 0
@@ -87,10 +73,8 @@ function FamilyRow({ family: f, max }: { family: FeatureFamily; max: number }) {
   )
 }
 
-/** Split into two balanced columns, in order down the first and then the second.
- *  The families are declared in the order the table is built, which is an order
- *  worth keeping; `Math.ceil` puts the odd one at the foot of the left column
- *  rather than leaving a short first column and a long second. */
+/** Two balanced columns in declared order, down the first and then the second;
+ *  `Math.ceil` puts the odd one at the foot of the left column. */
 function columnsOf<T>(items: T[]): [T[], T[]] {
   const half = Math.ceil(items.length / 2)
   return [items.slice(0, half), items.slice(half)]
@@ -120,16 +104,13 @@ function LagRows({ lags }: { lags: HorizonLag[] }) {
 }
 
 /** The line under the horizon readout: what this one costs, and how far the
- *  folds are held apart. Lives here rather than in the slider because it is a
- *  fact about the recipe, and the slider knows nothing about recipes. */
+ *  folds are held apart. Here, not in the slider, which knows nothing of recipes. */
 export function horizonSummary(
   recipe: HorizonRecipe | null,
   totalColumns: number | null,
   pending: boolean,
 ): string {
-  // While the slider is still moving the recipe on screen belongs to the horizon
-  // you have just left. Saying nothing is better than attributing the old
-  // horizon's column count to the new one for a quarter of a second.
+  // While the slider moves, the recipe on screen belongs to the horizon you have just left.
   if (pending) return 'reading what this horizon may use…'
   if (!recipe) return 'Loading…'
   if (!recipe.available) return recipe.reason
@@ -152,9 +133,8 @@ export function HorizonCard({ recipe }: { recipe: HorizonRecipe | null }) {
         secondary={`Reads ${recipe.columns_read} columns; folds held ${
           recipe.embargo_hours} h apart.`}
         trailing={
-          // Driven off `ships`, not off `served_by`'s truthiness: "none" is a
-          // truthy string, so the old test read "trained and lost" as "trained
-          // and shipping". `ships` is the field that is already three-valued.
+          // Driven off `ships`, not `served_by`'s truthiness: "none" is a truthy
+          // string, which reads "trained and lost" as shipping.
           recipe.ships === null ? (
             <Chip label="untrained" icon="minus" accent="grey" />
           ) : recipe.ships ? (
@@ -166,8 +146,7 @@ export function HorizonCard({ recipe }: { recipe: HorizonRecipe | null }) {
       />
 
       {/* Side by side, because the point of this step is the CONTRAST: what it
-          may read now, against what it may not read from earlier days. Stacked,
-          the second list read as a continuation of the first. */}
+          may read now, against what it may not read from earlier days. */}
       <div className="cols">
         <div>
           <p className="subhead">Read at the moment the forecast is made</p>
@@ -206,9 +185,8 @@ export function ColumnCard({ series }: { series: FeatureSeries | null }) {
   const range = summary.min === null
     ? 'It has no values in this window.'
     : `It ranges from ${summary.min} to ${summary.max}, averaging ${summary.mean}.`
-  // Long form for the chart's `aria-label`, short one for the line under it.
-  // That a missing value is read as "unknown" rather than as a zero is in
-  // DOCS.md under "The Data tab"; it does not need restating on every column.
+  // Long form for the chart's `aria-label`, short one for the line under it;
+  // why a missing value reads as "unknown" is in DOCS.md under "The Data tab".
   const gaps = summary.nulls === 0
     ? 'No slot is missing it.'
     : `${count(summary.nulls)} of ${count(summary.n)} slots are missing it — which the model

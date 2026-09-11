@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
 """Build a throwaway `/data` for a household that does not exist, for screenshots.
 
-A screenshot of a real install is a picture of somebody's home, and the panel
-renders `person.*` and `zone.*` ids verbatim, so redaction means catching every
-one in an image editor. This runs the REAL pipeline against the synthetic
-household in `occupancy_forecast/tests/synthetic.py` instead, so there is
-nothing to redact. The numbers are not invented: it writes a history, trains on
-it and backtests to fill the forecast record.
-
-    scripts/demo-instance.py build      --out ~/occupancy-demo/data
-    python -m occupancy_forecast.train                     # against the same /data
-    scripts/demo-instance.py forecasts  --out ~/occupancy-demo/data
-
-Run OUTSIDE an add-on, so `config.topic_prefix()` falls back and the panel
-titles itself "Occupancy Forecast" with no build suffix.
+The panel renders person and zone ids verbatim, so this runs the REAL pipeline
+against `tests/synthetic.py` instead -- nothing to redact. Commands are in
+docs/demo-instance.md. Run OUTSIDE an add-on, so `config.topic_prefix()` falls
+back to the unsuffixed name.
 """
 from __future__ import annotations
 
@@ -32,21 +23,17 @@ from occupancy_forecast import eta as eta_mod, outing as outing_mod  # noqa: E40
 from occupancy_forecast.sources import HistoryStore  # noqa: E402
 from occupancy_forecast.tests import synthetic  # noqa: E402
 
-# Two people and two workplaces, so the Config view has a list worth showing and
-# `out_columns()` has more than one zone to separate. The names come from
-# `conftest.settings()`, which is the package's own synthetic installation.
+# Two people and two workplaces, so `out_columns()` has more than one zone to
+# separate. Names from `conftest.settings()`.
 PEOPLE = {"alice": "person.alice", "bob": "person.bob"}
 ZONES = {"alice": ("zone.office", "Office"), "bob": ("zone.workshop", "Workshop")}
 HOUSE_ENTITY = "group.household"
 
-# Metres from home to each workplace. Only the shape matters -- `eta.py` reads
-# the distance TRACE, not the number, so what it needs is a closing speed that
-# looks like a commute rather than a step change.
+# Only the shape matters: `eta.py` reads the distance TRACE, so it needs a
+# closing speed rather than a step change.
 COMMUTE_M = {"alice": 12_400, "bob": 8_100}
-# How faithfully the phone alarm tracks the day it precedes. 0 would put it at
-# the weekday's typical hour every time -- saying exactly what the weekday median
-# already says, so worth nothing -- and 1 would make it a perfect oracle. A real
-# alarm is neither: it moves on the mornings the routine moves, and not otherwise.
+# How faithfully the alarm tracks the day it precedes. 0 says nothing the
+# weekday median does not; 1 is an oracle.
 ALARM_FIDELITY = 0.8
 
 COMMUTE_MIN = 24              # door to door
@@ -67,10 +54,8 @@ def settings() -> config.Settings:
         units={f"sensor.home_{who}_distance": "m" for who in PEOPLE},
         next_alarm={PEOPLE[who]: f"sensor.phone_{who}_next_alarm"
                     for who in PEOPLE},
-        # Decoration only -- no feature, no model, no entity. It greys out the
-        # hours nobody is expected to be awake, which is what makes a dip at
-        # 03:00 read differently from a dip at 15:00. The schedule's own history
-        # comes from demo-serve.py, which must name the same entity.
+        # Decoration only -- no feature, no model, no entity. demo-serve.py must
+        # name the same entity.
         day_schedule="schedule.household_day",
         timezone="Europe/Amsterdam",
         country="NL",
@@ -86,14 +71,9 @@ def _ms(when: pd.Timestamp) -> int:
 def state_events(frame: pd.DataFrame) -> dict[str, list[tuple[pd.Timestamp, str]]]:
     """Per person, the `person.*` state stream the store would have recorded.
 
-    Home Assistant writes a person's state as `home`, `not_home`, or the FRIENDLY
-    NAME of the zone they are in -- which is the only per-person zone signal the
-    history contains, and what `features._resolve_zone_events` decodes. So the
-    generator's `home_frac` and `zone_work` have to come back out in that shape
-    rather than as three separate columns.
-
-    Emitted on CHANGE only, like a real recorder. Carry-forward then does the
-    rest, and `seeded_states` handles a window that opens mid-episode.
+    HA writes a person's state as `home`, `not_home` or the zone's FRIENDLY NAME,
+    which is what `features._resolve_zone_events` decodes. Emitted on CHANGE
+    only, like a real recorder.
     """
     out: dict[str, list[tuple[pd.Timestamp, str]]] = {}
     for who, part in frame.groupby("subject", sort=False):
@@ -105,8 +85,7 @@ def state_events(frame: pd.DataFrame) -> dict[str, list[tuple[pd.Timestamp, str]
                                     part.get("zone_work", pd.Series(0, index=part.index))):
             if pd.isna(home):
                 # A hole in the generated history is a hole here too: emitting
-                # nothing is what makes `MAX_SILENCE_H` mean something, and the
-                # generator puts holes in on purpose.
+                # nothing is what makes `MAX_SILENCE_H` mean something.
                 continue
             if home >= 0.5:
                 state = config.HOME_STATE
@@ -123,11 +102,10 @@ def state_events(frame: pd.DataFrame) -> dict[str, list[tuple[pd.Timestamp, str]
 
 def distance_rows(events: list[tuple[pd.Timestamp, str]],
                   who: str, until: pd.Timestamp) -> list[tuple[str, int, str]]:
-    """A metres-from-home trace with commute-shaped ramps between episodes.
+    """A metres-from-home trace with commute-shaped ramps.
 
-    `eta.py` refuses to answer below `MIN_CLOSING_KMH`, so a trace that steps
-    from 12 km to 0 in one sample would train and serve nothing. The ramp is what
-    makes "minutes until home" a question the model can be asked.
+    `eta.py` refuses below `MIN_CLOSING_KMH`, so a trace that steps from 12 km
+    to 0 would train and serve nothing.
     """
     entity = f"sensor.home_{who}_distance"
     far = COMMUTE_M[who]
@@ -147,10 +125,9 @@ def distance_rows(events: list[tuple[pd.Timestamp, str]],
         for step in range(steps + 1):
             at(when + pd.Timedelta(minutes=step * COMMUTE_STEP_MIN),
                previous + (target - previous) * step / steps)
-        # Then a sparse hold until the next change, the way a parked phone
-        # reports. `until` for the LAST event, not silence: a gap longer than
-        # `config.MAX_SILENCE_H` is refused by `features.observability`, so those
-        # slots never become backtest origins.
+        # Sparse hold until the next change, the way a parked phone reports. `until`
+        # for the LAST event, or the gap exceeds `MAX_SILENCE_H` and those slots
+        # never become backtest origins.
         stop = events[index + 1][0] if index + 1 < len(events) else until
         cursor = when + pd.Timedelta(minutes=COMMUTE_MIN + IDLE_STEP_MIN)
         while cursor < stop:
@@ -161,15 +138,10 @@ def distance_rows(events: list[tuple[pd.Timestamp, str]],
 
 def zone_rows(events: dict[str, list[tuple[pd.Timestamp, str]]],
               until: pd.Timestamp) -> list[tuple[str, int, str]]:
-    """Each tracked zone's own history: how many people are in it.
+    """Each tracked zone's own history, as a COUNT of persons inside.
 
-    Home Assistant writes a zone entity's state as a COUNT of the persons
-    currently inside it, and the collector archives it because
-    `runtime.tracked_entities` includes the zones. Nothing in the model reads it
-    -- `features._resolve_zone_events` takes the zone from the PERSON's state
-    string, which is the only per-person zone signal history contains -- but the
-    Data view lists every tracked entity and flagged both zones as "never
-    produced a row", which on a real install would mean a genuinely broken zone.
+    Nothing in the model reads it, but `runtime.tracked_entities` includes the
+    zones and the Data view lists every tracked entity.
     """
     moments = sorted({when for stream in events.values() for when, _ in stream})
     state: dict[str, str] = {}
@@ -192,12 +164,8 @@ def direction_rows(distances: list[tuple[str, int, str]],
                    who: str) -> list[tuple[str, int, str]]:
     """`towards` / `away_from` / `stationary`, from the sign of the distance trace.
 
-    The Proximity integration publishes this alongside the distance and
-    `features._add_proximity` prefers it, falling back to the sign of the
-    distance delta only when the entity is absent. The demo's settings have
-    always NAMED a direction entity, so without these rows that preference
-    resolved to an entity with no history -- the fallback never ran and
-    `dir_towards` / `dir_away` came out empty rather than derived.
+    The demo's settings NAME a direction entity, so `features._add_proximity`
+    prefers it and the sign fallback never runs.
     """
     entity = f"sensor.home_{who}_direction_of_travel"
     rows: list[tuple[str, int, str]] = []
@@ -226,15 +194,8 @@ def direction_rows(distances: list[tuple[str, int, str]],
 def alarm_rows(frame: pd.DataFrame, who: str) -> list[tuple[str, int, str]]:
     """The phone's next-alarm sensor: an ISO timestamp while set, `absent` after.
 
-    `synthetic.household(alarm_fidelity=...)` already emits `next_alarm_h` --
-    hours from each slot until the alarm, NaN when none is set -- in exactly the
-    shape `features._add_next_alarm` produces from the real archive. This turns
-    that column back into the EVENTS the companion app actually writes, which is
-    what the store holds.
-
-    The literal `absent` matters: `_add_next_alarm` carries the last value
-    forward, so a cancelled alarm that is merely omitted would be carried
-    forever rather than cleared.
+    The literal `absent` matters -- `_add_next_alarm` carries the last value
+    forward, so a cancelled alarm that is merely omitted is carried forever.
     """
     entity = f"sensor.phone_{who}_next_alarm"
     person = frame[frame["subject"] == who].sort_values("time")
@@ -265,11 +226,9 @@ def build(out: Path, days: int, seed: int, irregular: bool = True) -> None:
     # last 48 hours and the verification card has something recent to score.
     end = pd.Timestamp.now(tz="UTC").normalize()
     start = (end - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-    # `irregular`: errands, household trips and a rota kept loosely. Without it
-    # this household is a timetable, the per-weekday lookup is the optimal
-    # predictor by construction, and the trained model ships 5 of 48 horizons --
-    # so the panel's headline number is a picture of the generator rather than
-    # of the add-on. See the measured comparison in synthetic.py.
+    # `irregular`: without it this household is a timetable, the per-weekday
+    # lookup is optimal by construction, and the panel's headline number is a
+    # picture of the generator.
     frame = synthetic.household(days=days, seed=seed, realistic=True,
                                 start=start, irregular=irregular,
                                 alarm_fidelity=ALARM_FIDELITY)
@@ -318,14 +277,10 @@ def build(out: Path, days: int, seed: int, irregular: bool = True) -> None:
 
 
 def fit(out: Path, n_jobs: int) -> None:
-    """Feature table, both model families, the ETA and the out routine.
+    """Feature table, both families, the ETA and the out routine.
 
-    The same four steps `server._retrain` runs, in the same order, minus
-    `runtime.bootstrap` -- which reaches for Home Assistant to re-read timezone,
-    country and the home's COORDINATES. Calling it here would write this
-    household's real latitude and longitude into the demo's config.json and put
-    them on the Config screenshot, which is the whole thing this script exists to
-    avoid.
+    The same four steps `server._retrain` runs, minus `runtime.bootstrap`, which
+    would write this household's real coordinates into the demo's config.json.
     """
     conf = config.Settings.load(out / "config.json")
     if conf is None:
@@ -334,12 +289,8 @@ def fit(out: Path, n_jobs: int) -> None:
     store = HistoryStore(out / "history.db")
 
     began = dt.datetime.now()
-    # The span explicitly. `features.history_start` looks for `source.store` --
-    # a StoreSource wrapping a HistoryStore -- and this passes the HistoryStore
-    # itself, so it finds no span and falls back to a generous 400-day floor.
-    # That was invisible while the demo generated 400 days and it is not at 180:
-    # the grid stayed 400 days wide, 55% of it had nothing to label, and the
-    # trainer saw 26,013 usable rows in a 57,600-row table.
+    # The span explicitly: `features.history_start` looks for `source.store` and
+    # this passes the HistoryStore itself, so it falls back to a 400-day floor.
     table = features.build(store, start=store.span()["first"])
     features.write(table, out / "features.parquet")
     labelled = int(table["home_frac"].notna().sum())
@@ -366,11 +317,8 @@ def fit(out: Path, n_jobs: int) -> None:
 def forecasts(out: Path, days: int) -> None:
     """Backtest the trained model and write the record the verification card reads.
 
-    A real backtest rather than plausible noise: the forecast for `t + h` is what
-    THIS model says given the features at `t`, so the card scores the add-on and
-    not a random number generator. Batched per horizon -- one predict over every
-    origin at once -- because doing it a row at a time is ~1400 model calls a
-    subject and takes minutes for no different answer.
+    A real backtest, batched per horizon -- a row at a time is ~1400 model calls
+    a subject for no different answer.
     """
     conf = config.Settings.load(out / "config.json")
     if conf is None:
@@ -426,9 +374,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("step", choices=["build", "fit", "forecasts"])
     parser.add_argument("--out", type=Path, required=True)
-    # 180, not 400, because folds scale with history and at 51 folds the sign
-    # test can prove a minority record, refusing a horizon with real skill. 180
-    # gives ~19 folds, which is what the real archive has.
+    # 180, not 400: folds scale with history, and at 51 folds the sign test can
+    # refuse a horizon with real skill.
     parser.add_argument("--days", type=int, default=180,
                         help="history to generate (build) / to backtest (forecasts)")
     parser.add_argument("--seed", type=int, default=7)

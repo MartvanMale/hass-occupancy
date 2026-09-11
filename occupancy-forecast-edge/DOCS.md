@@ -23,9 +23,7 @@ collision, so that warning is worth reading.
 
 ## What is different from stable
 
-Whatever has not been promoted yet. This directory is where the code is written;
-`occupancy-forecast/` is generated from it by `scripts/promote.sh` at the moment a
-change is judged ready. So edge is stable plus the queue, and `CHANGELOG.md`'s
+Edge is stable plus whatever has not been promoted yet, and `CHANGELOG.md`'s
 `## Unreleased` section is that queue written down. **Read it to know what this
 build has that stable does not** — an empty section means the two are the same
 code at different version strings. Everything below that section has already
@@ -44,14 +42,6 @@ trains from that history on its first run instead of accumulating its own — an
 the two are comparable immediately. Set both add-ons to the same source if the
 comparison is meant to be about the code: with stable on `store` and edge on
 `influx`, a difference between them is partly a difference in training history.
-
-## A broker that is not an add-on
-
-If the MQTT integration already points at a broker outside Supervisor (EMQX,
-or Mosquitto on another machine), set `mqtt_host`, `mqtt_port`, `mqtt_user`,
-`mqtt_password` and `mqtt_ssl` in the Configuration tab. Those win over the
-Supervisor mqtt service. Leave `mqtt_host` empty and the add-on takes the
-Mosquitto add-on's details as before.
 
 ## Options, endpoints, everything else
 

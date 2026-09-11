@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Deploy the edge add-on to the Home Assistant box and rebuild it.
-# Edge is a LOCAL add-on in `ha:/addons/occupancy_forecast_edge/`, so deploying
-# is a file copy plus a rebuild -- no version bump, no push, nothing published.
-# Stable has no deploy script: it installs from this repo's URL, so a version
-# bump and a push are its trigger. See DEVELOPMENT.md.
+# Deploy the edge add-on to the Home Assistant box and rebuild it. Edge is a
+# LOCAL add-on in `ha:/addons/occupancy_forecast_edge/`, so deploying is a file
+# copy plus a rebuild -- no version bump, no push, nothing published.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -11,8 +9,7 @@ HOST=ha
 DIR=/addons/occupancy_forecast_edge
 SLUG=local_occupancy_forecast_edge
 
-# Stamp the deployed copy with its commit, so the add-on page says which build is
-# running. The stamp goes ONLY to the box; the committed config.yaml keeps its
+# Stamp the deployed copy with its commit; the committed config.yaml keeps its
 # plain `-dev`. Build the panel first, so a failed build costs nothing.
 scripts/build-panel.sh occupancy-forecast-edge
 
@@ -23,16 +20,13 @@ trap 'rm -rf "$stamped"' EXIT
 # rsync, not `cp -a`: node_modules has no business being staged or stamped.
 rsync -a --exclude 'node_modules' occupancy-forecast-edge/ "$stamped/"
 
-# The dirty marker hashes the staged tree rather than being the bare word
-# ".dirty", because the update/rebuild branch below keys off the version string:
-# an identical one means rebuild, and rebuild does NOT reload apparmor.txt. Two
-# different dirty trees at one commit would then enforce a stale profile
-# silently. Hashed before the stamp is written, so it is not a hash of itself.
+# The dirty marker hashes the staged tree, not the bare word: the branch below
+# keys off the version string, and an identical one means rebuild -- which does
+# NOT reload apparmor.txt.
 dirty=""
 if [[ -n "$(git status --porcelain occupancy-forecast-edge/)" ]]; then
-    # Relative paths, or mktemp's random directory name lands in every line and
-    # the hash changes every run. LC_ALL=C because sort collates by locale, so
-    # two shells would otherwise stamp one tree differently.
+    # Relative paths and LC_ALL=C, or mktemp's name lands in every line and two
+    # shells stamp one tree differently.
     dirty=".dirty$( (cd "$stamped" && find . -type f -print0 | LC_ALL=C sort -z \
                      | xargs -0 sha1sum) | sha1sum | cut -c1-7)"
     echo "note: deploying uncommitted changes; version will be marked ${dirty#.}"
@@ -48,16 +42,10 @@ rsync -a --delete \
   --exclude 'node_modules' \
   "$stamped/" "$HOST:$DIR/"
 
-# `ha store reload` first: only it re-reads config.yaml, so without it the new
-# version stamp is invisible. Then `update` rather than `rebuild`, for two
-# reasons -- rebuild leaves the INSTALLED version behind, and it does NOT reload
-# apparmor.txt (Supervisor calls install_apparmor() from install() and update()
-# only). Rebuild survives as the fallback for redeploying the same commit, and
-# says so. `install` first for a box that has never seen this add-on, including
-# the first deploy after a slug change; it deliberately does not start it, so
-# the previous slug's /data can be copied across first. The test reads
-# `"installed": false` rather than the exit status, because once the store has
-# seen the directory `ha addons info` returns 0 for a add-on never built.
+# `ha store reload` first: only it re-reads config.yaml, which shows the stamp.
+# `update`, not `rebuild`: rebuild does NOT reload apparmor.txt, so it is only
+# the fallback for redeploying one commit. The test reads `"installed": false`,
+# not the exit status, which is 0 once the store has seen the directory.
 ssh "$HOST" "
     set -e
     ha store reload

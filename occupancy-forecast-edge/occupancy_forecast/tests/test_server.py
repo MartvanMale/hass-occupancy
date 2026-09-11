@@ -1,13 +1,11 @@
-"""The scheduling and the retrain guard.
-
-Both are here rather than behind an HTTP client because the suite deliberately
-ships no httpx: the endpoints are kept thin so that the parts worth testing are
-plain functions. `_next_train` answers "when", which is what goes on the panel;
-`_start_background_train` is the guard that has to refuse *before* it spawns,
-because an HTTPException raised inside that thread reaches nobody.
+"""The scheduling and the retrain guard, tested as plain functions because the
+suite ships no httpx. `_start_background_train` has to refuse BEFORE it spawns:
+an HTTPException raised inside that thread reaches nobody.
 """
 
 import datetime as dt
+import json
+import re
 import threading
 import time
 
@@ -87,12 +85,36 @@ def lock_released():
         server._train_lock.release()
 
 
+class _WithStore:
+    """A source backed by the local archive, which is what gates on days."""
+    store = object()
+
+
+def test_the_status_page_never_recounts_usable_history(monkeypatch):
+    """`usable_history_days` walks the whole archive, so it belongs to the worker
+    and the ten-second status poll reads what the worker left."""
+    def _refuse(*args, **kwargs):
+        raise AssertionError("usable_history_days called from a request handler")
+
+    monkeypatch.setattr(server.features, "usable_history_days", _refuse)
+    monkeypatch.setitem(server._state, "source", _WithStore())
+    monkeypatch.setitem(server._state, "usable_days", 12.5)
+    assert server._history_days() == 12.5
+
+
+def test_usable_days_is_zero_before_the_first_worker_cycle(monkeypatch):
+    """Not None, and not the archive's age: nothing is trainable yet."""
+    monkeypatch.setitem(server._state, "source", _WithStore())
+    monkeypatch.setitem(server._state, "usable_days", None)
+    assert server._history_days() == 0.0
+
+
 def test_a_retrain_is_refused_when_the_history_is_too_short(monkeypatch):
     monkeypatch.setattr(server, "_history_days", lambda: 1.0)
     with pytest.raises(HTTPException) as raised:
         server._start_background_train()
     assert raised.value.status_code == 409
-    assert "days of history" in raised.value.detail
+    assert "days of observed presence" in raised.value.detail
     # Refused before the lock was taken, or the next attempt would 409 forever.
     assert not server._train_lock.locked()
 
@@ -116,13 +138,8 @@ def _wait_for_unlock(timeout: float = 5.0) -> bool:
 
 
 def test_a_retrain_runs_in_the_background_and_frees_the_lock(monkeypatch):
-    """The caller is told it started; the work happens elsewhere.
-
-    The train is held open on an event rather than returning at once, because
-    the thing worth asserting -- that the lock is held for the DURATION of the
-    run -- is unobservable against a fake that has already finished by the time
-    the assertion executes.
-    """
+    """The train is held open on an event, because a lock held for the DURATION
+    of the run is unobservable against a fake that has already finished."""
     started = threading.Event()
     finish = threading.Event()
     predicted = threading.Event()
@@ -165,11 +182,8 @@ def test_a_failing_retrain_reports_itself_and_still_frees_the_lock(monkeypatch):
 # ---------------------------------------------------------------------------
 # The crossing cuts a save is allowed to carry
 # ---------------------------------------------------------------------------
-#
 # `crossing_patch` runs BEFORE `api_save_config` assigns anything, because the
-# settings object it would assign to is the live one the five-minute predict
-# cycle reads. A rejected save must not leave the process publishing off a value
-# that never reached disk.
+# settings object it would assign to is the live one the predict cycle reads.
 
 from occupancy_forecast import config as config_mod                      # noqa: E402
 from occupancy_forecast.tests.conftest import settings as make_settings  # noqa: E402
@@ -177,9 +191,8 @@ from occupancy_forecast.tests.conftest import settings as make_settings  # noqa:
 
 @pytest.mark.parametrize("value", [-0.1, 0, 0.0, 1, 1.0, 1.5, "0.5", True, None])
 def test_a_cut_outside_zero_to_one_is_refused(value):
-    """Open at both ends: 0 and 1 can never be met by a rounded curve, so they
-    would leave the sensor permanently unknown rather than doing the obvious
-    thing. `True` is in the list because JSON booleans arrive as Python ints."""
+    """Open at both ends: 0 and 1 can never be met by a rounded curve. `True` is
+    in the list because JSON booleans arrive as Python ints."""
     with pytest.raises(HTTPException) as err:
         server.crossing_patch({"departure_threshold": value}, make_settings())
     assert err.value.status_code == 400
@@ -226,13 +239,8 @@ def test_a_patch_that_names_none_of_them_leaves_them_alone():
 # The identity fields a save is allowed to carry, and what a rejected save
 # may NOT do
 # ---------------------------------------------------------------------------
-#
-# The endpoint's whole schema is `payload: dict`. `{"people": "person.alice"}`
-# used to reach `config.configure` as a string, which iterated it and minted
-# twelve one-letter subjects. And every field was assigned onto the LIVE
-# settings object before any of the checks ran, so a rejected save left the
-# process running on values that never reached disk -- an empty people list
-# stopped the collector while the forecasts carried on.
+# The endpoint's schema is `payload: dict`, so every field is checked here
+# before anything touches the LIVE settings object.
 
 @pytest.mark.parametrize("payload", [
     {"people": "person.alice"},
@@ -260,6 +268,26 @@ def test_well_formed_identity_fields_pass_through():
                      "source": "store", "day_schedule": None, "next_alarm": None}
     assert server.typed_patch({"departure_threshold": 0.4}) == {}, \
         "the crossing cuts are crossing_patch's, not this one's"
+
+
+@pytest.mark.parametrize("value", [1, 30.5, True, "30", -1])
+def test_retention_must_be_whole_days_the_chart_can_reach(value):
+    """One day is the case worth pinning: legal-looking, and it deletes a +48 h
+    forecast before it can ever be scored."""
+    with pytest.raises(HTTPException) as raised:
+        server.typed_patch({"forecast_retention_days": value})
+    assert raised.value.status_code == 400
+
+
+def test_zero_is_keep_everything_and_has_no_upper_bound():
+    floor = -(-max(config_mod.HORIZONS_H) // 24)
+    assert server.typed_patch({"forecast_retention_days": 0}) == {
+        "forecast_retention_days": 0}
+    assert server.typed_patch({"forecast_retention_days": floor}) == {
+        "forecast_retention_days": floor}
+    patch = server.typed_patch({"forecast_retention_days": 3650.0})
+    assert patch == {"forecast_retention_days": 3650}
+    assert isinstance(patch["forecast_retention_days"], int)
 
 
 class _FakeHA:
@@ -319,6 +347,7 @@ def _accepted_save_setup(monkeypatch):
     live = make_settings()
     monkeypatch.setitem(server._state, "settings", live)
     monkeypatch.setitem(server._state, "source", object())
+    monkeypatch.setitem(server._state, "forecast_log", object())
     monkeypatch.setitem(server._state, "ha",
                         _FakeHA("person.alice", "person.bob", "zone.alice_office"))
     monkeypatch.setattr(server, "_listener", None)
@@ -343,11 +372,9 @@ def test_an_accepted_save_swaps_the_live_settings_and_writes_them(monkeypatch):
 
 
 def test_removing_a_person_clears_their_retained_entities_and_retrains(monkeypatch):
-    """Every payload the add-on publishes is retained, and nothing ever
-    unpublished one: a removed person kept their sensors in Home Assistant
-    forever, holding the last forecast. And the models on disk are now about
-    a different house, so the retrain happens now rather than at the next
-    scheduled 04:00, which on a mature install is a week away."""
+    """Every payload is retained and nothing ever unpublished one, so a removed
+    person kept their sensors forever. The retrain happens now because the models
+    are about a different house."""
     _live, _saved, retrains, client = _accepted_save_setup(monkeypatch)
 
     server.api_save_config({"people": ["person.bob"]})
@@ -369,14 +396,30 @@ def test_a_save_that_changes_nobody_neither_retracts_nor_retrains(monkeypatch):
     assert retrains == []
 
 
+def test_the_forecast_log_survives_a_save_that_changes_the_source(monkeypatch):
+    """A save is how a refused start-up gets going and how `source` changes; the
+    log is neither -- open it if start-up never got that far, leave it alone
+    otherwise."""
+    _accepted_save_setup(monkeypatch)
+    held = server._state["forecast_log"]
+
+    server.api_save_config({"departure_threshold": 0.4})
+    assert server._state["forecast_log"] is held
+
+    opened = object()
+    monkeypatch.setattr(server.runtime, "forecast_log", lambda: opened)
+    monkeypatch.setitem(server._state, "forecast_log", None)
+    server.api_save_config({"departure_threshold": 0.5})
+    assert server._state["forecast_log"] is opened
+
+
 # ---------------------------------------------------------------------------
 # Start-up that refuses, and the health check Supervisor can act on
 # ---------------------------------------------------------------------------
 
 def test_a_refused_bootstrap_still_hands_the_panel_something_to_edit(monkeypatch):
-    """No people yet, a corrupt config.json, Home Assistant down at boot: each
-    used to exit the process, taking down the panel that is the tool for
-    fixing the first two."""
+    """No people, a corrupt config.json, HA down at boot: none may exit the
+    process, which would take down the panel that fixes the first two."""
     monkeypatch.setitem(server._state, "last_error", None)
 
     monkeypatch.setattr(server.runtime, "home_assistant",
@@ -384,16 +427,17 @@ def test_a_refused_bootstrap_still_hands_the_panel_something_to_edit(monkeypatch
     monkeypatch.setattr(config_mod.Settings, "load",
                         classmethod(lambda cls, path=None: (_ for _ in ()).throw(
                             ValueError("Expecting value: line 1 column 1"))))
-    settings, ha, source = server._degraded_bootstrap(RuntimeError("no people configured"))
+    settings, ha, source, log = server._degraded_bootstrap(
+        RuntimeError("no people configured"))
 
-    assert ha is None and source is None
+    assert ha is None and source is None and log is None
     assert isinstance(settings, config_mod.Settings) and settings.people == []
     assert "no people configured" in server._state["last_error"]
 
 
 def test_health_is_503_while_stalled_and_200_otherwise(monkeypatch):
     """`watchdog:` in config.yaml points Supervisor here; a non-2xx is what
-    makes it restart the add-on. It always said 200 before."""
+    makes it restart the add-on."""
     monkeypatch.setitem(server._state, "settings", make_settings())
     monkeypatch.setitem(server._state, "ha", object())
     monkeypatch.setitem(server._stall, "since", None)
@@ -424,8 +468,8 @@ class _Notifier:
 
 
 def test_the_still_learning_notification_is_not_re_raised_every_cycle(monkeypatch):
-    """Re-creating it each cycle replaced it each cycle, so a user who
-    dismissed it had it back within five minutes, for up to seven weeks."""
+    """Re-creating it each cycle replaced it each cycle, so a dismissed
+    notification was back within five minutes."""
     ha = _Notifier()
     monkeypatch.setitem(server._state, "ha", ha)
     monkeypatch.setattr(server, "_notified", None)
@@ -456,13 +500,9 @@ def test_the_still_learning_notification_is_not_re_raised_every_cycle(monkeypatc
 
 # ---------------------------------------------------------------------------
 # The worker watchdog
-#
-# On 2026-09-01 the add-on published nothing for 11.5 hours against a 5-minute
-# cycle, and every health signal stayed green: `last_error` was None because
-# the thread was blocked rather than raising, and both connections were up. The
-# outage was found by looking at a chart. These pin the thing that would have
-# said so.
 # ---------------------------------------------------------------------------
+# A blocked thread leaves every health signal green: `last_error` is None
+# because nothing raised, and both connections are up.
 
 def test_a_moving_worker_is_never_called_stalled(monkeypatch):
     monkeypatch.setitem(server._heartbeat, "at", 1000.0)
@@ -486,8 +526,7 @@ def test_a_blocked_worker_is_reported_once_with_its_phase(monkeypatch, caplog):
     assert dumped == [1], "the stacks are the whole point; without them there is nothing to debug"
     assert any("STALLED in predict" in r.getMessage() for r in caplog.records)
 
-    # Still stalled a minute later: no second report, no second dump. A
-    # watchdog that logs every minute for eleven hours is one nobody reads.
+    # Still stalled a minute later: no second report, no second dump.
     assert server.check_stall(now=late + 60, dump=lambda: dumped.append(1))
     assert server._stall["count"] == 1
     assert dumped == [1]
@@ -506,16 +545,9 @@ def test_recovery_clears_the_stall_and_re_arms(monkeypatch, caplog):
 
 
 def test_a_retrain_is_not_a_stall(monkeypatch):
-    """It legitimately holds the worker for minutes. A threshold wide enough to
-    span one would be too wide to catch anything else, so it is measured
-    against its own, longer deadline instead -- TRAIN_STALL_SECONDS from the
-    moment the lock was taken.
-
-    The signal is the TRAIN LOCK, and this test says so by taking it. The
-    version before it set `_state["training_in_progress"]` -- a key nothing in
-    the add-on ever writes -- so the test was the only thing that had ever made
-    the exemption fire, and it passed against a `check_stall` that would have
-    dumped every thread's stack in the middle of a healthy retrain."""
+    """A retrain legitimately holds the worker for minutes, so it is measured
+    against TRAIN_STALL_SECONDS from when the lock was taken. The signal is the
+    TRAIN LOCK, and this test says so by taking it."""
     monkeypatch.setitem(server._heartbeat, "at", 1000.0)
     monkeypatch.setitem(server._stall, "since", None)
     monkeypatch.setitem(server._stall, "acted", False)
@@ -538,9 +570,8 @@ def test_a_retrain_is_not_a_stall(monkeypatch):
 
 def test_a_train_that_overruns_its_own_deadline_is_a_stall(monkeypatch):
     """The exemption this replaces made a hung train the one failure the
-    watchdog could not see: a worker pool that never returns holds the lock
-    forever, and forever was exempt. Now it is a stall in phase `train`, with
-    the stacks dumped -- and the occupancy-train thread is among them."""
+    watchdog could not see: a pool that never returns holds the lock forever,
+    and forever was exempt."""
     monkeypatch.setitem(server._heartbeat, "at", 1000.0)
     monkeypatch.setitem(server._stall, "since", None)
     monkeypatch.setitem(server._stall, "acted", False)
@@ -568,10 +599,8 @@ def test_taking_the_train_lock_stamps_when(monkeypatch):
 
 
 def test_a_good_cycle_clears_the_error_a_bad_cycle_left_and_only_that(monkeypatch):
-    """`last_error` used to be sticky: one transient failure stayed on the
-    status page until a restart, so "failing now" and "failed once" read the
-    same. A train's error is deliberately NOT cleared by a later cycle -- a
-    failed 04:00 train is worth seeing at breakfast."""
+    """A sticky `last_error` makes "failing now" and "failed once" read the
+    same. A train's error is deliberately NOT cleared by a later cycle."""
     monkeypatch.setitem(server._state, "last_error", None)
     monkeypatch.setattr(server, "_cycle_failed", False)
 
@@ -583,6 +612,26 @@ def test_a_good_cycle_clears_the_error_a_bad_cycle_left_and_only_that(monkeypatc
     server._record_error(RuntimeError("every horizon failed to train"), from_cycle=False)
     server._clear_cycle_error()
     assert "failed to train" in server._state["last_error"]
+
+
+def test_the_status_page_keeps_an_errors_stamp_and_drops_its_message(monkeypatch):
+    """`/api/status` needs no login, so an exception's own text stays in `_state`
+    and in the log. The ISO stamp survives because `panel/src/format.ts` splits
+    on it."""
+    monkeypatch.setitem(server._state, "settings", make_settings())
+    monkeypatch.setitem(server._state, "last_error", None)
+    monkeypatch.setitem(server._state, "last_error_public", None)
+    monkeypatch.setattr(server, "_cycle_failed", False)
+
+    server._record_error(OSError("no such file: /data/features.parquet"),
+                         from_cycle=True)
+
+    assert "/data/features.parquet" in server._state["last_error"], "kept for the log"
+    served = server._status()
+    assert "/data/features.parquet" not in json.dumps(served)
+    assert server.log.SEE_THE_LOG in served["last_error"]
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T[\d:.+\-Z]+: ", served["last_error"]), \
+        "the shape splitError() matches, or the Training card loses its clock"
 
 
 def test_the_status_page_shows_the_worker_ageing(monkeypatch):
@@ -597,13 +646,9 @@ def test_the_status_page_shows_the_worker_ageing(monkeypatch):
 
 
 def test_the_heartbeat_is_hourly_and_unconditional(monkeypatch, caplog):
-    """One line an hour when nothing has changed, so that SILENCE means
-    something. Before it, a working add-on and a hung one wrote identical
-    logs -- two lines per start and nothing else -- which is how 11.5 hours of
-    nothing went unnoticed.
-
-    Unconditional on health on purpose: a heartbeat that only appears when
-    things are fine cannot be told apart from a stopped process."""
+    """One line an hour when nothing has changed, so that SILENCE means something.
+    Unconditional on health: a heartbeat that only appears when things are fine
+    cannot be told apart from a stopped process."""
     caplog.set_level("INFO")
     monkeypatch.setitem(server._state, "settings", make_settings())
     monkeypatch.setitem(server._heartbeat, "said", 0.0)
@@ -647,21 +692,16 @@ class _Recorder:
         return 0
 
 
-class _Source:
-    def __init__(self, store):
-        self.store = store
-
-
 def _result(curve, observed_at="2026-09-02T20:30:00+00:00"):
     return {"subject": "alice", "observed_at": observed_at, "curve": curve}
 
 
 def test_a_forecast_is_recorded_on_the_slot_it_was_about(monkeypatch):
-    """+6 h from a row observed at 20:30 is about 02:30, not about 'six hours
-    after whenever this cycle happened to run'. The join on the read side is an
-    equality, so an anchor half a slot out would line nothing up ever."""
+    """+6 h from a row observed at 20:30 is about 02:30, not six hours after the
+    cycle ran. The read side joins on equality, so half a slot out matches
+    nothing."""
     store = _Recorder()
-    monkeypatch.setitem(server._state, "source", _Source(store))
+    monkeypatch.setitem(server._state, "forecast_log", store)
 
     server._record_forecasts([_result({6: 0.8})])
 
@@ -675,7 +715,7 @@ def test_an_unserved_horizon_writes_no_row(monkeypatch):
     """The absence IS the record. It is what makes the gap appear on the chart,
     and it is why this must not be helpfully backfilled with a null row."""
     store = _Recorder()
-    monkeypatch.setitem(server._state, "source", _Source(store))
+    monkeypatch.setitem(server._state, "forecast_log", store)
 
     server._record_forecasts([_result({1: 0.9, 2: 0.8})])
 
@@ -685,7 +725,8 @@ def test_an_unserved_horizon_writes_no_row(monkeypatch):
 
 def test_the_retention_window_is_pruned_every_cycle(monkeypatch):
     store = _Recorder()
-    monkeypatch.setitem(server._state, "source", _Source(store))
+    monkeypatch.setitem(server._state, "forecast_log", store)
+    monkeypatch.setitem(server._state, "settings", make_settings())
 
     server._record_forecasts([_result({6: 0.8})])
 
@@ -694,34 +735,72 @@ def test_the_retention_window_is_pruned_every_cycle(monkeypatch):
     assert abs(age.days - config_mod.FORECAST_RETENTION_DAYS) <= 1
 
 
+def test_the_window_pruned_is_the_one_the_setting_names(monkeypatch):
+    """The whole point of making it settable: the number on the Setup tab has
+    to be the number the pruner uses, not a constant that happens to match."""
+    store = _Recorder()
+    settings = make_settings()
+    settings.forecast_retention_days = 7
+    monkeypatch.setitem(server._state, "forecast_log", store)
+    monkeypatch.setitem(server._state, "settings", settings)
+
+    server._record_forecasts([_result({6: 0.8})])
+
+    age = dt.datetime.now(dt.timezone.utc) - store.pruned[0]
+    assert abs(age.days - 7) <= 1
+
+
+def test_zero_days_prunes_nothing_at_all(monkeypatch):
+    """Not "delete everything older than now", which is what a cutoff computed
+    from 0 would mean and would erase the table on the first cycle."""
+    store = _Recorder()
+    settings = make_settings()
+    settings.forecast_retention_days = 0
+    monkeypatch.setitem(server._state, "forecast_log", store)
+    monkeypatch.setitem(server._state, "settings", settings)
+
+    server._record_forecasts([_result({6: 0.8})])
+
+    assert len(store.rows) == 1, "still recorded"
+    assert store.pruned == [], "and nothing was deleted"
+
+
 def test_a_store_that_cannot_be_written_does_not_fail_the_serve_cycle(monkeypatch):
-    """The house getting a forecast outranks the chart getting a data point. A
-    full disk or a read-only database must cost a gap on a panel card, not the
-    prediction Home Assistant is waiting for."""
-    monkeypatch.setitem(server._state, "source", _Source(_Recorder(fail=True)))
+    """The house getting a forecast outranks the chart getting a data point: a
+    full disk costs a gap on a panel card, not the prediction HA waits for."""
+    monkeypatch.setitem(server._state, "forecast_log", _Recorder(fail=True))
 
     server._record_forecasts([_result({6: 0.8})])  # must not raise
 
 
-def test_an_influx_installation_records_nothing_and_says_nothing(monkeypatch):
-    """No store to write to, and that is not an error -- it is a configuration
-    in which this card is honestly unavailable."""
-    class Storeless:
+def test_an_influx_installation_records_what_it_published(monkeypatch):
+    """The record is the add-on's own output and has nothing to do with where
+    history is read from. Reaching it through `source.store` meant an Influx
+    install recorded nothing."""
+    class Influx:
         pass
 
-    monkeypatch.setitem(server._state, "source", Storeless())
+    store = _Recorder()
+    monkeypatch.setitem(server._state, "source", Influx())
+    monkeypatch.setitem(server._state, "forecast_log", store)
+
+    server._record_forecasts([_result({6: 0.8})])
+
+    assert len(store.rows) == 1
+
+
+def test_a_start_up_that_has_no_log_yet_records_nothing_and_says_nothing(monkeypatch):
+    """`_degraded_bootstrap` opens no files at all, so the worker can reach a
+    cycle before there is anywhere to write."""
+    monkeypatch.setitem(server._state, "forecast_log", None)
     server._record_forecasts([_result({6: 0.8})])  # must not raise
 
 
 # ---------------------------------------------------------------------------
 # Who may change something
 # ---------------------------------------------------------------------------
-#
-# Tested against `require_admin` directly rather than over HTTP, for the reason
-# in this module's docstring: the suite ships no httpx. What the route
-# decorators do with it -- `dependencies=admin_only` on the five POSTs -- is
-# asserted separately by reading the app's own route table, which is the part a
-# new endpoint can silently get wrong.
+# Tested against `require_admin` directly (no httpx). What the route decorators
+# do with it is asserted separately by reading the app's route table.
 
 def _request(headers: dict | None = None, path: str = "/train"):
     from starlette.requests import Request
@@ -739,9 +818,8 @@ def _request(headers: dict | None = None, path: str = "/train"):
 
 
 def test_an_empty_allowlist_lets_everyone_through(monkeypatch):
-    """The default, and what every install had before the option existed. An
-    upgrade that locked the owner out of their own panel would be a worse bug
-    than the one this fixes."""
+    """The default, and what every install had before the option existed: an
+    upgrade must not lock the owner out of their own panel."""
     monkeypatch.delenv("OCCUPANCY_ADMIN_USERS", raising=False)
     assert server.require_admin(_request()) is None
     assert server.require_admin(_request({"X-Remote-User-Id": "anyone"})) is None
@@ -761,9 +839,8 @@ def test_an_unlisted_user_is_refused(monkeypatch):
 
 
 def test_no_header_is_refused_once_the_allowlist_is_set(monkeypatch):
-    """The only ways to arrive without the header are to bypass Ingress or to
-    sit behind a proxy that never set it. Neither is a user we can name, and
-    "cannot be named" must not mean "allowed"."""
+    """No header means Ingress was bypassed or a proxy never set it; "cannot be
+    named" must not mean "allowed"."""
     monkeypatch.setenv("OCCUPANCY_ADMIN_USERS", "abc123")
     with pytest.raises(HTTPException) as raised:
         server.require_admin(_request())
@@ -781,8 +858,7 @@ def test_the_allowlist_is_read_per_request(monkeypatch):
 
 
 def test_every_mutating_route_is_gated():
-    """The list is the point. A new POST added without the dependency is exactly
-    the regression this file exists to catch, and it is invisible in review."""
+    """A new POST added without the dependency is invisible in review."""
     gated = {
         (path, method)
         for route in server.app.routes
@@ -797,9 +873,7 @@ def test_every_mutating_route_is_gated():
         for method in getattr(route, "methods", None) or ()
         if method == "POST"
     }
-    # Named, not just counted: `posts == gated` is satisfied by two empty sets,
-    # so a refactor that renamed every endpoint would pass a test that only
-    # compared them to each other.
+    # Named, not just counted: `posts == gated` is satisfied by two empty sets.
     assert {path for path, _ in posts} == {
         "/api/config", "/collect", "/predict", "/train", "/reload"}
     assert posts == gated, f"ungated POST routes: {sorted(posts - gated)}"

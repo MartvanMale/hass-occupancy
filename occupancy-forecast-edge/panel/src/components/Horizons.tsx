@@ -6,38 +6,11 @@ import { integerRuns } from './geometry'
 import type { ModelKind, ServedBy } from '../types'
 
 /**
- * What is serving each horizon, as one row and a strip.
- *
- * There are 48 horizons (`config.HORIZONS_H`), and the page this replaced drew
- * one full Mushroom row for each of them: a wall of near-identical text in a
- * card sitting next to three-row cards. Almost none of it was information. What
- * a reader actually wants is where the boundary falls and what is on each side
- * of it, and that fits in a sentence and a 22px strip.
- *
- * Three states, not two: a horizon is served by a model fitted for that horizon
- * alone, by the one pooled model fitted over every horizon, or by nothing at
- * all. Where the first two hand over is the measured crossover, and it is the
- * most interesting thing on the strip, so it is worth a colour.
- *
- * **The two model families are green and BLUE, not two greens.** Two shades of
- * one hue were tried and measured: to sit inside the dark-mode lightness band a
- * second green has to be close enough to the first that normal-vision Delta E
- * falls to 3.6-5.9 against a floor of 15, and the only green that separates
- * properly is too light for the dark surface and drops to 2:1 on the light one.
- * Green/blue passes every check in both modes, and blue is already a token.
- *
- * **The third state is hollow grey, not a third colour.** It was orange, back
- * when a horizon the model had not earned was served its baseline instead.
- * Nothing is published there now, and a solid third hue would say "a third kind
- * of thing serves this" when the fact is that nothing does. It would also put a
- * third saturated fill beside a pair whose separation was measured. An empty
- * cell is the honest shape for an empty horizon.
- *
- * **This strip is about the MODELS, not about the last forecast.** A horizon
- * that ships can still come out empty on the chart, if a feature the model
- * wanted was missing from that particular row. The two will occasionally
- * disagree, and that disagreement is the signal -- `predict_rows` logs a
- * warning when it happens. It is not a bug to be reconciled away.
+ * What is serving each horizon, as one row and a 22px strip -- 48 of them, and
+ * a wall of near-identical rows was almost none of it information. Three
+ * states: a dedicated model, the pooled one, or nothing. Green and BLUE, not
+ * two greens, which cannot separate inside the dark-mode lightness band.
+ * This strip is about the MODELS, not about the last forecast; they can differ.
  */
 
 type Range = [number, number]
@@ -85,30 +58,30 @@ export function Horizons({ served, kinds = {}, beatenBy = {} }: {
     .sort((a, b) => a - b)
 
   const isModel = (h: number) => served[String(h)] === 'model'
-  // `model_kind` is keyed only by the horizons a model serves, and it is absent
-  // altogether on a build older than 0.4.0 -- so a missing entry means "a model
-  // serves this, family unknown", which is the dedicated colour rather than a
-  // fourth state nobody wants to see.
+  // A missing `model_kind` entry means "a model serves this, family unknown" --
+  // the dedicated colour, not a fourth state.
   const stateOf = (h: number): State =>
     !isModel(h) ? 'none' : kinds[String(h)] === 'pooled' ? 'pooled' : 'dedicated'
   const modelled = horizons.filter(isModel)
 
+  const dedicated = horizons.filter((h) => stateOf(h) === 'dedicated')
+  const pooled = horizons.filter((h) => stateOf(h) === 'pooled')
+  const unserved = horizons.length - modelled.length
+  // `best_baseline` is present for exactly the horizons that lost a bake-off,
+  // which is the convention the tooltip reads.
+  const beaten = horizons.filter((h) => stateOf(h) === 'none' && beatenBy[String(h)])
+  const untrained = unserved - beaten.length
+
   const primary =
     modelled.length === 0
-      ? 'No horizon has beaten its baseline yet, so nothing is published'
+      ? beaten.length
+        ? 'No horizon has beaten its baseline yet, so nothing is published'
+        : 'No model has trained yet, so nothing is published'
       : modelled.length === horizons.length
         ? `Every horizon is served by the model`
         : `Model serves ${modelled.length} of ${horizons.length} horizons`
 
-  const dedicated = horizons.filter((h) => stateOf(h) === 'dedicated')
-  const pooled = horizons.filter((h) => stateOf(h) === 'pooled')
-  const unserved = horizons.length - modelled.length
-
-  // The visible line: three counted facts, joined. What it USED to say -- that
-  // an unserved horizon means the model did not beat its baseline, so the
-  // sensor reads unknown and the chart has a gap -- is in DOCS.md under
-  // "Which horizons publish, and why some do not". It is the same sentence
-  // every time the page loads, and after the first read it is furniture.
+  // Three counted facts, joined. The longer explanation is in DOCS.md.
   const secondary = [
     modelled.length ? summariseRuns(runs(modelled)) : '',
     dedicated.length && pooled.length
@@ -117,19 +90,22 @@ export function Horizons({ served, kinds = {}, beatenBy = {} }: {
     unserved ? `${unserved} not served` : '',
   ].filter(Boolean).join(' · ')
 
-  // The strip's accessible description, and the ONLY place the long form
-  // survives on screen. A sighted reader has the strip itself and the colour
-  // key under it; a screen reader has this sentence and nothing else, so
-  // shortening it here would not be a trim, it would be a removal.
+  // The strip's accessible description and the only place the long form
+  // survives: a screen reader has this sentence and nothing else.
   const split = dedicated.length && pooled.length
     ? `${dedicated.length} of those are fitted for one horizon each (${summariseRuns(runs(dedicated))}) `
       + `and ${pooled.length} come from the one pooled model (${summariseRuns(runs(pooled))}). `
     : ''
   const where = modelled.length ? `${summariseRuns(runs(modelled))}. ` : ''
+  const why = beaten.length && untrained
+    ? `the model lost to its own baseline at ${beaten.length} of them and has not `
+      + `trained or passed its publication checks at the other ${untrained}`
+    : beaten.length
+      ? 'the model did not beat its own baseline'
+      : 'the model has not trained or has not passed its publication checks'
   const rest = unserved
-    ? `${modelled.length ? 'Elsewhere nothing' : 'Nothing'} is published: the `
-      + 'model did not beat its own baseline, so the sensor reads unknown and '
-      + 'the forecast chart has a gap.'
+    ? `${modelled.length ? 'Elsewhere nothing' : 'Nothing'} is published: ${why}, `
+      + 'so the sensor reads unknown and the forecast chart has a gap.'
     : ''
   const described = `${where}${split}${rest}`
 

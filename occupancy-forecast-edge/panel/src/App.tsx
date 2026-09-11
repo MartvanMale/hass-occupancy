@@ -6,26 +6,18 @@ import { ConfigView } from './views/ConfigView'
 import { DataView } from './views/DataView'
 import { OverviewView } from './views/OverviewView'
 
-/** Home Assistant is polled for status; the configuration is not, because the
- *  only thing that changes it is the form on this page. Ten seconds is fast
- *  enough to watch MQTT reconnect and slow enough to be invisible. */
+/** Status is polled; the configuration is not, because only the form on this
+ *  page changes it. Ten seconds is fast enough to watch MQTT reconnect. */
 const POLL_MS = 10_000
 
-/** While a train is running there is an elapsed time on screen that should tick
- *  and a finish worth noticing promptly. It is minutes, not hours, so a faster
- *  poll for its duration costs nothing. */
+/** A running train has an elapsed time that should tick and a finish worth
+ *  noticing promptly; it lasts minutes, so the faster poll costs nothing. */
 const POLL_MS_TRAINING = 3_000
 
 /**
- * The two questions the panel answers, and the only navigation it has.
- *
- * Deliberately not persisted. A hash would push entries into the *top-level*
- * history from inside an iframe, so Back would step through tab changes instead
- * of leaving the Home Assistant page -- and the Ingress URL carries a rotating
- * token, so the deep link a hash would buy cannot be shared anyway.
- * `localStorage` in an Ingress iframe is Home Assistant's own storage, shared by
- * the stable and edge add-ons, so an unnamespaced key there is two add-ons
- * quietly fighting over one slot. Landing on Setup after a reload is fine.
+ * The panel's only navigation. Deliberately not persisted: a hash pushes entries
+ * into the *top-level* history from inside an iframe, and `localStorage` in an
+ * Ingress iframe is Home Assistant's own, shared by the stable and edge add-ons.
  */
 const VIEWS = [
   // Overview first, and the default: it is the one people keep open. Setup is
@@ -38,15 +30,12 @@ const VIEWS = [
 type View = (typeof VIEWS)[number]['id']
 
 export function App() {
-  // Overview is the landing tab. Setup is a thing you do once; this is the
-  // thing people come back to.
   const [view, setView] = useState<View>('overview')
   const [status, setStatus] = useState<Status | null>(null)
   const [candidates, setCandidates] = useState<Candidates | null>(null)
 
-  // The form's own state, seeded from GET /api/config once and owned by the
-  // page thereafter. Kept apart from `status` on purpose: the poll below must
-  // never overwrite a half-finished edit.
+  // The form's own state, seeded once from GET /api/config and kept apart from
+  // `status`: the poll below must never overwrite a half-finished edit.
   const [people, setPeople] = useState<string[]>([])
   const [zones, setZones] = useState<string[]>([])
   const [house, setHouse] = useState<string>('')
@@ -56,6 +45,7 @@ export function App() {
   const [departure, setDeparture] = useState<string>('0.5')
   const [arrival, setArrival] = useState<string>('0.5')
   const [minHours, setMinHours] = useState<string>('2')
+  const [retention, setRetention] = useState<string>('30')
   const [loaded, setLoaded] = useState(false)
 
   const [saving, setSaving] = useState(false)
@@ -71,6 +61,7 @@ export function App() {
     setDeparture(s.departure_threshold.toFixed(2))
     setArrival(s.arrival_threshold.toFixed(2))
     setMinHours(String(s.crossing_min_hours))
+    setRetention(String(s.forecast_retention_days))
     setLoaded(true)
   }, [])
 
@@ -125,13 +116,13 @@ export function App() {
         // Omitted when the holidays package could not be loaded, which leaves
         // the stored calendar alone rather than clearing it.
         ...(candidates?.countries.length ? { holiday_country: holiday } : {}),
-        // Empty means "no shading", which is a real choice, so it is sent as
-        // null rather than omitted -- omitting would make the setting
-        // impossible to clear once set.
+        // Empty means "no shading", a real choice: sent as null rather than
+        // omitted, or the setting could never be cleared once set.
         day_schedule: daySchedule || null,
         departure_threshold: Number(departure),
         arrival_threshold: Number(arrival),
         crossing_min_hours: Number(minHours),
+        forecast_retention_days: Number(retention),
       })
       setSaved(true)
       if (savedTimer.current) clearTimeout(savedTimer.current)
@@ -162,16 +153,14 @@ export function App() {
       <header className="head">
         <Shape name="logo" accent="aqua" />
         <div>
-          {/* No fallback string: two add-ons serve identical-looking panels and
-              only this name separates them, so it comes from the server or not
-              at all. */}
+          {/* No fallback string: this name is all that separates two add-ons'
+              identical-looking panels, so it comes from the server or not at all. */}
           <h1>{status?.display_name ?? ' '}</h1>
           <p className="sub">Who is home, and who is coming home.</p>
         </div>
 
-        {/* Two buttons, so no roving tabindex: they are already keyboard
-            reachable in order, and the arrow-key pattern would be a regression
-            over that rather than an improvement. */}
+        {/* Three buttons, so no roving tabindex: they are already keyboard
+            reachable in order, and the arrow-key pattern would be a regression. */}
         <nav className="tabs" role="tablist" aria-label="Sections">
           {VIEWS.map((v) => (
             <button
@@ -205,6 +194,7 @@ export function App() {
             departure={departure}
             arrival={arrival}
             minHours={minHours}
+            retention={retention}
             loaded={loaded}
             saving={saving}
             saved={saved}
@@ -217,6 +207,7 @@ export function App() {
             setDeparture={setDeparture}
             setArrival={setArrival}
             setMinHours={setMinHours}
+            setRetention={setRetention}
           />
         ) : view === 'data' ? (
           <DataView status={status} />

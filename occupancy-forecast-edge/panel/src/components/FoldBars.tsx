@@ -2,18 +2,10 @@ import type { CSSProperties } from 'react'
 import type { FoldScore } from '../types'
 
 /**
- * Per-fold Brier, as bars. `Metrics.per_fold` has always been written and never
- * shown.
- *
- * It is the difference between two claims that look identical in a pooled
- * number: a model that beats its baseline in eleven weeks out of fifteen, and
- * one that beats it on the strength of a single lucky week. The ship gate
- * already tests for this -- `folds_beating_best_baseline` and a sign test -- and
- * this is what that gate is looking at.
- *
- * Built on the horizon strip's CSS rather than as a new chart: it is the same
- * shape, a row of cells read left to right, with a height that varies.
- * Lower is better, so a SHORT bar is a good week.
+ * Per-fold Brier, as bars -- the difference between beating the baseline in
+ * eleven weeks of fifteen and beating it on one lucky week, which a pooled
+ * number hides. Built on the horizon strip's CSS: the same shape, with a
+ * varying height. Lower is better, so a SHORT bar is a good week.
  */
 export function FoldBars({ folds, baseline }: {
   folds: FoldScore[]
@@ -21,11 +13,8 @@ export function FoldBars({ folds, baseline }: {
    *  model lost. */
   baseline: number | null
 }) {
-  // A fold with no test rows for this horizon is padding, not a zero: the list
-  // is emitted for every fold INDEX so that `ships` can walk it positionally
-  // against the baseline ladder's. Those entries carry a null Brier, and they
-  // are dropped here rather than drawn -- a bar of height zero would read as a
-  // perfect week, which is the opposite of what an empty fold means.
+  // A fold with no test rows is padding, not a zero -- the list is emitted for
+  // every fold INDEX. A bar of height zero would read as a perfect week.
   const scored = folds.filter((f): f is FoldScore & { brier: number } =>
     typeof f.brier === 'number')
   const empty = folds.length - scored.length
