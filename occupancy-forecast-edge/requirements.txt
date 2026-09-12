@@ -1,11 +1,11 @@
 # Pinned so a rebuild months from now reproduces the model that is running.
-pandas==2.3.3
-numpy==2.3.4
+pandas==3.0.5
+numpy==2.5.3
 # Never below 22.0.0: pyarrow 21.0.0's aarch64 wheel inlined ARMv8.1 LSE atomics
 # in bundled mimalloc and aborted on a Pi 4 (apache/arrow#47766). 23.0.1 for
 # CVE-2026-25087.
-pyarrow==23.0.1
-scikit-learn==1.7.2
+pyarrow==25.0.1
+scikit-learn==1.9.0
 # Arrives with scikit-learn; pinned because train.py imports it directly.
 joblib==1.6.0
 paho-mqtt==2.1.0
