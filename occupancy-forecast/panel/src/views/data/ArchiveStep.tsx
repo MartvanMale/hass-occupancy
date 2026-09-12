@@ -5,16 +5,9 @@ import { Shape, type Accent, type IconName } from '../../components/Icon'
 import { absoluteTime, bytes, count, relativeTime } from '../../format'
 
 /**
- * Step one: the archive, and the entity the rest of the page follows.
- *
- * The entity list was a stack of `Row`s each ending in a small button. That put
- * a 90px target at the far right of a 24rem row and made the other 90% of the
- * row -- the name you are actually reading -- inert. It is a grid of tiles now,
- * and the tile IS the button: the whole thing is the target, `aria-current` says
- * which one the page is following, and picking one scrolls step two into view.
- *
- * The two summary rows above the grid stay rows. They are statements, not
- * choices, and making them look pickable would be a lie.
+ * Step one: the archive, and the entity the rest of the page follows. The tile IS
+ * the button, so the whole of it is the target; `aria-current` marks the one being
+ * followed. The summary rows above the grid stay rows: statements, not choices.
  */
 
 /** The icon for an entity is what the add-on uses it FOR, which is more use
@@ -47,9 +40,8 @@ function EntityTile({ entity, current, onPick }: {
   onPick: (entityId: string) => void
 }) {
   const { tracked, rows, role } = entity
-  // Orange, not red, and not grey: an entity configured with no rows is the one
-  // genuinely wrong state this card can show, and it should not look like the
-  // merely-unused ones.
+  // Orange, not red or grey: a configured entity with no rows is the one
+  // genuinely wrong state this card can show.
   const empty = tracked && rows === 0
   const accent: Accent = empty ? 'orange' : tracked ? 'aqua' : 'grey'
   const words = ROLE_WORDS[role] ?? role
@@ -61,9 +53,8 @@ function EntityTile({ entity, current, onPick }: {
       // Not `aria-pressed`: these are one-of-many, and `current` is the word for
       // "the one being shown" rather than "switched on".
       aria-current={current}
-      // Nothing to chart, so nothing to follow it to. It still appears, because
-      // "this entity is configured and has never reported" is the single most
-      // useful thing this grid can tell you.
+      // Nothing to chart. It still appears, because "configured and has never
+      // reported" is the most useful thing this grid can tell you.
       disabled={rows === 0}
       onClick={() => onPick(entity.entity_id)}
     >

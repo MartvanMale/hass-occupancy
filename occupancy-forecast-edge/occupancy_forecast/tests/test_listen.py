@@ -1,13 +1,6 @@
-"""Trigger-subscription tests.
-
-The socket is not the interesting part -- the filter is. A state trigger with
-no `to`/`from` fires on ANY change to the state object, so without `should_fire`
-every GPS attribute rewrite would wake the worker, and each wake is a 32-day
-feature rebuild. These tests are what keep that from silently regressing into
-"the listener works, it is just always busy".
-
-The handshake is covered too, against a fake socket rather than a network, so a
-protocol mistake fails here instead of as a reconnect loop in the add-on log.
+"""Trigger-subscription tests. The socket is not the interesting part -- the
+filter is: a state trigger with no `to`/`from` fires on ANY change, and each
+wake is a 32-day feature rebuild.
 """
 
 import json
@@ -43,22 +36,15 @@ def test_a_real_state_change_fires():
 
 
 def test_an_attribute_only_change_does_not_fire():
-    """The one that matters.
-
-    A person entity rewrites its GPS attributes every few minutes while
-    somebody is driving, and Home Assistant reports every one of those as a
-    state trigger. Waking on them would mean a continuous feature rebuild for
-    the whole length of a commute, to publish an unchanged answer.
-    """
+    """The one that matters. A person entity rewrites its GPS attributes every
+    few minutes while somebody drives, and HA reports each one as a state
+    trigger; waking on them would rebuild features for a whole commute."""
     assert not listen.should_fire(_trigger("not_home", "not_home"))
 
 
 def test_going_unavailable_does_not_fire():
-    """`unavailable` is the absence of a reading, not a new one.
-
-    `StoreSource.collect` already drops these states, so re-predicting on one
-    would rebuild a month of features to reach the answer already published.
-    """
+    """`unavailable` is the absence of a reading, not a new one. `StoreSource`
+    drops these states already, so a re-predict would only republish."""
     for empty in ("unavailable", "unknown", ""):
         assert not listen.should_fire(_trigger("home", empty)), empty
 
@@ -84,13 +70,9 @@ def test_junk_is_survivable():
 # ---------------------------------------------------------------------------
 
 def test_proximity_sensors_are_not_subscribed_to():
-    """They rewrite every few minutes while somebody drives.
-
-    Their contribution is averaged over a 30-minute slot anyway, so a change in
-    one never moves the answer enough to be worth a rebuild. This is the
-    difference between `trigger_entities` and `tracked_entities`, and the only
-    thing keeping the listener from firing continuously during a commute.
-    """
+    """They rewrite every few minutes while somebody drives, and are averaged
+    over a 30-minute slot anyway. This is the difference between
+    `trigger_entities` and `tracked_entities`."""
     config = make_settings()
     tracked = runtime.tracked_entities(config)
     triggers = runtime.trigger_entities(config)
@@ -227,15 +209,30 @@ def test_nothing_to_subscribe_to_is_not_an_error_worth_raising():
     assert listener.last_error == "nothing to subscribe to"
 
 
-def test_connecting_logs_what_it_subscribed_to(monkeypatch, caplog):
-    """`_session` had no test, and it is the only place `connected` is set.
+def test_the_status_holds_back_a_message_this_module_did_not_write(caplog):
+    """`/api/status` needs no login and a callback's exception can name a token
+    or a URL, so the status page gets the stamp and the log gets the rest. A
+    reason written here is not a secret and still shows."""
+    def boom():
+        raise RuntimeError("rejected: token abc123 for /api/websocket")
 
-    A log line added to it named an attribute that does not exist -- there is
-    no `self.triggers` -- so every subscription attempt raised AttributeError,
-    the add-on fell back to the five-minute poll, and the only sign was
-    `last_error` on the status page. A line in an untested path is untested
-    code; this covers the path so the next one cannot do that.
-    """
+    listener = listen.Listener(["person.alice"], boom, url="ws://test", token="secret")
+    caplog.set_level("WARNING")
+    listener._handle(_event(_trigger("not_home", "home")))
+
+    assert "abc123" in (listener.last_error or ""), "kept for the log"
+    assert "abc123" not in listener.status["last_error"]
+    assert any(r.exc_info for r in caplog.records), "logged with its traceback"
+
+    quiet = listen.Listener([], lambda: None, url="ws://test", token="secret")
+    quiet.start()
+    assert quiet.status["last_error"] == "nothing to subscribe to"
+
+
+def test_connecting_logs_what_it_subscribed_to(monkeypatch, caplog):
+    """`_session` is the only place `connected` is set and had no test: a log
+    line naming an attribute that does not exist raised on every subscription
+    attempt, and the only sign was `last_error`."""
     import contextlib
 
     from websockets.sync import client as ws_client
@@ -264,10 +261,9 @@ def test_connecting_logs_what_it_subscribed_to(monkeypatch, caplog):
 
 
 def test_a_reconfigure_during_the_handshake_ends_that_session(monkeypatch):
-    """`_socket` is published BEFORE the handshake now. Assigned after the
-    subscribe, an `update_entities` landing in that window found nothing to
-    drop, so the session ran on with the old subscription and a person added
-    on the settings page was not listened to until a restart."""
+    """`_socket` is published BEFORE the handshake. Assigned after the subscribe,
+    an `update_entities` landing in that window found nothing to drop, and a
+    person added on the settings page was not listened to until a restart."""
     import contextlib
 
     from websockets.sync import client as ws_client

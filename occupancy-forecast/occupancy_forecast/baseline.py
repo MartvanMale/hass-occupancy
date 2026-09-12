@@ -1,36 +1,8 @@
-"""The ladder every model has to climb, and the numbers it should reproduce.
+"""The ladder every model has to climb.
 
-Measured over about six months of one two-person household, 9 rolling folds,
-Brier on the binarised outcome (lower is better):
-
-    subject   base    persist @1h   persist @24h   same-slot-yday   wday x slot
-    alice     0.236      0.056          0.184           0.184           0.226
-    bob       0.226      0.037          0.168           0.168           0.222
-    house     0.212      0.035          0.103           0.103           0.214
-
-Three facts that should shape how results here are read:
-
-  * **Below about four hours, persistence is close to unbeatable.** "They are
-    home now" scores 0.056 against a 0.236 base at 1 h for alice. A 1-3 h
-    forecast that does not clearly beat it is `state.get()` with extra steps.
-
-  * **Same-slot-yesterday, not the calendar, is the long-horizon bar.** It is
-    the best baseline at every horizon past 6 h -- 0.184 for alice against 0.226
-    for weekday x slot climatology, so ~22% Brier skill against the calendar's
-    ~4%. It has to be used as a *probability* (the fractional `home_frac`), not
-    as a hard 0/1 call: scoring the same information as a confident binary made
-    it look *worse* than the base rate.
-
-  * **Calendar climatology barely works, and for the house it is worse than
-    useless** -- 0.214 against a 0.212 base rate. Roughly 24 samples per
-    (weekday, slot) cell is not enough to estimate a probability, so the cell
-    means are mostly noise. Note the contrast with the daily office flag, where
-    weekday is *strong*: the weekday says a lot about whether somebody goes to
-    the office and very little about whether they are in the house at 15:00.
-
-So the model has to beat ~0.184 at 24 h, not the ~0.226 the calendar suggests.
-That is a harder bar than the calendar-shaped intuition implies, and it is the
-right one.
+Six rungs, on the same folds and rows as the model. Persistence is close to
+unbeatable below about four hours, same-slot-yesterday is the long-horizon bar,
+and both are PROBABILITIES: scored as a hard 0/1 they lose to the base rate.
 """
 
 from __future__ import annotations
@@ -51,20 +23,9 @@ SHRINK_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4)
 
 
 def _fit_shrink(train: pd.DataFrame, raw: np.ndarray, horizon: int) -> tuple[float, float]:
-    """Choose how far to pull a row-local prediction toward the base rate.
-
-    `state_now` and the daily lags are single observations, so as probabilities
-    they are wildly overconfident: they say 0.0 or 1.0 and mean "one sample
-    said so". Measured 2026-08-31 at 48 h, shrinking the lag from w=1.0 to
-    w=0.7 improved its Brier from 0.202 to 0.168 -- a bigger move than most of
-    what the model does.
-
-    Shrinking makes the *baselines stronger*, which raises the bar the model has
-    to clear. That is the point: an overconfident baseline is an easy baseline,
-    and beating one is not evidence of anything.
-
-    Fitted on the training rows of the fold and applied to test, so this is
-    calibration and not a peek. Returns (weight, base_rate).
+    """Pull a row-local rung toward the base rate: `state_now` and daily lags
+    are single observations saying 0.0 or 1.0; shrinking makes the baselines
+    STRONGER. Fitted on the fold's training rows, so calibration, not a peek.
     """
     outcome = (train[f"y_{horizon}h"] >= evaluate.HOME_THRESHOLD).astype(float)
     base = float(outcome.mean())
@@ -83,10 +44,9 @@ def shrink(raw: np.ndarray, weight: float, base: float) -> np.ndarray:
 
 def _climatology(train: pd.DataFrame, test: pd.DataFrame, keys: list[str],
                  horizon: int) -> np.ndarray:
-    """P(home) in the target slot, from the training rows sharing `keys`.
-
-    Grouped on the TARGET slot's calendar, not the origin's, so this is a fair
-    comparison against a model that also sees the target calendar.
+    """P(home) in the target slot, from the training rows sharing `keys`,
+    grouped on the TARGET slot's calendar so it is fair against a model that
+    also sees it.
     """
     outcome = (train[f"y_{horizon}h"] >= evaluate.HOME_THRESHOLD).astype(float)
     frame = train[keys].copy()
@@ -102,11 +62,8 @@ def _climatology(train: pd.DataFrame, test: pd.DataFrame, keys: list[str],
 
 
 def _target_calendar(table: pd.DataFrame, horizon: int) -> pd.DataFrame:
-    """Recover the target slot's weekday and slot index for grouping.
-
-    The parquet stores the calendar as sin/cos pairs, which are right for the
-    model and useless as a groupby key, so the two integers are rebuilt here
-    from the timestamp rather than stored twice.
+    """The target slot's weekday and slot index, rebuilt from `time` because
+    the parquet's sin/cos calendar is useless as a groupby key.
     """
     local = (table["time"] + pd.Timedelta(hours=horizon)).dt.tz_convert(config.TIMEZONE)
     return pd.DataFrame({
@@ -117,17 +74,9 @@ def _target_calendar(table: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 
 def predictors(horizon: int, calendar: pd.DataFrame | None = None) -> dict:
-    """The ladder, in increasing order of what it is allowed to know.
-
-    `calendar` is `_target_calendar` over the WHOLE frame, computed once by the
-    caller. It is row-wise arithmetic on `time`, so slicing it by a fold's index
-    gives exactly what rebuilding it from that fold's rows gives -- and the
-    three climatology rungs were each rebuilding it, per fold, from a
-    `pd.concat` that copied the training frame. Three times a fold, nineteen
-    folds, forty-eight horizons.
-
-    Optional so the rungs stay usable on their own, which is what `main` and the
-    tests do.
+    """The ladder, in increasing order of what it is allowed to know. `calendar`
+    is `_target_calendar` over the whole frame, computed once by the caller:
+    row-wise, so a fold's slice of it is what rebuilding would give.
     """
 
     def keys_for(train, test):
@@ -147,9 +96,8 @@ def predictors(horizon: int, calendar: pd.DataFrame | None = None) -> dict:
         return shrink(test["state_now"].to_numpy(), weight, base)
 
     def same_slot_yesterday(train, test):
-        # The nearest safe daily lag of the target slot. At 36-48 h "yesterday"
-        # is in the future, so this falls back to two days -- see
-        # features.safe_daily_lags.
+        # The nearest safe daily lag of the target slot; at 36-48 h "yesterday"
+        # is in the future, so this falls back to two days.
         lags = features.safe_daily_lags(horizon)
         if not lags:
             return np.full(len(test), np.nan)
@@ -188,16 +136,9 @@ def predictors(horizon: int, calendar: pd.DataFrame | None = None) -> dict:
 
 
 def columns_for(horizon: int) -> list[str]:
-    """Every column `predictors(horizon)` reads, and nothing else.
-
-    Kept here, beside the rungs, rather than at the call site: a new rung that
-    reaches for another column would otherwise silently outgrow a slice made
-    somewhere that cannot see it. `train.train_all` fans the ladder out over
-    horizons and hands each worker only these, which is the difference between
-    pickling five columns and pickling a thousand-column table 48 times.
-
-    The climatology rungs need no columns of their own -- they group on the
-    target calendar, which `_target_calendar` rebuilds from `time`.
+    """Every column `predictors(horizon)` reads, and nothing else. Kept beside
+    the rungs, so a new rung reaching for another column cannot silently outgrow
+    a slice made where it is invisible.
     """
     columns = ["time", "subject", f"y_{horizon}h", "state_now"]
     lags = features.safe_daily_lags(horizon)
@@ -209,26 +150,9 @@ def columns_for(horizon: int) -> list[str]:
 def run(table: pd.DataFrame, horizon: int, geometry: dict | None = None,
         windows: list | None = None,
         required: Iterable[str] = ()) -> dict[str, dict]:
-    """Score every rung on the same folds a model would be scored on.
-
-    `geometry` comes from the caller so the ladder and the model are cut on
-    identical folds -- the model filters more strictly than this does, so
-    letting each derive its own from its own frame is how they drift apart. On
-    a short history it matters twice over: a ladder cut with the default
-    geometry returns nothing at all, which reads downstream as "no baseline
-    beat the model" rather than "no baseline ran".
-
-    `windows` closes that gap properly. The ship gate counts folds the model
-    won, indexing this function's `per_fold` list POSITIONALLY against the
-    model's -- which is only correct if both cut the same calendar windows.
-    Passing them in makes that an argument rather than a coincidence of two
-    frames happening to start on the same day.
-
-    `required` closes the other half of the same gap, the ROWS. The model
-    drops any row missing a required origin feature; this dropped on the
-    target alone, so its Brier was a mean over a superset of the model's rows
-    and the gate compared two denominators. `train.required_origin_columns`
-    is what the fits use, and `train_all` passes it here.
+    """Score every rung on the model's folds and rows: `geometry`, `windows` and
+    `required` come from the caller because the ship gate walks `per_fold`
+    POSITIONALLY against the model's and compares Briers over the same rows.
     """
     required = [c for c in required if c in table.columns]
     frame = (table.dropna(subset=[f"y_{horizon}h", *required])
@@ -249,9 +173,7 @@ def run(table: pd.DataFrame, horizon: int, geometry: dict | None = None,
     if not cuts:
         return {}
 
-    # Once, for the whole frame and all six rungs -- it was being rebuilt three
-    # times per fold from a concat of the fold's own rows, and `predictors`
-    # itself was being rebuilt three times per fold on top of that.
+    # Once, for the whole frame and all six rungs.
     rungs = predictors(horizon, _target_calendar(frame, horizon))
     per_rung: dict[str, list] = {name: [] for name in rungs}
     for train_idx, test_idx in cuts:

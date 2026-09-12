@@ -3,11 +3,8 @@ import { Shape, type Accent, type IconName } from './Icon'
 
 /**
  * One Mushroom row: shape, then primary over secondary, then a trailing control.
- *
- * The trailing slot takes whatever the row is *for* -- a checkbox, a select, a
- * chip -- which is why it is a node and not a variant. `as="label"` is what makes
- * the whole row a click target for the control inside it; a 36px checkbox on a
- * phone is not one.
+ * The trailing slot is a node, not a variant. `as="label"` makes the whole row
+ * a click target -- a 36px checkbox on a phone is not one.
  */
 export function Row({
   icon,
@@ -26,9 +23,8 @@ export function Row({
   trailing?: ReactNode
   as?: 'div' | 'label'
   muted?: boolean
-  /** The trailing slot holds a <select>, which is the only thing wide enough to
-   *  need a line of its own on a narrow card. Chips and checkboxes never do, and
-   *  letting them wrap was worse than the problem it was meant to solve. */
+  /** The trailing slot holds a `<select>`, the only thing wide enough to need
+   *  its own line. Letting chips and checkboxes wrap was worse. */
   control?: boolean
 }) {
   const Tag = as

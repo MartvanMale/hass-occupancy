@@ -5,33 +5,18 @@ import { ChartTip, TipRow } from './ChartTip'
 import { useChartPointer } from './useChartPointer'
 
 /**
- * Every horizon's Brier against the baseline it had to beat, as two lines.
- *
- * The 48 rows of this were only ever a table, which answers "what did +24 h
- * score" well and "where do the two cross" not at all -- and where they cross is
- * the interesting fact, because it is where knowing the recent past stops being
- * worth more than knowing the household's habits.
- *
- * ZERO-BASED, deliberately. Brier is a squared error on a probability: zero
- * means every forecast was right, and the distance between two lines is a
- * quantity, not a rank. Cropping the axis to the data would turn a 0.005 gap
- * into a chasm, which is exactly the impression this chart must not give. The
- * fold ribbon supplies the spread that a cropped axis would otherwise be
- * smuggling in.
- *
- * `preserveAspectRatio="none"`, as everywhere else here, so nothing inside may
- * be a shape whose proportions matter -- no circles, no `<text>`. The one
- * exception a marker needs is a VERTICAL line, which is the single primitive
- * whose meaning survives an anisotropic transform; its label is HTML,
- * positioned over the box.
+ * Every horizon's Brier against the baseline it had to beat, as two lines --
+ * where they cross is the interesting fact and a table answers it not at all.
+ * ZERO-BASED, deliberately: Brier is a squared error, so the distance between
+ * two lines is a quantity and cropping the axis turns a 0.005 gap into a chasm.
+ * `preserveAspectRatio="none"`, so no circles and no `<text>`.
  */
 
 const W = 1000
 const H = 180
 
-/** `explore.metrics_summary` skips a horizon with no metrics and writes null for
- *  a field missing from `metrics.json`, while the type says `number`. Trust the
- *  value, not the declaration. */
+/** `explore.metrics_summary` writes null where the type says `number`. Trust
+ *  the value, not the declaration. */
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
 export function ScoreByHorizon({ horizons, current, onPick }: {
@@ -40,9 +25,8 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
   onPick: (h: number) => void
 }) {
   const scored = horizons.filter((h) => finite(h.horizon_h))
-  // Band mode: the marks are equal-width cells, so the cell under the pointer is
-  // the one a click should take. Declared before the early return, as a hook
-  // must be, which is why the count is guarded rather than derived below.
+  // Band mode: the marks are equal-width cells. Declared before the early
+  // return, as a hook must be, which is why the count is guarded.
   const pointer = useChartPointer(
     scored.length === 0
       ? 1
@@ -55,9 +39,8 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
     return <p className="empty">No horizon has been scored yet.</p>
   }
 
-  // Keyed by horizon, never by index: a skipped horizon would otherwise shift
-  // every later one one place to the left and the chart would be quietly wrong
-  // rather than visibly incomplete.
+  // Keyed by horizon, never by index: a skipped horizon would shift every later
+  // one and be quietly wrong.
   const byHour = new Map(scored.map((h) => [h.horizon_h, h]))
   const lo = Math.min(...byHour.keys())
   const hi = Math.max(...byHour.keys())
@@ -88,9 +71,8 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
   const ahead = scored.filter((h) => finite(h.brier) && finite(h.best_baseline_brier)
                                      && h.brier < h.best_baseline_brier).length
   const here = byHour.get(current) ?? null
-  // The long form goes to `aria-label` and `<title>`; only `caption` is printed.
-  // A sighted reader has the axes, the band and the legend and wants the two
-  // numbers at the horizon they are on. A screen reader has none of that.
+  // The long form goes to `aria-label`; only `caption` is printed. A screen
+  // reader has no axes or legend.
   const summary =
     `Brier by horizon, from +${lo} h to +${hi} h, against the best baseline at each. `
     + `Lower is better. The model is ahead at ${ahead} of ${scored.length} horizons`
@@ -124,9 +106,8 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
 
           <path className="ribbon" d={bandPath(foldLo, foldHi)} />
 
-          {/* Dashed, and that is not decoration: under `forced-colors` both
-              strokes collapse to CanvasText, and the dash is then the only thing
-              telling the two series apart. */}
+          {/* Dashed, not decoration: under `forced-colors` both strokes collapse
+              to CanvasText and the dash is what is left. */}
           <path className="line base" d={linePath(base)}
                 vectorEffect="non-scaling-stroke" />
           <path className="line model" d={linePath(model)}
@@ -141,11 +122,8 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
           +{current} h
         </span>
 
-        {/* Click targets, laid over the chart rather than after it: a `<rect>`
-            cannot be a button, and a focusable 48-stop widget inside the SVG
-            would be a worse version of the range in step four. `aria-hidden`
-            and `tabIndex={-1}` say the same thing -- this is a shortcut for a
-            pointer, and the slider is the control. */}
+        {/* Click targets over the chart: a `<rect>` cannot be a button.
+            `aria-hidden` and `tabIndex={-1}`: the slider is the control. */}
         <div className="hitrow" aria-hidden="true">
           {hours.map((h) => (
             <button key={h} type="button" className="hit" tabIndex={-1}
@@ -168,12 +146,8 @@ export function ScoreByHorizon({ horizons, current, onPick }: {
         )}
       </div>
 
-      {/* Which horizons are published, per horizon. It belongs under the chart
-          rather than as a third line in it: it is a category, and the y axis is
-          a quantity. The dashed baseline LINE above stays -- it is still the
-          bar the model had to clear, and this whole card is that comparison.
-          Only the strip changes: a horizon the baseline won is not served by
-          it, it is not served at all. */}
+      {/* Which horizons are published, under the chart rather than in it: a
+          category, where the y axis is a quantity. */}
       <div className="strip" role="img"
            aria-label={`What is published, from +${lo} h to +${hi} h: `
              + `${scored.filter((h) => h.ships).length} horizons by a model, `

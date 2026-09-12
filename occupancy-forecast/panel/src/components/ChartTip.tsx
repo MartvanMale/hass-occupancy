@@ -1,17 +1,10 @@
 import type { ReactNode } from 'react'
 
 /**
- * The floating readout over a chart.
- *
- * Positioned as a percentage of the wrapper, with a THREE-WAY transform clamp
- * rather than a measurement: centred in the middle of the chart, pinned to the
- * left edge in the first fifth and to the right edge in the last. Measuring
- * would mean a layout read on every pointer move to save two edge cases.
- *
- * `aria-hidden`, and that is not an oversight. The chart's own `aria-label` and
- * the prose paragraph under it already carry everything this says, in a form a
- * screen reader can actually get at; announcing a value that follows a mouse
- * would be noise on top of them.
+ * The floating readout over a chart: a three-way transform clamp rather than a
+ * measurement, so there is no layout read per pointer move. `aria-hidden` is
+ * not an oversight -- the chart's `aria-label` and the prose under it already
+ * carry this.
  */
 export function ChartTip({ fraction, children }: {
   fraction: number

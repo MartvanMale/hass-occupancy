@@ -8,24 +8,15 @@ import { relativeTime } from '../format'
 import { Select } from '../components/Select'
 
 /**
- * Setup: what this installation is, and what it is doing about it.
- *
- * Everything here was `App.tsx` before there was a second view. The split is
- * along the question being asked -- this one answers "is it configured right",
- * the Data tab answers "what is it actually eating" -- and the state still lives
- * in `App`, because the status poll drives the header too and a view that owned
- * it would restart it on every tab switch.
+ * Setup: what this installation is, and what it is doing about it. The state
+ * lives in `App`, which owns the status poll -- see there.
  */
 
 const round = (n: number) => Math.round(n).toString()
 const count = (n: number) => n.toLocaleString()
 
-/**
- * `feature_groups[*].detail` is polymorphic -- a list of entity ids or a
- * sentence, plus the person->zone mapping an older config.json can still be
- * showing before its first save. The page this replaced ran Python's `str()`
- * over it and rendered `['person.alice']` on screen, brackets, quotes and all.
- */
+/** `feature_groups[*].detail` is polymorphic -- a list, a sentence, or the
+ *  person->zone mapping an older config.json can still be showing. */
 function formatDetail(detail: FeatureDetail): string {
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail)) return detail.join(', ')
@@ -73,11 +64,8 @@ function StatusRows({ status }: { status: Status }) {
         />
       )}
 
-      {/* Red, and shown only when it is true, because a stalled worker is the
-          one failure that hides behind every other green light on this page:
-          MQTT stays connected, the listener stays subscribed, and last_error
-          stays null, because a blocked thread is not a raising one. It went
-          unnoticed for 11.5 hours once. */}
+      {/* Red, and shown only when true: a stalled worker hides behind every other
+          green light on this page, because a blocked thread is not a raising one. */}
       {status.worker?.stalled && (
         <Row
           icon="alert"
@@ -90,9 +78,8 @@ function StatusRows({ status }: { status: Status }) {
         />
       )}
 
-      {/* Orange, not red, and the distinction is the reason the row exists: a
-          dead trigger subscription means the five-minute poll carries on, so
-          this is slower rather than broken. It would otherwise be invisible. */}
+      {/* Orange, not red: with the trigger subscription dead the five-minute poll
+          carries on, so this is slower rather than broken. */}
       {listener.connected ? (
         <Row
           icon="listening"
@@ -155,6 +142,7 @@ export interface ConfigViewProps {
   departure: string
   arrival: string
   minHours: string
+  retention: string
   loaded: boolean
   saving: boolean
   saved: boolean
@@ -167,17 +155,11 @@ export interface ConfigViewProps {
   setDeparture: (value: string) => void
   setArrival: (value: string) => void
   setMinHours: (value: string) => void
+  setRetention: (value: string) => void
 }
 
-/**
- * Discrete options rather than a number input.
- *
- * The panel has no styled numeric control, a free-text one needs a
- * partial-input parse dance ("0." is not a number), and impossible values then
- * cannot be typed at all. The cost is that 0.42 is unreachable, which is fine:
- * a 1% distinction on a 48-point hourly curve is not a real one. The server
- * still validates, because the API is reachable without this page.
- */
+/** Discrete options rather than a number input: 0.42 is unreachable, which is
+ *  fine on a 48-point hourly curve. The server still validates. */
 const CUTS = [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7].map((v) => ({
   value: v.toFixed(2),
   label: `${Math.round(v * 100)} %`,
@@ -188,13 +170,20 @@ const RUNS = [1, 2, 3, 4, 6].map((h) => ({
   label: h === 1 ? '1 hour (any single hour)' : `${h} hours`,
 }))
 
+
 export function ConfigView({
   status, candidates,
   people, zones, house, holiday, daySchedule, departure, arrival, minHours,
-  loaded, saving, saved, error,
+  retention, loaded, saving, saved, error,
   onSubmit, togglePerson, toggleZone, setHouse, setHoliday, setDaySchedule,
-  setDeparture, setArrival, setMinHours,
+  setDeparture, setArrival, setMinHours, setRetention,
 }: ConfigViewProps) {
+  // Typed, so it can be mid-edit. An empty field must not reach the server as
+  // Number('') === 0, which is the one value that means something else.
+  const retentionOk = /^\d+$/.test(retention.trim())
+  const complaint = error ?? (retentionOk
+    ? null
+    : 'Days to keep must be a whole number of days, 0 or more.')
   return (
     <>
       <div className="cards">
@@ -202,22 +191,14 @@ export function ConfigView({
           {status ? <StatusRows status={status} /> : <p className="empty">Loading…</p>}
         </Card>
 
-        {/* "What is serving each horizon" and "Training" were here and are now
-            on Now. Setup is a page you fill in once and leave; those two change
-            on their own and are read against the forecast, not against the
-            settings below. Status stays, because what it reports on is whether
-            the configuration on this page is actually working. */}
-        <Card
-          title="What this installation has"
-          subtitle="A missing signal is not an error — the forecast is just less sharp."
-        >
+        <Card title="What this installation has">
           {status ? <FeatureRows groups={status.feature_groups} /> : <p className="empty">Loading…</p>}
         </Card>
       </div>
 
       <form onSubmit={onSubmit}>
         <div className="cards">
-          <Card title="People" subtitle="Occupancy is the one thing this cannot run without.">
+          <Card title="People" subtitle="Required.">
             {!candidates ? (
               <p className="empty">Loading…</p>
             ) : candidates.people.length === 0 ? (
@@ -246,8 +227,7 @@ export function ConfigView({
           <Card
             title="Zones"
             optional
-            subtitle="Anywhere worth knowing about — work, school, the supermarket.
-              Home is excluded."
+            subtitle="Work, school, the supermarket. Home is excluded."
           >
             {!candidates ? (
               <p className="empty">Loading…</p>
@@ -298,8 +278,7 @@ export function ConfigView({
           <Card
             title="Holiday calendar"
             optional
-            subtitle="Which public holidays this household keeps — not necessarily the
-              country you live in."
+            subtitle="Not necessarily the country you live in."
           >
             {candidates && candidates.countries.length === 0 ? (
               <p className="empty">
@@ -332,8 +311,7 @@ export function ConfigView({
           <Card
             title="Night shading"
             optional
-            subtitle="Greys out the hours outside a schedule you already keep.
-              Display only — no feature, no model, no entity."
+            subtitle="Display only. Greys out hours outside a schedule you keep."
           >
             {candidates && candidates.schedules.length === 0 ? (
               <p className="empty">
@@ -366,8 +344,7 @@ export function ConfigView({
 
           <Card
             title="When a crossing counts"
-            subtitle="How far the curve has to move, and for how long, before the
-              countdown changes. No retrain needed."
+            subtitle="How far the curve must move, and for how long. No retrain needed."
           >
             <Row
               icon="target"
@@ -395,22 +372,48 @@ export function ConfigView({
               control
               accent="blue"
               primary="and stays there for"
-              secondary="A single hour on the wrong side is a wobble, not a departure."
               trailing={
                 <Select label="Minimum run" value={minHours} onChange={setMinHours}
                         options={RUNS} />
               }
             />
           </Card>
+
+          <Card
+            title="Forecast record"
+            subtitle="For the “Was it right?” chart only."
+          >
+            <Row
+              icon="database"
+              control
+              accent="blue"
+              primary="Keep each forecast for"
+              secondary="0 keeps everything. Shortening it deletes older rows permanently."
+              trailing={
+                <span className="days">
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    inputMode="numeric"
+                    aria-label="Days of forecasts to keep"
+                    value={retention}
+                    onChange={(e) => setRetention(e.target.value)}
+                  />
+                  days
+                </span>
+              }
+            />
+          </Card>
         </div>
 
         <div className="actions">
-          <button type="submit" disabled={!loaded || saving}>
+          <button type="submit" disabled={!loaded || saving || !retentionOk}>
             <Icon name="save" />
             {saving ? 'Saving…' : 'Save'}
           </button>
           <span className={saved ? 'saved on' : 'saved'}>Saved</span>
-          {error && <span className="error">{error}</span>}
+          {complaint && <span className="error">{complaint}</span>}
         </div>
       </form>
     </>

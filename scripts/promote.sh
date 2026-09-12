@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
-# Generate the stable add-on's code from edge's. The two run the SAME code at
-# different release points, and an add-on's build context is its own directory,
-# so one has to be generated from the other. Runs edge -> stable, never back.
-#
+# Generate the stable add-on's code from edge's: edge -> stable, never back.
 # config.yaml, DOCS.md and CHANGELOG.md are hand-written per add-on and excluded.
 # Note the --delete: a file only in occupancy-forecast/ and not excluded below is
-# removed, so anything stable needs belongs in edge or in the exclude list.
-#
-# Stages the code and shows the diff. It does not bump the version, move the
-# changelog, commit or deploy -- every irreversible step after this is yours. It
-# promotes the WORKING tree, so edge need not be committed first.
+# removed. It promotes the WORKING tree, so edge need not be committed first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Arguments first, so a typo'd flag says so rather than dying on the tree.
-# `--no-test` is honest in one case: test.sh has just been run against these
-# exact files on disk. Anything edited since is an untested promotion.
+# `--no-test` is honest only when test.sh has just run against these exact files.
 run_tests=1
 for arg in "$@"; do
     case "$arg" in
@@ -34,9 +26,8 @@ else
     echo "SKIPPING TESTS (--no-test) -- promoting on the strength of an earlier run."
 fi
 
-# Rebuild EDGE's bundle first: a stale one is silent, and one commit now carries
-# both trees, so it is made fresh by construction rather than checked. A no-op
-# when the source has not moved.
+# Rebuild EDGE's bundle first: a stale one is silent, and one commit carries both
+# trees, so it is made fresh by construction rather than checked.
 scripts/build-panel.sh occupancy-forecast-edge
 
 # The panel's SOURCE is promoted, not its build output; dist/ is rebuilt below

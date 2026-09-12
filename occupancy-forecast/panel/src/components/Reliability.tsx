@@ -2,18 +2,10 @@ import type { CSSProperties } from 'react'
 import type { ReliabilityBin } from '../types'
 
 /**
- * The calibration curve, straight off `Metrics.reliability`.
- *
- * Calibration is the property this add-on actually needs. A model can rank
- * perfectly -- excellent AUC -- and still say 0.9 when it means 0.6, and for a
- * "pre-heat if they will be home" rule that is the difference between a warm
- * house and a wasted hour of gas. `evaluate.reliability` has been computing
- * these ten bins on every train since the beginning and nothing has ever drawn
- * them.
- *
- * A square box, so `preserveAspectRatio` is left at its default: unlike the
- * time series, the diagonal here only means "perfectly calibrated" if the axes
- * are on the same scale. That is also why the dots may be circles.
+ * The calibration curve, from `Metrics.reliability`. Calibration is what this
+ * add-on needs: a model can rank perfectly and still say 0.9 when it means 0.6.
+ * A square box, so `preserveAspectRatio` stays at its default -- the diagonal
+ * only means "calibrated" while the axes share a scale, and dots may be circles.
  */
 
 const SIZE = 100

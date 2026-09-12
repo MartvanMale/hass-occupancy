@@ -1,16 +1,8 @@
 /**
- * The shape of what `server.py` serves.
- *
- * This file is one half of a contract; the other half is
- * `occupancy_forecast/tests/test_api_contract.py`, which asserts that every key named
- * here is actually present in a live response. Nothing checks the two against
- * each other automatically -- if you add a field, add it in both places. A
- * rename that only lands here is a panel that renders `undefined`, and a rename
- * that only lands in Python is caught by that test.
- *
- * Only what the panel reads is typed. `/api/status` carries a good deal more
- * (model_version, code fingerprints, eta_models); it is not the panel's business
- * and typing it would make the contract test complain about fields nobody uses.
+ * The shape of what `server.py` serves -- one half of a contract whose other
+ * half is `occupancy_forecast/tests/test_api_contract.py`. Nothing checks the
+ * two against each other: if you add or rename a field, do it in both places.
+ * Only what the panel reads is typed.
  */
 
 export interface History {
@@ -33,16 +25,8 @@ export interface Listener {
   last_error?: string | null
 }
 
-/**
- * `detail` is genuinely polymorphic: a list of entity ids for `presence`, a
- * sentence for the rest. The old page ran `str()` over it and rendered
- * `['person.alice']` on screen; see `formatDetail` in `App.tsx` for the
- * per-shape formatting that replaces it.
- *
- * The `Record` arm is what `work_zones` used to send, back when a zone belonged
- * to a person. Kept because a config.json written by an older build can still
- * be on screen before the first save migrates it.
- */
+/** Polymorphic: a list of entity ids for `presence`, a sentence for the rest, and
+ *  a `Record` an older config.json can still be showing. See `formatDetail`. */
 export type FeatureDetail = string | string[] | Record<string, string>
 
 export interface FeatureGroup {
@@ -50,21 +34,13 @@ export interface FeatureGroup {
   detail: FeatureDetail
 }
 
-/** What serves a horizon. "model" where a trained model ships for it and beat
- *  its own baseline; "none" everywhere else, meaning nothing is published at
- *  all -- the sensor reads unknown and the forecast curve has a hole.
- *
- *  A union rather than `string`, and that is the point of the type: this used
- *  to be "model" or "baseline:<name>", and every reader had to split a status
- *  value on a colon to find out what it meant. Narrowing it makes `tsc` refuse
- *  any code that still tries. The baseline's name travels separately, in
- *  `Status.best_baseline`. */
+/** What serves a horizon. "model" where a trained model ships and beat its
+ *  baseline; "none" everywhere else -- nothing is published, the sensor reads
+ *  unknown. The baseline's name travels in `Status.best_baseline`. */
 export type ServedBy = 'model' | 'none'
 
-/** The two model families. A dedicated model is fitted for one horizon and
- *  reads that horizon's own feature list; the pooled model is fitted once over
- *  every horizon with `horizon_h` among its columns. Which one serves is
- *  measured per horizon, not decided in advance. */
+/** Dedicated = fitted for one horizon; pooled = fitted once over all of them.
+ *  Which serves is measured per horizon. */
 export type ModelKind = 'dedicated' | 'pooled'
 
 export interface WorkerHealth {
@@ -83,28 +59,21 @@ export interface Status {
   display_name: string
   history: History
   days_until_training: number
-  /** Subject slugs, one per configured person. The Data tab needs them to name
-   *  a subject in the feature table; `config.HOUSE_SLUG` is the other one and
-   *  is always present. */
+  /** Presence actually observed -- lower than `history.days`, which an unused
+   *  tracker inflates. Null on Influx. */
+  usable_presence_days: number | null
+  /** Subject slugs, one per configured person; `config.HOUSE_SLUG` is the other
+   *  subject and is always present. */
   people: string[]
   feature_groups: Record<string, FeatureGroup>
-  /** Keyed by every horizon in the grid, including on a fresh install where
-   *  nothing has been trained -- so the strip always has 48 cells to draw and
-   *  its denominator cannot silently shrink when an artifact fails to load. */
+  /** Keyed by every horizon in the grid, even on a fresh install, so the strip's
+   *  denominator cannot shrink when an artifact fails to load. */
   served_by: Record<string, ServedBy>
-  /** WHICH family served, for the horizons where a model did. Additive beside
-   *  `served_by`, which keeps its two values -- the horizon strip counts
-   *  `=== 'model'` and should not have to learn about families. Keyed only by
-   *  the shipping horizons, so a lookup for an unserved one is `undefined`
-   *  rather than null. Redundant with `served_by` by construction now (a
-   *  family entry exists exactly where the value is "model"); kept because
-   *  `served_by` is the field the docs and `/health` name, and two fields
-   *  saying one thing is better than a third field saying it again. */
+  /** WHICH family served, keyed only by shipping horizons -- a lookup for an
+   *  unserved one is `undefined`, not null. */
   model_kind: Record<string, ModelKind>
-  /** For the horizons nothing is published for, the baseline that beat the
-   *  model. ABSENT where no model has been trained yet -- both cases publish
-   *  nothing, and the absence is how the strip tells them apart in its
-   *  tooltip. Same absence-means-something convention as `model_kind`. */
+  /** For unpublished horizons, the baseline that beat the model. ABSENT where no
+   *  model was ever trained; the absence is how the strip tells them apart. */
   best_baseline: Record<string, string>
   mqtt: Mqtt
   listener: Listener
@@ -121,9 +90,8 @@ export interface Status {
   /** When the run currently in progress began. Stale once it finishes; only
    *  read while `training_in_progress`. */
   training_started_at: string | null
-  /** The worker's own health. Everything else on this page can look perfect
-   *  while it is hung -- `last_error` stays null when the thread is blocked
-   *  rather than raising -- so `seconds_since_phase` is the one that ages. */
+  /** The worker's own health: everything else stays green while it is hung, since
+   *  a blocked thread never raises. `seconds_since_phase` is the one that ages. */
   worker: WorkerHealth
   last_collect: string | null
   last_predict: string | null
@@ -162,6 +130,9 @@ export interface Settings {
   departure_threshold: number
   arrival_threshold: number
   crossing_min_hours: number
+  /** Days of published forecasts kept for the "Was it right?" chart.
+   *  0 means never pruned. */
+  forecast_retention_days: number
 }
 
 /** What POST /api/config accepts. A key left out is a setting left alone. */
@@ -178,6 +149,9 @@ export interface ConfigPatch {
   departure_threshold: number
   arrival_threshold: number
   crossing_min_hours: number
+  /** Days of published forecasts kept for the "Was it right?" chart.
+   *  0 means never pruned. */
+  forecast_retention_days: number
 }
 
 // --- the Overview tab -----------------------------------------------------
@@ -188,57 +162,68 @@ export interface SubjectForecast {
   /** Fraction of the last five minutes spent at home -- an OBSERVATION, not a
    *  prediction. Shown beside the forecast because the comparison is the point. */
   current: number
-  /** The slot the horizons are measured from — NOT `predicted_at`, which can be
-   *  up to half an hour later. Anything putting clock times on the forecast axis
-   *  must anchor here or be wrong by up to a slot. */
+  /** The slot the horizons are measured from -- NOT `predicted_at`, which can be
+   *  half an hour later. Clock times on the forecast axis must anchor here. */
   observed_at: string
-  /** Horizon in hours (as a string, JSON has no integer keys) to P(home).
-   *
-   *  SPARSE. Keyed only by the horizons a model actually served, so a missing
-   *  key is a hole and not a zero -- reading it with `?? 0` draws a confident
-   *  "certainly away" over the part of the curve the add-on has nothing to say
-   *  about, which is what this used to do. */
+  /** Horizon in hours (string keys; JSON has no integer ones) to P(home).
+   *  SPARSE -- a missing key is a hole, never a zero: `?? 0` draws "certainly
+   *  away" over the hours nothing was said about. */
   curve: Record<string, number>
   next_departure_h: number | null
   next_arrival_h: number | null
-  /** Minutes until home from the proximity trace, or null.
-   *
-   *  Null unless they are actually CLOSING on home faster than
-   *  `eta.MIN_CLOSING_KMH`. The model is conditional on being on a journey and
-   *  is trained only within three hours of an arrival, so asked about somebody
-   *  stationary it answers near the top of its range -- which it did, with 169
-   *  minutes for a person at her desk six hours from home. */
+  /** Minutes until home from the proximity trace, or null. Null unless actually
+   *  closing faster than `eta.MIN_CLOSING_KMH` -- the model is trained only within
+   *  three hours of an arrival, so asked about somebody stationary it answers
+   *  near the top of its range. */
   eta_minutes: number | null
   /** Null for the house, and for anyone without enough history yet. */
   out: OutRoutine | null
   next_change: NextChange | null
 }
 
-/**
- * What this person's own history says about today -- NOT a model forecast.
- *
- * Every number arrives with what it was built from. `n_out_weekday` is the
- * number of days out behind the hours, and `*_from` says whether the hour is
- * this weekday's own median or the fallback across all of them. A median off
- * four Fridays and one off thirty render identically without them.
- */
-/**
- * One answer per person: the model's verdict that a change is coming, timed by
- * that person's routine for the day it falls on.
- *
- * `at_from` is the honest part. `routine` means a measured hour for that
- * weekday; `crossing` means the model's own rounded hour, used where the day
- * has no measured one. They are different qualities of answer and the card
- * should never have to guess which it holds.
- */
+/** The model's verdict that a change is coming, optionally sharpened by that
+ *  person's routine. `at_from` says which quality of answer it is: `routine` is
+ *  a measured hour for that weekday, `crossing` is the model's own rounded one.
+ *  The routine may only move the crossing a few hours -- further than that and
+ *  the two are naming different events, so the crossing is kept. */
 export interface NextChange {
   direction: 'leaving' | 'arriving' | null
   /** The model's own crossing, in whole hours ahead. Kept for reference. */
   in_hours: number | null
   at: string | null
   at_from: 'routine' | 'crossing' | null
+  /** What the routine offered, whether or not it was used -- null when that day
+   *  had no hour to give. Shown so a refusal is visible rather than silent. */
+  routine_at: string | null
+  /** That person's routine for the day the change FALLS ON, not for today. Null
+   *  for the house before it has enough history, and on a fresh install. */
+  routine_day: DepartureRoutine | null
 }
 
+/** What this person's own history says about a given weekday -- NOT a model
+ *  forecast. Fitted on "left the house at all", so a short errand counts; its
+ *  twin `OutRoutine` counts only days that reached a configured zone. */
+export interface DepartureRoutine {
+  probability: number
+  weekday: number
+  n_weekday: number
+  n_left_weekday: number
+  departure_hour: number | null
+  departure_sd: number | null
+  /** 'weekday' is measured on that weekday and is the only one allowed to move
+   *  the crossing. 'overall' is a median off the OTHER weekdays -- worth
+   *  showing, never worth acting on. 'never' means that weekday has been seen
+   *  often enough with no departures at all, and the hours are null. */
+  departure_from: 'weekday' | 'overall' | 'never'
+  return_hour: number | null
+  return_sd: number | null
+  return_from: 'weekday' | 'overall' | 'never'
+  fitted_at: string | null
+}
+
+/** What this person's own history says about today -- NOT a model forecast.
+ *  Every number arrives with what it was built from: `n_out_weekday` and `*_from`
+ *  are what separate a median off four Fridays from one off thirty. */
 export interface OutRoutine {
   probability: number
   weekday: number
@@ -272,15 +257,9 @@ export type Forecast = Explorable<{
 
 // --- the Data tab ---------------------------------------------------------
 
-/**
- * Every explorer endpoint answers "not yet" rather than 404ing, because on a
- * fresh install that is the truth for most of them and for the first ten days.
- *
- * Modelled as a union rather than an optional field on purpose: with `strict`
- * and `exactOptionalPropertyTypes`, `tsc --noEmit` then refuses to compile a
- * view that reads `.entities` without having narrowed on `available` first. The
- * empty state stops being something to remember.
- */
+/** Every explorer endpoint answers "not yet" rather than 404ing. A union, not an
+ *  optional field, so `tsc` refuses a view that reads the payload without
+ *  narrowing on `available` first. */
 export type Unavailable = { available: false; reason: string }
 export type Explorable<T> = Unavailable | ({ available: true } & T)
 
@@ -352,27 +331,17 @@ export type EntitySeries = Explorable<{
   summary: SeriesSummary
 }>
 
-/** One family of feature columns. The table is a thousand columns wide, so this is how
- *  it is described -- a list of families, never a list of columns. */
-/**
- * One slot of the verification chart.
- *
- * BOTH fields are nullable and neither may be coerced. `actual` is null for a
- * slot the trackers did not observe; `forecast` is null for a slot nothing was
- * published for -- either the horizon does not ship, or the add-on was not
- * running. A zero in place of either draws as "certainly away", which is the
- * reassuring lie the serving rule was changed to stop telling.
- */
+/** One slot of the verification chart. BOTH fields are nullable and neither may
+ *  be coerced: `actual` null is a slot the trackers did not see, `forecast` null
+ *  is a slot nothing was published for. A zero draws as "certainly away". */
 export interface VerificationPoint {
   t: string
   actual: number | null
   forecast: number | null
 }
 
-/**
- * What the add-on SAID, against what happened -- the only number here that is
- * about the serving path rather than about a backtest.
- */
+/** What the add-on SAID against what happened -- the only number here about the
+ *  serving path rather than a backtest. */
 export type Verification = Explorable<{
   subject: string
   horizon_h: number
@@ -387,10 +356,13 @@ export type Verification = Explorable<{
   scored: number
   brier: number | null
   mae: number | null
+  /** How long the forecast log keeps a row. 0 means never pruned. */
   retention_days: number
   summary: string
 }>
 
+/** One family of feature columns -- the table is a thousand columns wide, so it
+ *  is described as a list of families, never of columns. */
 export interface FeatureFamily {
   family: string
   words: string
@@ -426,14 +398,9 @@ export type FeatureInventory = Explorable<{
   browsable: ColumnStat[]
 }>
 
-/**
- * The leakage gate, seen from either end.
- *
- * `tgt{h}h_lag{k}d` is written into the table for EVERY horizon and is valid
- * only where `24k >= h`. Two shapes because the two views ask different
- * questions: a charted column asks "which horizon may not use me", and a
- * horizon asks "which of my four lags am I allowed".
- */
+/** The leakage gate from either end. `tgt{h}h_lag{k}d` is valid only where
+ *  `24k >= h`; two shapes because a column asks "which horizon may not use me"
+ *  and a horizon asks "which lags am I allowed". */
 export interface LagSafety {
   horizon_h: number
   days: number
@@ -485,9 +452,8 @@ export type HorizonRecipe = Explorable<{
   climatology: string
   columns_read: number
   embargo_hours: number
-  /** Three values, and the third is not the second: "none" means a model was
-   *  trained here and lost to its baseline, null means none was ever trained.
-   *  Both publish nothing; only one of them has a bake-off to show. */
+  /** "none" = trained here and lost; null = never trained. Both publish nothing;
+   *  only one has a bake-off to show. */
   served_by: ServedBy | null
   ships: boolean | null
   /** Which family's recipe this is. The two read different feature lists, so a
@@ -498,14 +464,9 @@ export type HorizonRecipe = Explorable<{
 /** One week of the rolling-origin evaluation. */
 export interface FoldScore {
   n: number
-  /** Null on a fold this horizon had no test rows for.
-   *
-   *  `_scores_by_fold` emits an entry for EVERY fold index, empty ones
-   *  included, because `ships` walks this list positionally against the
-   *  baseline ladder's and a skipped fold would shift every later comparison
-   *  by one. So the list is padded, and the padding is null -- typing these as
-   *  plain numbers is what let a `.toFixed` on null reach the browser and
-   *  black out the whole Data tab. */
+  /** Null on a fold this horizon had no test rows for. The list is padded for
+   *  EVERY fold index, because `ships` walks it positionally against the
+   *  ladder's -- do not type these as plain numbers. */
   base_rate: number | null
   brier: number | null
   log_loss: number | null
@@ -522,14 +483,9 @@ export interface ReliabilityBin {
   observed: number
 }
 
-/** The scalars, for the list. Everything bulky arrives with the detail.
- *
- *  Every float is nullable, for the same reason `FoldScore`'s are: the server
- *  writes `metrics.json` with NaN where a score is undefined -- no baseline
- *  rung ran, a fold had one class -- and `explore._json_safe` turns each of
- *  those into null at the API boundary rather than letting FastAPI refuse the
- *  whole response. A field missing from an older artifact arrives as null too.
- *  Counts and the horizon are always written. */
+/** The scalars, for the list; anything bulky arrives with the detail. Every
+ *  float is nullable -- the server writes NaN where a score is undefined and
+ *  `explore._json_safe` nulls it at the boundary. */
 export interface HorizonMetrics {
   horizon_h: number
   brier: number | null
@@ -550,9 +506,8 @@ export interface HorizonMetrics {
   brier_fold_max: number | null
   /** Which family won this horizon, or null when a baseline did. */
   kind: ModelKind | null
-  /** The losing family's Brier and name, so the crossover between the two is
-   *  readable off the table rather than being something only a training log
-   *  knows. Null when only one family produced a candidate. */
+  /** The losing family's Brier and name, so the crossover is readable off the
+   *  table. Null when only one family produced a candidate. */
   rival_brier: number | null
   rival_kind: ModelKind | null
 }
@@ -568,11 +523,7 @@ export type MetricsSummary = Explorable<{
   failed: Record<string, string>
 }>
 
-/**
- * One horizon in full. The two series here have been written to
- * `/data/models/metrics.json` on every train since the beginning and were never
- * rendered by anything.
- */
+/** One horizon in full, including the two series `metrics.json` has always carried. */
 export type MetricsDetail = Explorable<HorizonMetrics & {
   per_fold: FoldScore[]
   reliability: ReliabilityBin[]

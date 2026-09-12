@@ -1,4 +1,6 @@
 # Test-only. The image ships requirements.txt; the suite runs against a dev
 # container so a store install does not carry a test framework.
 -r requirements.txt
-pytest==8.4.2
+# Never below 9.0.3: earlier releases put the temp root at the predictable
+# /tmp/pytest-of-<user> (CVE-2025-71176).
+pytest==9.1.1

@@ -6,31 +6,17 @@ import { Reliability } from '../../components/Reliability'
 import { ScoreByHorizon } from '../../components/ScoreByHorizon'
 import { relativeTime } from '../../format'
 
-/**
- * How well the models actually score.
- *
- * Every number here has been written to `/data/models/metrics.json` on every
- * train since the beginning and none of it has ever been rendered: the panel
- * could say that a horizon ships, but not by how much, not how much the folds
- * disagreed, and not whether the probability it states is the probability that
- * happens. Nothing new is computed to draw any of it.
- */
+/** How well the models actually score. Every number here is already in
+ *  `/data/models/metrics.json`; nothing new is computed to draw it. */
 
-/** Every score can be null -- see `HorizonMetrics` -- and a null rendered as
- *  a dash is a card that loads, where a `.toFixed` on null was a Data tab that
- *  did not. */
+/** Every score can be null -- see `HorizonMetrics` -- and a `.toFixed` on null
+ *  is a Data tab that does not load. */
 const num = (n: number | null, digits = 3) => (n === null ? '—' : n.toFixed(digits))
 const pct = (n: number | null) => (n === null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`)
 
-/**
- * How the shipping horizons divide between the two families.
- *
- * Written as a sentence rather than a chip because the interesting thing is not
- * the counts but that there IS a split -- one family wins the near horizons and
- * the other the far ones, and where they cross is measured on this household's
- * own history rather than chosen. Empty string when nothing ships or when only
- * one family produced a candidate, so the card reads normally on day one.
- */
+/** How the shipping horizons divide between the two families. A sentence, because
+ *  the interesting thing is that there IS a split; empty when nothing ships or only
+ *  one family produced a candidate. */
 function familySplit(horizons: HorizonMetrics[]): string {
   const dedicated = horizons.filter((h) => h.kind === 'dedicated').length
   const pooled = horizons.filter((h) => h.kind === 'pooled').length
@@ -72,11 +58,8 @@ export function QualityCard({ metrics, current, onPick }: {
 
       <ScoreByHorizon horizons={metrics.horizons} current={current} onPick={onPick} />
 
-      {/* The 48 rows are still here, because six of the columns appear nowhere
-          else -- but folded away, because the chart above answers the question
-          people arrive with and the table answers the one they arrive with
-          second. Lower Brier is better, so it is read as: how far below the
-          baseline column did the model get. */}
+      {/* Folded away: the chart above answers the question people arrive with,
+          and the table, whose columns appear nowhere else, answers the second. */}
       <details className="more">
         <summary>All {metrics.horizons.length} horizons, as numbers</summary>
         <div className="scroller">
@@ -113,11 +96,8 @@ export function QualityCard({ metrics, current, onPick }: {
         </table>
         </div>
       </details>
-      {/* This one stays, shortened. It is a table legend, not a caption: seven
-          columns of unlabelled decimals are unreadable without it, and the
-          table is behind a <details> so it is only on screen when asked for.
-          What the two model families ARE, and why where they cross matters, is
-          in DOCS.md under "Which horizons publish, and why some do not". */}
+      {/* A table legend, not a caption: seven columns of unlabelled decimals are
+          unreadable without it. */}
       <p className="secondary chart-summary">
         Brier is a squared error on a probability — lower is better, and the baseline
         column is the number to beat. Skill is the percentage below it; the last column
@@ -127,9 +107,8 @@ export function QualityCard({ metrics, current, onPick }: {
   )
 }
 
-/** The losing family's number, when there was one. Both families are fitted at
- *  every horizon, so saying only the winner's Brier hides the whole comparison
- *  the gate actually made. */
+/** The losing family's number: both families are fitted at every horizon, so the
+ *  winner's Brier alone hides the comparison the gate made. */
 function rivalClause(detail: { rival_kind: string | null; rival_brier: number | null }): string {
   if (detail.rival_kind === null || detail.rival_brier === null) return ''
   return ` The ${detail.rival_kind} fit scored ${detail.rival_brier.toFixed(3)} here.`

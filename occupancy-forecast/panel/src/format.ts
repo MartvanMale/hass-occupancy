@@ -1,9 +1,5 @@
-/** Turning the API's timestamps and seconds into something a person reads.
- *
- *  The page these replaced printed `2026-08-30T02:11:00+02:00` on screen. It is
- *  the right instant and the wrong unit: nobody wants a timestamp, they want to
- *  know whether it was recent.
- */
+/** Turning the API's timestamps and seconds into something a person reads: a
+ *  raw ISO stamp is the right instant and the wrong unit. */
 
 /** "13 hours ago", "just now", "in 6 hours". */
 export function relativeTime(iso: string | null | undefined): string {
@@ -88,9 +84,8 @@ export const DAY_OPTIONS = [
   { value: '90', label: 'last 90 days' },
 ]
 
-/** The same list without 90 days: the forecast table is pruned to
- *  `config.FORECAST_RETENTION_DAYS` (30), so the verification card cannot
- *  honestly offer more. Derived from the list above so the two cannot drift. */
+/** Without 90 days: the forecast table is pruned to `FORECAST_RETENTION_DAYS`,
+ *  so the verification card cannot honestly offer more. */
 export const DAY_OPTIONS_RECENT = DAY_OPTIONS.filter((o) => Number(o.value) <= 30)
 
 /** `last_error` is stored as `"<iso>: <message>"`. Split it so the message

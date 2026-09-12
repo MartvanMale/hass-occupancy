@@ -1,26 +1,8 @@
-"""Event-driven wake-ups from Home Assistant.
+"""Event-driven wake-ups from Home Assistant's WebSocket API; it only reads.
 
-An add-on has no trigger system of its own -- it is a container, not an
-integration -- so the only way to hear that somebody came home, rather than
-poll for it, is Home Assistant's WebSocket API. Inside an add-on that is
-reachable through the Supervisor proxy at `ws://supervisor/core/websocket`
-with `SUPERVISOR_TOKEN`, gated by the same `homeassistant_api: true` in
-config.yaml that already grants `/core/api`. Outside one (tests, a laptop) it
-falls back to HA_URL + HA_TOKEN, exactly like `sources.ha.HomeAssistant`.
-
-**`subscribe_trigger`, not `subscribe_events`.** It takes the same trigger
-schema an automation does and Home Assistant evaluates it server-side, so we
-receive only the entities we asked about. Subscribing to `state_changed`
-instead would deliver every state change in the house -- hundreds a minute on
-a real installation -- to be JSON-decoded and thrown away.
-
-This is the add-on's own answer to what pyscript's `@state_trigger` used to do
-from the outside. The difference that matters: it ships *with* the add-on, so
-a stranger installing it from GitHub gets the same responsiveness without
-having to install pyscript and copy a file.
-
-ADVISORY ONLY, like everything else here. This module subscribes and reads. It
-never calls a service and never writes anything back to Home Assistant.
+Via the Supervisor proxy inside an add-on, HA_URL + HA_TOKEN outside one.
+`subscribe_trigger`, not `subscribe_events`: HA filters it server-side, where
+`state_changed` would deliver every change in the house to be thrown away.
 """
 
 from __future__ import annotations
@@ -31,40 +13,29 @@ import os
 import threading
 from typing import Callable
 
-from . import log
+from . import config, log
 
 _log = log.get(__name__)
 
 SUPERVISOR_WS = "ws://supervisor/core/websocket"
 
-# Backoff between reconnection attempts, seconds. A Home Assistant restart
-# drops the socket and then makes the Supervisor proxy refuse for a while, so
-# the first few failures are entirely normal and must not flood the log.
+# Seconds. An HA restart drops the socket and then the proxy refuses for a
+# while, so the first few failures are normal and must not flood the log.
 BACKOFF_START = 1.0
 BACKOFF_CAP = 60.0
 
-# How long to block in recv before checking whether we have been asked to stop.
-# Only affects shutdown latency; the library's own ping keepalive is what
-# actually detects a dead peer.
+# Only affects shutdown latency; the ping keepalive detects a dead peer.
 RECV_TIMEOUT = 5.0
 
-# States that mean "no reading", not "a new reading". `StoreSource.collect`
-# already drops these, so waking the worker for one would rebuild a month of
-# features to arrive at the answer it already published.
-EMPTY_STATES = {"unknown", "unavailable", "", "none"}
+# "No reading", not a new one: waking on it would rebuild a month of features
+# to arrive at the answer already published.
+EMPTY_STATES = config.EMPTY_STATES
 
 
 def should_fire(trigger: dict) -> bool:
     """True for a real state change, false for an attribute-only one.
 
-    A state trigger with no `to`/`from` fires on ANY change to the state
-    object, and a person entity rewrites its GPS attributes every few minutes
-    while somebody is driving. Comparing the state strings is what separates
-    "they came home" from "the phone moved forty metres" -- and the difference
-    is a full feature rebuild per event.
-
-    Kept as a module-level pure function on purpose: it is the only part of
-    this file with a decision in it, and it is testable without a socket.
+    A bare state trigger also fires on every GPS update: a feature rebuild each.
     """
     if not isinstance(trigger, dict):
         return False
@@ -89,14 +60,8 @@ def should_fire(trigger: dict) -> bool:
 class Listener:
     """A Home Assistant trigger subscription, on its own thread.
 
-    `on_event` is called with no arguments for every trigger that survives
-    `should_fire`. It must be cheap and must not raise -- setting a
-    `threading.Event` is what this was built for. Anything slower belongs on
-    the worker that the event wakes.
-
-    A dead listener is a latency regression, never an outage: the caller keeps
-    its own periodic poll, and `status` is surfaced on the ingress panel so
-    the degradation is visible rather than silent.
+    `on_event` must be cheap and must not raise; setting a `threading.Event` is
+    what it is for. A dead listener is a latency regression, never an outage.
     """
 
     def __init__(self, entity_ids: list[str], on_event: Callable[[], None],
@@ -117,6 +82,7 @@ class Listener:
         self.connected = False
         self.last_event: str | None = None
         self.last_error: str | None = None
+        self.last_error_public: str | None = None
         self.events = 0
         self.fired = 0
 
@@ -129,11 +95,11 @@ class Listener:
     def start(self) -> None:
         """Begin listening. Never raises: a failure here must not stop the add-on."""
         if not self.url or not self.token:
-            self.last_error = ("no Home Assistant to listen to: expected "
-                               "SUPERVISOR_TOKEN or HA_URL + HA_TOKEN")
+            self._record("no Home Assistant to listen to: expected "
+                         "SUPERVISOR_TOKEN or HA_URL + HA_TOKEN")
             return
         if not self.entity_ids:
-            self.last_error = "nothing to subscribe to"
+            self._record("nothing to subscribe to")
             return
         self._thread = threading.Thread(target=self._run, name="occupancy-listener",
                                         daemon=True)
@@ -146,11 +112,7 @@ class Listener:
     def update_entities(self, entity_ids: list[str]) -> None:
         """Re-subscribe to a different set, after the configuration changed.
 
-        A subscription cannot be edited in place, so this drops the socket and
-        lets the run loop reconnect -- which it already knows how to do, and
-        which re-reads `entity_ids` on the way through. Without this, adding a
-        person on the settings page leaves them uncovered until a restart, and
-        nothing says so.
+        A subscription cannot be edited, so this drops the socket to reconnect.
         """
         wanted = sorted(set(entity_ids))
         if wanted == self.entity_ids:
@@ -168,6 +130,13 @@ class Listener:
         except Exception:  # noqa: BLE001
             pass
 
+    def _record(self, text: str | None, public: str | None = None) -> None:
+        """Remember a reason. `public` is what `/api/status` may show, and
+        defaults to `text` -- right for the reasons written here, not for an
+        exception's own message."""
+        self.last_error = text
+        self.last_error_public = text if public is None else public
+
     @property
     def status(self) -> dict:
         return {
@@ -176,7 +145,7 @@ class Listener:
             "events": self.events,
             "fired": self.fired,
             "last_event": self.last_event,
-            "last_error": self.last_error,
+            "last_error": self.last_error_public,
         }
 
     # -- the thread ---------------------------------------------------------
@@ -188,7 +157,10 @@ class Listener:
                 self._session()
                 backoff = BACKOFF_START      # a clean session resets the ladder
             except Exception as err:  # noqa: BLE001
-                self.last_error = f"{_now()}: {err}"
+                # Logged here: the status page shows only the stamp.
+                _log.warning("listener session ended: %s. Retrying in %ss.",
+                             err, backoff, exc_info=True)
+                self._record(f"{_now()}: {err}", f"{_now()}: {log.SEE_THE_LOG}")
             finally:
                 self.connected = False
             if self._stop.wait(backoff):
@@ -198,32 +170,25 @@ class Listener:
     def _session(self) -> None:
         """One connection, from handshake to disconnect.
 
-        The import is here rather than at module scope so that a missing or
-        broken `websockets` degrades to "no listener, five-minute poll" with
-        the reason on the status page, instead of stopping the add-on from
-        importing at all.
+        Imported here: a missing `websockets` degrades to polling, not a crash.
         """
         from websockets.sync.client import connect
 
         with connect(self.url, open_timeout=30, close_timeout=5) as socket:
-            # Published BEFORE the handshake, so that an `update_entities`
-            # landing during it can drop this socket: the handshake then fails,
-            # the run loop reconnects, and the new session subscribes to the
-            # new set. Assigned after the subscribe, a change in that window
-            # found nothing to drop and the old subscription ran on.
+            # Published BEFORE the handshake, so an `update_entities` landing
+            # during it can drop this socket and the reconnect gets the new set.
             self._socket = socket
             self._authenticate(socket)
             self._subscribe(socket)
             if self._socket is not socket:
                 return                          # reconfigured mid-handshake
-            # Transitions only: a reconnect after a drop is worth a line, the
-            # first connect at boot is worth one, and a socket that simply
-            # stays up is worth none.
+            # Transitions only: a connect is worth a line, a socket that stays
+            # up is worth none.
             _log.info("subscribed to %d Home Assistant %s",
                       len(self.entity_ids),
                       "entity" if len(self.entity_ids) == 1 else "entities")
             self.connected = True
-            self.last_error = None
+            self._record(None)
             try:
                 while not self._stop.is_set() and self._socket is socket:
                     try:
@@ -267,10 +232,10 @@ class Listener:
         try:
             self.on_event()
         except Exception as err:  # noqa: BLE001
-            # The callback is the caller's problem, but it must not take the
-            # subscription down with it -- that would trade a slow forecast
-            # for no event-driven forecast at all.
-            self.last_error = f"{_now()}: on_event: {err}"
+            # The callback must not take the subscription down with it.
+            _log.warning("the listener's callback raised: %s", err, exc_info=True)
+            self._record(f"{_now()}: on_event: {err}",
+                         f"{_now()}: {log.SEE_THE_LOG}")
 
 
 def _now() -> str:

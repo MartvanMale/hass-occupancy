@@ -1,13 +1,8 @@
 """When the forecast counts as a departure or an arrival.
 
-`predict._crossing` reduces the whole 48 h curve to the two numbers a household
-actually reads -- "hours until away", "hours until home" -- and it had no tests
-at all. The rule it implements is not obvious: a threshold per direction, a run
-requirement, a gate on the observed present, and three boundary decisions that
-each go the less obvious way on purpose.
-
-Everything here builds curves by hand. Nothing needs a model, a broker or a
-Home Assistant.
+`predict._crossing` reduces the 48 h curve to two numbers, and its rule is not
+obvious: a threshold per direction, a run requirement, a gate on the observed
+present, and three boundary decisions.
 """
 
 import pandas as pd
@@ -41,12 +36,9 @@ def arrival(curve_, min_hours=2, threshold=0.5, at=AWAY):
 # --- the reason this change exists ---------------------------------------
 
 def test_a_single_hour_across_the_line_is_not_a_departure():
-    """The old bug. One dip does not make a departure.
-
-    The forecast could not have meant a short absence even if it wanted to: its
-    target is the fraction of a 30-minute slot spent home, so a walk round the
-    block reads as ~0.5 in two adjacent slots and never crosses. A lone hour
-    past the line is therefore noise by construction.
+    """One dip does not make a departure. The target is the fraction of a slot
+    spent home, so a short absence never crosses and a lone hour past the line
+    is noise by construction.
     """
     dip = curve(0.95, 0.9, 0.49, 0.88, 0.9, 0.92)
     assert departure(dip, min_hours=2) is None
@@ -76,10 +68,8 @@ def test_each_direction_has_its_own_cut():
 
 
 def test_a_forecast_inside_the_band_answers_neither():
-    """The point of allowing the two cuts to differ.
-
-    With a band of 0.4-0.6 a curve pinned at 0.5 is neither leaving nor
-    arriving, whichever side the household is currently on.
+    """The point of allowing the two cuts to differ: inside the band a curve is
+    neither leaving nor arriving, whichever side the household is on.
     """
     pinned = curve(*[0.5] * 8)
     assert departure(pinned, threshold=0.4, at=HOME) is None
@@ -96,11 +86,9 @@ def test_nothing_is_reported_in_the_direction_they_are_already_in():
 
 
 def test_the_present_is_judged_by_half_the_window_whatever_the_cut_is():
-    """`state_now` is a time fraction, not a probability.
-
-    Three of the last five minutes at home is 0.6, and that is somebody who is
-    in the house -- so a `departure_threshold` of 0.7 must not reclassify them
-    as already away. The gate stays at half the window in both directions.
+    """`state_now` is a time fraction, not a probability: three of the last five
+    minutes at home is 0.6 and that is somebody in the house, so the gate stays
+    at half the window in both directions.
     """
     leaving = curve(0.9, 0.9, 0.2, 0.1, 0.1, 0.1)
     assert departure(leaving, threshold=0.7, at=row(0.6)) == 3
@@ -110,10 +98,8 @@ def test_the_present_is_judged_by_half_the_window_whatever_the_cut_is():
 # --- the three boundary decisions ----------------------------------------
 
 def test_a_run_at_the_end_of_the_curve_is_whatever_is_left():
-    """Requiring the run to fit would shorten the published horizon.
-
-    A genuine departure at +47 h reported as "unknown" is a worse answer than
-    reporting it, so the tail keeps whatever hours remain.
+    """Requiring the run to fit would shorten the published horizon, so the
+    tail keeps whatever hours remain.
     """
     tail = {h: 0.9 for h in range(1, 47)} | {47: 0.2, 48: 0.1}
     assert departure(tail, min_hours=3) == 47
@@ -123,9 +109,7 @@ def test_a_run_at_the_end_of_the_curve_is_whatever_is_left():
 
 
 def test_a_missing_horizon_breaks_the_run():
-    """A NaN horizon is absent from the curve, not zero.
-
-    Stepping over the gap would assert agreement across an hour nobody
+    """Stepping over a gap would assert agreement across an hour nobody
     forecast, so the run restarts on the far side of it.
     """
     holed = {1: 0.9, 2: 0.9, 3: 0.2, 5: 0.2, 6: 0.1}
@@ -133,44 +117,28 @@ def test_a_missing_horizon_breaks_the_run():
 
 
 def test_a_gap_does_not_raise():
-    """A run that never completes falls off the end rather than throwing.
-
-    `curve[h]` on a horizon that is not there would be a KeyError, which is why
-    the run is built from `h in curve` rather than indexed blindly.
+    """A run that never completes falls off the end rather than throwing, which
+    is why the run is built from `h in curve` rather than indexed blindly.
     """
     assert departure({1: 0.9, 5: 0.2, 6: 0.9, 7: 0.9}, min_hours=2) is None
 
 
 def test_the_tail_rule_is_measured_from_the_grid_not_from_the_curve():
-    """The exemption is for the end of the GRID, not the end of the curve.
-
-    It used to measure from `max(curve)`, which was defensible when a short
-    curve meant a test had handed one over: every horizon was published, so the
-    curve's end and the grid's end were the same thing.
-
-    Since a horizon is published only where a model earned it, a curve that
-    stops at +5 h is the normal shape of a household whose far horizons do not
-    ship -- and measuring from it would report "leaving at +5 h" when what
-    happened is that the forecast ran out. Worse, the sensor would then move
-    whenever a `ships` flag flipped at a retrain, for reasons that have nothing
-    to do with the household.
+    """The exemption is for the end of the GRID, not the end of the curve. It
+    used to measure from `max(curve)`, fine when every horizon published -- now
+    a curve stopping at +5 h is normal, and the sensor would move on a `ships` flip.
     """
     assert departure({1: 0.9, 5: 0.2}, min_hours=2) is None, \
         "the forecast running out is not a departure"
-    # The real end of the grid still exempts itself, which is what the rule was
-    # for: a genuine +48 h departure is better reported than turned into
-    # "unknown" for want of a +49th hour that cannot exist.
+    # The real end of the grid still exempts itself: a genuine +48 h departure
+    # is better reported than turned into "unknown" for want of a +49th hour.
     end = max(config.HORIZONS_H)
     assert departure({1: 0.9, end: 0.2}, min_hours=2) == end
 
 
 def test_an_empty_curve_has_no_crossing():
     """A fresh install forecasts nothing at all, and `max({})` raises.
-
-    Unreachable before: `predict_rows` dropped a subject whose curve was empty,
-    so this function was never called with one. It now publishes the record
-    anyway -- the entities exist and read `unknown` -- which brings the empty
-    dict here for the first time.
+    `predict_rows` publishes the record anyway, so the empty dict reaches here.
     """
     assert departure({}) is None
     assert arrival({}) is None
@@ -187,8 +155,7 @@ def test_the_configured_cuts_are_what_serving_uses():
 
 @pytest.mark.parametrize("value, expected", [
     # A number keeps its evident intent and moves to the nearest servable
-    # value: somebody who typed 0 wanted the lowest cut there is, and 0.01
-    # says that far better than the 0.5 default would.
+    # value: somebody who typed 0 wanted the lowest cut there is.
     (0.0, 0.01),
     (-3, 0.01),
     (1.0, 0.99),
@@ -200,10 +167,9 @@ def test_the_configured_cuts_are_what_serving_uses():
     (True, config.DEFAULT_DEPARTURE_THRESHOLD),
 ])
 def test_a_hand_edited_config_is_clamped_rather_than_fatal(value, expected):
-    """`/data/config.json` can be edited on the box, bypassing the API.
-
-    A publisher whose job is to keep publishing degrades a nonsense cut to
-    something servable and says so in the log. It does not refuse to boot.
+    """`/data/config.json` can be edited on the box, bypassing the API. A
+    publisher degrades a nonsense cut to something servable; it does not refuse
+    to boot.
     """
     from occupancy_forecast.tests.conftest import settings as make_settings
     config.configure(make_settings(departure_threshold=value))

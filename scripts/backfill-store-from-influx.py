@@ -2,14 +2,7 @@
 
 The payload for backfill-store-from-influx.sh, which is what you run. Takes the
 Influx connection as JSON on stdin so the token never reaches an argv or `ps`.
-
-`source: influx` never fills the local store (`server.do_collect()`
-short-circuits), so switching to `source: store` later would start the archive
-from zero. One idempotent import closes that. Safe to re-run: the primary key is
-(entity_id, ts) and `append()` is INSERT OR IGNORE.
-
-Deliberately not part of the add-on -- backfilling is a once, by hand, knowing
-what you are doing operation.
+Idempotent: the primary key is (entity_id, ts) and `append()` is INSERT OR IGNORE.
 """
 
 import datetime as dt
@@ -22,9 +15,8 @@ from occupancy_forecast import config, runtime                      # noqa: E402
 from occupancy_forecast.sources import HistoryStore, InfluxSource   # noqa: E402
 from occupancy_forecast.sources.store import _ms                    # noqa: E402
 
-# Big enough that the whole import is a handful of transactions, small enough
-# that the collector -- which writes to this same file every few minutes -- is
-# never waiting long for the lock.
+# A handful of transactions for the whole import, yet never a long lock wait for
+# the collector, which writes to this same file every few minutes.
 CHUNK = 20_000
 
 options = json.load(sys.stdin)
@@ -41,25 +33,18 @@ config.configure(settings)
 
 entities = runtime.tracked_entities(settings)
 
-# `units` is what lets InfluxSource address the proximity distance sensors at
-# all: Home Assistant files those under a measurement named after the UNIT with
-# the object_id in a tag, so without it the highest-value feature group comes
-# back empty and does so silently. See sources/influx.py.
+# `units` lets InfluxSource find the distance sensors, which HA files under a
+# measurement named after the UNIT; without it the best group is silently empty.
 influx = InfluxSource(url, token, org, bucket=bucket, units=settings.units)
 
-# Which read to use per entity, by the shape Home Assistant writes it in.
-# `numeric` covers the two shapes whose field is `value` -- the work zones (a
-# person count, in their own measurement) and the distances (the unit shape
-# above). Everything else is a string state. Getting this wrong is not an
-# error, it is an empty column, which is why the per-entity counts are printed.
+# Which read to use per entity, by the shape HA writes it in. Getting this wrong
+# is not an error but an empty column, which is why per-entity counts are printed.
 distances = {pair[0] for pair in settings.proximity.values() if pair and pair[0]}
 zones = set(settings.office_zones.values())
 numeric_entities = distances | zones
 
-# Ask Influx where its history starts rather than guessing. Only the string
-# entities can answer -- first_seen() filters on measurement name, which is not
-# how the distance sensors are stored -- and people are the entity every install
-# has, so they are the right thing to anchor to.
+# Ask Influx where its history starts rather than guessing; only the string
+# entities can answer, and people are the entity every install has.
 strings = [e for e in entities if e not in numeric_entities]
 start = influx.first_seen(strings)
 if not start:
@@ -67,9 +52,8 @@ if not start:
 stop = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 store = HistoryStore(config.HISTORY_DB)
-# SQLite's default busy timeout is 0, which turns a perfectly normal overlap
-# with the collector into "database is locked" rather than a short wait. WAL
-# plus this is why the add-on does not need to be stopped for the import.
+# SQLite's default busy timeout is 0, which turns a normal overlap with the
+# collector into "database is locked"; with WAL, the add-on need not be stopped.
 store._db.execute("PRAGMA busy_timeout = 30000")
 
 before = store.span()

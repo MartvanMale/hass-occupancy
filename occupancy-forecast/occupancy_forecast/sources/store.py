@@ -1,30 +1,8 @@
-"""Append-only SQLite history, the add-on's own archive.
+"""Append-only SQLite history: the recorder purges, so the add-on keeps a copy.
 
-This exists because **Home Assistant cannot supply training history.** Measured
-on a well-configured instance: a 100-day request reached back 21 days despite
-`purge_keep_days: 100`, and stock Home Assistant defaults to 10. There is no
-long-term-statistics shortcut either -- LTS covers only numeric entities with a
-`state_class`, and presence is a string while the proximity distance sensors
-carry `state_class: None`.
-
-So the add-on accumulates its own. Measured at 158 state changes per day across
-the seven entities a two-person household tracks, that is **~2.3 MB per year**,
-and the add-on's `/data` survives restarts and updates. Which means this store
-keeps history *forever* -- strictly better than the recorder it reads from.
-
-Storage is deliberately dumb: one row per state change, primary key
-(entity_id, ts). Re-importing an overlapping window is therefore idempotent, so
-the collector can be sloppy about its watermark and simply re-fetch the last
-hour on every poll.
-
-A second table, `forecasts`, keeps what the add-on *said* rather than what the
-house did. Nothing else records it: `predict.py` writes no file, the server's
-in-memory forecast is one slot overwritten every cycle, and a retained MQTT
-message is a last value rather than a history. Without it there is no way to ask
-"what did we forecast for 07:00, and what actually happened at 07:00" -- every
-score the add-on reports otherwise is cross-validation at *training* time, which
-answers a different question and cannot see the serving path at all. It is
-pruned; the archive is not. See `config.FORECAST_RETENTION_DAYS`.
+LTS is no shortcut, covering only numeric entities with a `state_class`. One row
+per state change, keyed (entity_id, ts), so re-importing a window is idempotent.
+`forecasts` keeps what the add-on SAID, whatever the source; it alone is pruned.
 """
 
 from __future__ import annotations
@@ -52,10 +30,8 @@ CREATE TABLE IF NOT EXISTS forecasts (
 ) WITHOUT ROWID;
 """
 
-# Deliberately NO secondary index on `forecasts`. The primary key IS the
-# storage order in a WITHOUT ROWID table, and every read here is a prefix of
-# it; the redundant index on `states` above is already noted as a mistake in
-# this module's own history.
+# Deliberately NO secondary index on `forecasts`: the primary key IS the
+# storage order in a WITHOUT ROWID table, and every read here is a prefix of it.
 
 
 def _ms(when: str | dt.datetime) -> int:
@@ -76,13 +52,7 @@ def _iso(ms: int) -> str:
 class HistoryStore:
     """The archive. One SQLite file, one connection PER THREAD.
 
-    It was one connection for the whole process with `check_same_thread`
-    switched off, shared by the collector, the training thread and every
-    request handler on uvicorn's threadpool. sqlite3 serialises the calls, so
-    it did not crash -- but a `commit()` on one thread committed whatever
-    another had in flight, and a busy database had no timeout to wait on.
-    A connection per thread is the shape SQLite is designed around; WAL is a
-    property of the file and lets readers and the one writer proceed together.
+    Shared, a `commit()` on one thread committed what another had in flight.
     """
 
     def __init__(self, path: Path | str = "/data/history.db"):
@@ -102,9 +72,8 @@ class HistoryStore:
     def _db(self) -> sqlite3.Connection:
         db = getattr(self._local, "db", None)
         if db is None:
-            # `check_same_thread=False` only so that `close()` can shut every
-            # connection down from whichever thread runs the shutdown; each
-            # connection is otherwise used by its own thread alone.
+            # `check_same_thread=False` only so `close()` can close every
+            # connection from whichever thread runs the shutdown.
             db = sqlite3.connect(str(self.path), check_same_thread=False)
             # Wait rather than fail when the writer holds the lock: five
             # seconds is far longer than any single append takes.
@@ -121,9 +90,8 @@ class HistoryStore:
         rows = list(rows)
         if not rows:
             return 0
-        # `rowcount` sums the rows an executemany actually changed, and an
-        # ignored duplicate is not a change -- so this is the insert count
-        # without the two full `COUNT(*)` scans that used to bracket it.
+        # `rowcount` sums the rows executemany actually changed, and an ignored
+        # duplicate is not a change.
         cursor = self._db.executemany(
             "INSERT OR IGNORE INTO states (entity_id, ts, value) VALUES (?, ?, ?)", rows)
         self._db.commit()
@@ -132,12 +100,7 @@ class HistoryStore:
     def append_forecasts(self, rows: Iterable[tuple[str, int, int, float]]) -> int:
         """Insert (subject, target_ts_ms, horizon_h, p). Last write wins.
 
-        `INSERT OR REPLACE`, not `OR IGNORE` as `append` uses, and the
-        difference matters. A 30-minute slot is covered by several five-minute
-        serve cycles, each with a fresher feature row, so the same
-        (subject, target_ts, horizon) is written repeatedly with different
-        numbers. The last one is the one the sensor was actually holding when
-        the slot arrived, which is what this table exists to be scored against.
+        Several cycles write each slot; the last is what the sensor was showing.
         """
         rows = list(rows)
         if not rows:
@@ -184,10 +147,7 @@ class HistoryStore:
                         stop: str | None = None) -> list[tuple[int, float]]:
         """What was forecast for each slot at one horizon, oldest first.
 
-        Epoch milliseconds rather than the ISO strings `states` returns, on
-        purpose: the caller joins this against the observed grid by equality on
-        the slot, and an integer key makes that a dict lookup rather than a
-        string comparison that any timezone spelling could break.
+        Epoch ms, not ISO, so the join on the observed grid is integer equality.
         """
         sql = ("SELECT target_ts, p FROM forecasts "
                "WHERE subject = ? AND horizon_h = ? AND target_ts >= ?")
@@ -208,6 +168,19 @@ class HistoryStore:
 
     def count(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM states").fetchone()[0]
+
+    def user_version(self) -> int:
+        """SQLite's own schema-version field, as a one-shot migration key.
+
+        Zero on older files; set it only after the work it records is done.
+        """
+        return int(self._db.execute("PRAGMA user_version").fetchone()[0])
+
+    def set_user_version(self, version: int) -> None:
+        # No parameter binding: PRAGMA does not take one. The caller passes a
+        # module constant, never anything from outside.
+        self._db.execute(f"PRAGMA user_version = {int(version)}")
+        self._db.commit()
 
     def last_seen(self, entity_id: str) -> int | None:
         row = self._db.execute(
@@ -232,13 +205,7 @@ class HistoryStore:
     def inventory(self) -> list[dict]:
         """One row per entity: how much of it there is, and what it spans.
 
-        What `entities()` gives, with the numbers that make it worth looking at
-        -- an entity present with a plausible row count is a signal that arrived,
-        and one present with a `last` from three weeks ago is a signal that
-        stopped. Neither was visible before without a sqlite3 prompt.
-
-        One pass in `(entity_id, ts)` order: the table is WITHOUT ROWID, so that
-        primary key IS the storage order and the GROUP BY needs no sort.
+        One pass in primary-key order, which IS the storage order: no sort.
         """
         return [{"entity_id": entity_id, "rows": rows,
                  "first": _iso(first), "last": _iso(last)}
@@ -249,11 +216,7 @@ class HistoryStore:
     def value_counts(self, entity_id: str, limit: int = 12) -> list[tuple[str, int]]:
         """The commonest values for one entity, most frequent first.
 
-        A peek, never a histogram, and the cap is the reason: a presence entity
-        has three distinct values and a distance sensor has one per row, so
-        without a limit this is a 50,000-row answer to "what kind of thing is
-        this". It is used to tell those two cases apart, which the first handful
-        of rows settles.
+        A peek, never a histogram: a distance sensor has a value per row.
         """
         return [(value, n) for value, n in self._db.execute(
             "SELECT value, COUNT(*) AS n FROM states WHERE entity_id = ? "
@@ -262,10 +225,7 @@ class HistoryStore:
     def prune_forecasts(self, before: str | dt.datetime) -> int:
         """Drop forecasts about slots older than `before`. Returns rows removed.
 
-        The archive is never pruned -- it is the training history and it is
-        cheap. This table is neither: it is written every cycle for every
-        horizon, so it grows about two hundred times faster per day, and its
-        only consumer is a chart of the recent past.
+        Never the archive: this grows every cycle, for a chart of recent days.
         """
         cur = self._db.execute("DELETE FROM forecasts WHERE target_ts < ?",
                                (_ms(before),))
@@ -273,8 +233,7 @@ class HistoryStore:
         return cur.rowcount
 
     def close(self) -> None:
-        """Close every thread's connection. Called at shutdown, and when a
-        source is replaced -- the old store used to be dropped unclosed."""
+        """Close every thread's connection, at shutdown or on a source swap."""
         with self._connections_lock:
             connections, self._connections = self._connections, []
         for db in connections:

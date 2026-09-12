@@ -5,38 +5,12 @@ import { clamp, linePath, runs } from './geometry'
 import { useChartPointer } from './useChartPointer'
 
 /**
- * Several 0-100% curves over the next 48 hours, in inline SVG.
- *
- * A sibling of `TimeSeries` rather than an option on it: that one draws one
- * observed series and its whole hover layer is built around reading a single
- * value off a single line. This draws three forecast curves that share an axis
- * and are read against each other, which is a different question.
- *
- * **A forecast has holes.** It did not use to -- every horizon got an answer,
- * because a horizon the model had not earned was served its baseline instead.
- * Now nothing is published there, and this chart used to draw that hole as
- * `?? 0`: a hard 0%, which reads as "certainly away" rather than "no answer",
- * on the one part of the curve where the add-on has least to say. The pen
- * lifts instead, as it does in `TimeSeries` for a slot nobody observed.
- *
- * That hole used to carry a dashed outline as well. It was removed on request:
- * a dashed box in the corner of a chart reads as a rendering fault rather than
- * as meaning, and the absence is still said four other ways -- the pen lifts,
- * the hover tip reads "not forecast", the `aria-label` counts the missing
- * horizons, and the horizon strip on the same tab greys them. `holes()` stays
- * for that count; only the mark is gone.
- *
- * `preserveAspectRatio="none"`, as in `TimeSeries`: the viewBox stretches to
- * the card's width, so nothing inside may be a shape whose proportions matter.
- * Labels live in the rows outside the SVG.
- *
- * The legend is a row of buttons, because with three curves over one axis the
- * question is often about one of them -- "is that dip one person or the house" is
- * answered by turning the other two off. Which is why the legend can no longer
- * be `aria-hidden`: focusable content inside an `aria-hidden` subtree is an ARIA
- * violation, and every other legend in this panel still carries that attribute
- * precisely because none of them is focusable. The `aria-label` is regenerated
- * from what is actually drawn, so it never describes a hidden line.
+ * Several 0-100% curves over the next 48 hours, in inline SVG. A sibling of
+ * `TimeSeries`, not an option on it: three curves read against each other is a
+ * different question from one series read off a line.
+ * **A forecast has holes.** A horizon nothing serves is not in the curve; the
+ * pen lifts rather than plotting `?? 0`, which reads as "certainly away".
+ * `preserveAspectRatio="none"`, so nothing inside may have proportions.
  */
 
 const W = 1000
@@ -60,12 +34,8 @@ function pathFor(values: (number | null)[]): string {
   })))
 }
 
-/** Contiguous runs where EVERY drawn curve is null, as [start, end] indices.
- *
- *  Per-curve bands would be undrawable on a shared axis, and they would also
- *  be dishonest about what a hole is: `ships` is a property of the horizon,
- *  not of the subject, so in practice every curve holes at the same hour. A
- *  band is drawn only where nothing at all is forecast. */
+/** Contiguous runs where EVERY drawn curve is null. `ships` is a property of the
+ *  horizon, not the subject, so in practice they all hole at the same hour. */
 function holes(curves: Curve[], n: number): [number, number][] {
   return runs(Array.from({ length: n }, (_, i) =>
     curves.length > 0 && curves.every((c) => c.values[i] == null)))
@@ -77,10 +47,8 @@ export function Curves({ curves, hours, night = [], label, at }: {
   hours: number[]
   night?: NightBand[]
   label: string
-  /** The slot the horizons are measured from, so the axis can carry real clock
-   *  times. `observed_at`, never `predicted_at`: a horizon is h hours after the
-   *  feature row's slot, and that slot can be half an hour older than the
-   *  moment the arithmetic ran. Omitted, the chart falls back to hours only. */
+  /** The slot the horizons are measured from. `observed_at`, never
+   *  `predicted_at` -- that can be half an hour later. */
   at?: string | undefined
 }) {
   const [hidden, setHidden] = useState<Record<string, boolean>>({})
@@ -99,10 +67,7 @@ export function Curves({ curves, hours, night = [], label, at }: {
   const gaps = holes(shown, hours.length)
   const holeHours = gaps.reduce((n, [a, b]) => n + (b - a + 1), 0)
 
-  // Not the caller's sentence when some of it is switched off: an aria-label
-  // naming three people over a chart drawing one is worse than no label. The
-  // holes go in it too -- a screen reader must not have to infer an absence
-  // from a shape it cannot see.
+  // Not the caller's sentence when some of it is switched off, and the holes go in it too.
   const base = shown.length === curves.length
     ? label
     : shown.length === 0
@@ -130,17 +95,9 @@ export function Curves({ curves, hours, night = [], label, at }: {
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
              role="img" aria-label={drawn}>
           <title>{drawn}</title>
-          {/* Night first, so every line draws over it.
-
-              CLAMPED to the drawn range, which is not defensive tidying: the
-              bands are offsets from NOW (`night.bands`), so a household asleep
-              at this moment opens one at 0 while the axis starts at +1 h. That
-              is a negative x, and this `<svg>` is `overflow: visible` -- which
-              it has to be, or a 2px stroke sitting on the top or bottom edge
-              is sliced down the middle -- so the rect was not clipped, it was
-              painted out over the card. Clamp the band rather than drop the
-              overflow rule: the band really does extend past the axis, and the
-              axis is the thing that has to win. */}
+          {/* Night first, so every line draws over it. CLAMPED: a band opening
+              at 0 on an axis starting at +1 h is a negative x, and this
+              `<svg>` is `overflow: visible`, so it painted out over the card. */}
           {night.map((b, i) => {
             const from = clamp(b.from, lo, hi)
             const to = clamp(b.to, lo, hi)
@@ -168,9 +125,8 @@ export function Curves({ curves, hours, night = [], label, at }: {
 
         {hoursAhead !== undefined && hoursAhead !== null && shown.length > 0 && (
           <ChartTip fraction={pointer.fraction}>
-            {/* Hours ahead AND the clock time. "+31 h" is not a thing anybody
-                can act on; "Fri 19:30" is, and reading a dip off the chart is
-                exactly the moment somebody wants it. */}
+            {/* Hours ahead AND the clock time: "+31 h" is not a thing anybody
+                can act on, "Fri 19:30" is. */}
             <div className="tiphead">
               {hoursAhead === 0 ? 'now' : `+${hoursAhead} h`}
               {clockAt(hoursAhead) && <span className="tipwhen">{clockAt(hoursAhead)}</span>}
@@ -203,11 +159,8 @@ export function Curves({ curves, hours, night = [], label, at }: {
               <span>{c.label}</span>
             </button>
           ))}
-          {/* The two marks the chart draws that are not curves. They were
-              unlabelled, which made the dashed box at the right read as a
-              glitch rather than as the one thing it means: the add-on has
-              nothing to say there. Spans and not buttons -- the curves can be
-              switched off, these are keys. */}
+          {/* A span, not a button: the curves can be switched off, this is a
+              key. The legend is not `aria-hidden` because the buttons are focusable. */}
           {night.length > 0 && (
             <span className="key"><i className="nightkey" /><span>asleep</span></span>
           )}
@@ -215,10 +168,8 @@ export function Curves({ curves, hours, night = [], label, at }: {
         <span>+{hours[hours.length - 1]} h</span>
       </div>
 
-      {/* Real clock times under the axis. "+31 h" is not a thing anybody can
-          act on, and the whole point of a 48-hour chart is reading WHEN a dip
-          falls. Five evenly spaced marks, which line up with `space-between`
-          because the horizons are hourly and the axis is linear in them. */}
+      {/* Real clock times under the axis. Five evenly spaced marks line up with
+          `space-between` because the axis is linear in hourly horizons. */}
       {anchor !== null && !Number.isNaN(anchor.getTime()) && (
         <div className="ticks num" aria-hidden="true">
           {[0, 0.25, 0.5, 0.75, 1].map((f) => (

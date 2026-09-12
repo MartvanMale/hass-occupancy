@@ -1,12 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// `base: './'` is not a preference, it is the whole panel. Ingress serves this
-// app from `/api/hassio_ingress/<token>/`, a path nothing here can know at build
-// time, so every asset URL and every fetch has to be relative to the document.
-// One absolute path and the panel is a blank page with a 404 in the console.
-//
-// The same rule applies in `api.ts`: `fetch('api/status')`, never `/api/status`.
+// `base: './'` is not a preference, it is the whole panel: Ingress serves this
+// from a token path nothing can know at build time, so every URL must be
+// relative or the panel is a blank page. Same rule in `api.ts`.
 export default defineConfig({
   base: './',
   plugins: [react()],

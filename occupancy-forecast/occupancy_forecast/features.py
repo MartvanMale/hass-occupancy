@@ -1,23 +1,10 @@
 """Build the modelling table: one row per (subject, 30-minute slot).
 
-The target is `home_frac` -- the **time-weighted fraction of the slot spent at
-home** -- not a last-observation-carried-forward binary.
-
-That choice is the whole reason this module does not simply reuse an ordinary
-last-value resample. Measured on a real installation, 19% of one person's presence
-episodes are shorter than five minutes, and 11 of their 28 workplace-zone
-episodes are under *two* minutes -- GPS jitter at a zone edge, e.g.
-
-    14:22:11 zone.office -> 14:22:49 not_home -> 14:26:16 zone.office
-
-Taking the last observation at or before each grid point is right for a
-thermostat and wrong here: a ninety-second blip that happens to land on a grid
-point becomes a spurious empty-house slot. Time-weighting debounces by
-construction, needs no dwell threshold to tune, and gives a more informative
-target into the bargain.
-
-Slots with less than `config.MIN_SLOT_COVERAGE` of their duration observed are
-NaN rather than a guess. On the current history that costs about 1% of slots.
+The target is `home_frac`, the time-weighted fraction of the slot spent at home.
+Last-observation-carried-forward turns a ninety-second GPS blip at a zone edge
+into a spurious empty-house slot; time-weighting debounces by construction and
+needs no dwell threshold. Slots under `config.MIN_SLOT_COVERAGE` are NaN, never
+a guess.
 """
 
 from __future__ import annotations
@@ -38,80 +25,29 @@ _log = log.get(__name__)
 # Feature groups. Named so a drop/only probe can price them as a unit.
 # ---------------------------------------------------------------------------
 
-# Daily lag offsets, in days, of the TARGET slot.
-#
-# 3 and 21 are here for the LONG horizons specifically. `safe_daily_lags` throws
-# away every lag `k` with `24k < horizon`, so past +25 h the 1-day lag is gone
-# and the band that was left with three legal anchors now has five. Both sit
-# inside the 45-day warm-up `evaluate.MIN_TRAIN_DAYS` already pays for, so they
-# cost no folds. 28 would not -- see CLIMATOLOGY_WEEKS.
+# Daily lag offsets, in days, of the TARGET slot. 3 and 21 exist for the long
+# horizons: past +25 h `safe_daily_lags` drops the 1-day lag and these keep five
+# legal anchors. Both fit inside the 45-day warm-up, so they cost no folds.
 DAILY_LAGS = (1, 2, 3, 7, 14, 21)
 
-# How many trailing same-weekdays go into the in-table climatology feature.
-#
-# Four is thin -- roughly four samples per (weekday, slot) cell, and baseline.py
-# says outright that cell means at that sample size are mostly noise. Widening
-# it is not free: `evaluate.MIN_TRAIN_DAYS` is 45 BECAUSE the longest in-table
-# feature is a four-week climatology, so eight weeks pushes the warm-up to ~65
-# days and folds are exactly what the ship gate spends. Probe it before moving
-# it; SLOT_CLIMATOLOGY below is the cheaper half of the same idea.
+# Four trailing same-weekdays -- thin, but `evaluate.MIN_TRAIN_DAYS` is 45
+# BECAUSE this is the longest in-table feature, so widening it buys noise with folds.
 CLIMATOLOGY_WEEKS = 4
 
-# The same climatology over twice as many weekdays. A candidate, not a default.
-#
-# The per-(subject, weekday, slot) cell has a MEASURED median of 21 observations
-# available in this household's history; `wclim4` uses four of them, so its cell
-# means take values on a five-point grid and the tree has good reason to
-# discount them. Eight is the cheapest step that halves that.
-#
-# Costs no folds: `evaluate.MIN_TRAIN_DAYS` is a hand-set 45 and `nanmean`
-# returns as soon as ONE week exists, so the first fold does not move. What it
-# does move is `deepest_lookback_days` and therefore `predict.LOOKBACK_DAYS`,
-# 32 -> 60 days, and every serving cycle is a full lookback rebuild -- that is
-# the price to weigh, and it is per cycle rather than per week.
+# A wider candidate, not a default: it costs no folds but doubles
+# `predict.LOOKBACK_DAYS`, and every serving cycle is a full lookback rebuild.
 WIDE_CLIMATOLOGY_WEEKS = 8
-# MEASURED 2026-09-02 and NOT SHIPPED. Four arms over one parquet and one set of
-# 16 fold windows (`occupancy_forecast.probe`), against the control:
-#
-#     arm            transition    flat   | transition folds   flat folds
-#     control            0.1966  0.1359   |
-#     wclim_slope        0.1897  0.1322   |  10/16 p=0.454   12/16 p=0.077
-#     int_calendar       0.1917  0.1358   |   9/16 p=0.804    9/16 p=0.804
-#     wclim_wide         0.1853  0.1315   |   9/16 p=0.804   10/16 p=0.454
-#
-# On the pre-registered primary metric -- departure-hour error through
-# `predict._crossing` -- every arm was neutral or worse than the control, and
-# none won a fold majority. That metric has n=72 person-days over 13 folds and
-# is too weak to decide anything; the fold records above are the usable
-# evidence, and the largest pooled effect has the weakest one. Sixteen cells
-# were inspected, so the best-looking is selected-for.
-#
-# Nothing here is disproven, and one thing is handicapped: on 173 days an
-# 8-week climatology is only fully populated for the later folds, so
-# `wclim_wide` is measured on an archive too short to show it at its best. Worth
-# re-running when the history is longer -- `python -m occupancy_forecast.probe
-# --features <copy> --arms control,wclim_wide`.
 
 # Every width the table carries. `climatology_column(h)` still means the served
 # one; the rest are candidates.
 CLIMATOLOGY_WIDTHS = (CLIMATOLOGY_WEEKS, WIDE_CLIMATOLOGY_WEEKS)
 
-# Which width the transition slopes are differenced from.
-#
-# The narrow one deliberately, so that the slope arm is ONE change from the
-# control rather than two: a slope built on a width that is itself a candidate
-# would conflate "the slope helps" with "the wider window helps". If the wide
-# width earns its place, rebuild the slopes on it and measure that separately --
-# the difference of two 4-sample means is the noisier quantity and it may be
-# what limits the slope.
+# Which width the transition slopes are differenced from. The narrow one
+# deliberately, so the slope arm is one change from the control rather than two.
 TRANSITION_SOURCE_WEEKS = CLIMATOLOGY_WEEKS
 
-# The other half of the climatology, pooled over ALL weekdays rather than split
-# by them. Fourteen samples per (slot) cell against the weekday version's four:
-# more bias, much less variance, and no warm-up cost at all because it reuses
-# days the table already has. The tree gets both and can blend them, which is
-# the honest way to answer "is four samples enough" -- let it decide per split
-# rather than picking one width for every horizon.
+# The climatology pooled over ALL weekdays: more bias, far less variance, no
+# warm-up cost. The tree gets both widths and blends them.
 SLOT_CLIMATOLOGY_DAYS = 14
 
 CALENDAR_COLUMNS = (
@@ -119,44 +55,10 @@ CALENDAR_COLUMNS = (
     "is_weekend", "is_holiday",
 )
 
-# The same clock, as plain integers, beside the trig pair.
-#
-# The sine/cosine encoding is right about the WRAP -- 23:30 and 00:00 are
-# adjacent and a raw hour cannot say so -- and wrong about the EDGE. Isolating
-# one slot on one weekday for one person out of a circle costs a conjunction of
-# splits on `slot_sin` AND `slot_cos` AND `dow_sin` AND `dow_cos` AND the
-# subject one-hot, five deep, under `min_samples_leaf=100` on ~500 independent
-# person-days. With an integer the same cut is `slot in [14, 16)`: one split.
-#
-# MEASURED symptom that prompted this: a person who leaves for work between
-# 07:00 and 08:00 every Thursday was forecast at 0.93 at 07:14 and did not
-# reach her true level until ~11:00 -- the right answer, three to four hours
-# late. Her own weekday climatology for that slot said 0.354 at the time.
-#
-# Both encodings are served. The tree picks per split, which is the same
-# argument SLOT_CLIMATOLOGY_DAYS makes about widths.
+# The same clock as plain integers. Sin/cos is right about the wrap and wrong
+# about the edge: isolating one slot on one weekday costs five conjoined splits
+# on the circle and one on an integer. Both are built; the tree picks.
 INTEGER_CALENDAR_COLUMNS = ("slot", "dow")
-# MEASURED 2026-09-02 and NOT SHIPPED. Four arms over one parquet and one set of
-# 16 fold windows (`occupancy_forecast.probe`), against the control:
-#
-#     arm            transition    flat   | transition folds   flat folds
-#     control            0.1966  0.1359   |
-#     wclim_slope        0.1897  0.1322   |  10/16 p=0.454   12/16 p=0.077
-#     int_calendar       0.1917  0.1358   |   9/16 p=0.804    9/16 p=0.804
-#     wclim_wide         0.1853  0.1315   |   9/16 p=0.804   10/16 p=0.454
-#
-# On the pre-registered primary metric -- departure-hour error through
-# `predict._crossing` -- every arm was neutral or worse than the control, and
-# none won a fold majority. That metric has n=72 person-days over 13 folds and
-# is too weak to decide anything; the fold records above are the usable
-# evidence, and the largest pooled effect has the weakest one. Sixteen cells
-# were inspected, so the best-looking is selected-for.
-#
-# Nothing here is disproven, and one thing is handicapped: on 173 days an
-# 8-week climatology is only fully populated for the later folds, so
-# `wclim_wide` is measured on an archive too short to show it at its best. Worth
-# re-running when the history is longer -- `python -m occupancy_forecast.probe
-# --features <copy> --arms control,wclim_wide`.
 
 # What the table CARRIES. `CALENDAR_COLUMNS` is what has always been served;
 # which of the extras are served is `SHIPPED_EXTRAS` below.
@@ -164,44 +66,32 @@ ALL_CALENDAR_COLUMNS = CALENDAR_COLUMNS + INTEGER_CALENDAR_COLUMNS
 
 STATE_COLUMNS = ("state_now", "minutes_in_state", "coverage")
 
-# Where they are and which way they are going. See config.PROXIMITY.
-#
-# `distance_delta_*` are explicit differences because a tree cannot subtract two
-# columns, so the difference has to be handed to it as its own feature.
-# A distance of 8 km means something completely different when it was 30 km half
-# an hour ago than when it was 8 km all afternoon, and only the delta says which.
+# Where they are and which way they are going. `distance_delta_*` are explicit
+# because a tree cannot subtract two columns, and 8 km after 30 km means
+# something different from 8 km all afternoon.
 PROXIMITY_COLUMNS = (
     "distance_km", "distance_delta_30m", "distance_delta_60m",
     "dir_towards", "dir_away",
 )
 
-# Columns that are computed into the parquet but deliberately NOT served yet.
-# Companion-app sensors land here: they are usually enabled long after the
-# recorder started, and a feature that is NaN for all but the last few days of
-# the history trains as "unknown" and is worse than not having the feature at
-# all. Shipping one is a single tuple edit plus a retrain, once it has history.
+# Built into the parquet but not served: a column that is NaN for all but the
+# last few days trains as "unknown" and is worse than absent. Shipping one is a
+# tuple edit plus a retrain.
 BUILT_NOT_SHIPPED: tuple[str, ...] = (
     "next_alarm_h",
     "is_charging",
     "detected_activity_still",
 )
 
-# Candidate features: always BUILT into the parquet, served only when named.
-#
-# The same split as BUILT_NOT_SHIPPED above and for a different reason. That one
-# withholds a column until it has history; this one exists so a candidate can be
-# MEASURED against a control on ONE parquet, one set of fold windows and
-# identical rows. Rebuilding the table between arms would change the newest row
-# and can move a fold edge, and `train.shared_windows` exists precisely because
-# a comparison cut two ways is not a comparison.
-#
-# `occupancy_forecast/probe.py` flips this in-process, one arm at a time. Shipping a
-# winner is one tuple edit plus a MODEL_VERSION bump plus a retrain.
+# Candidates: always built, served only when named here, so a probe can measure
+# one against a control on one parquet and one set of fold windows. Every name
+# below has been measured against a control and not shipped; re-run
+# `python -m occupancy_forecast.probe` when the archive is longer. Shipping a
+# winner is a tuple edit plus a MODEL_VERSION bump plus a retrain.
 #
 #   "int_calendar"  INTEGER_CALENDAR_COLUMNS, origin and target
 #   "wclim_wide"    the same-weekday climatology over WIDE_CLIMATOLOGY_WEEKS
 #   "wclim_slope"   the climatology's slope either side of the target slot
-#
 SHIPPED_EXTRAS: tuple[str, ...] = ()
 
 
@@ -243,13 +133,9 @@ def target_calendar_columns(horizon: int) -> tuple[str, ...]:
 def safe_daily_lags(horizon: int) -> tuple[int, ...]:
     """Daily lags of the target slot that do not reach past the origin.
 
-    `tgt{h}h_lag{k}d` is `home_frac` at `t + h - 24k`. That is only observable
-    at prediction time when `24k >= h`. At a 36 h horizon the target's
-    "yesterday" is twelve hours into the *future* -- including it would train a
-    model that cannot be served, and would score beautifully doing it.
-
-    This is the single easiest way to leak in this problem, so the gate lives in
-    one function and `test_features.py` asserts it.
+    `tgt{h}h_lag{k}d` is only observable when `24k >= h`. This is the easiest
+    way to leak in this problem, so the gate lives in one function and
+    `test_features.py` asserts it.
     """
     return tuple(k for k in DAILY_LAGS if 24 * k >= horizon)
 
@@ -261,12 +147,8 @@ def wide_climatology_column(horizon: int) -> str:
 def climatology_slope_columns(horizon: int) -> tuple[str, str]:
     """How far the same-weekday climatology moves either side of the target.
 
-    `slope_back` is what has already happened across the hour ending at the
-    target slot; `slope_fwd` is what usually happens across the hour after it.
-    A tree cannot subtract two columns -- the same argument
-    `PROXIMITY_COLUMNS`'s `distance_delta_*` makes -- and in the melted frame
-    the two climatologies being differenced live on DIFFERENT ROWS, one per
-    horizon, so no amount of capacity would let it form the difference itself.
+    Explicit because the two climatologies being differenced live on different
+    rows of the melted frame, so no model can form the difference itself.
     """
     stem = f"tgt{horizon}h_wclim{TRANSITION_SOURCE_WEEKS}"
     return f"{stem}_slope_back", f"{stem}_slope_fwd"
@@ -277,14 +159,9 @@ def climatology_column(horizon: int) -> str:
 
 
 def slot_climatology_days(horizon: int) -> tuple[int, ...]:
-    """Whole-day offsets the slot climatology may average over.
-
-    Gated exactly like `safe_daily_lags` and for exactly the same reason -- a
-    day that has not happened yet cannot be averaged into anything. The window
-    therefore narrows with the horizon rather than shifting: 14 days of samples
-    below +25 h, 13 above it. That is still three times what the same-weekday
-    climatology gets.
-    """
+    """Whole-day offsets the slot climatology may average over, gated exactly
+    like `safe_daily_lags`: a day that has not happened cannot be averaged into
+    anything."""
     return tuple(k for k in range(1, SLOT_CLIMATOLOGY_DAYS + 1) if 24 * k >= horizon)
 
 
@@ -293,12 +170,8 @@ def slot_climatology_column(horizon: int) -> str:
 
 
 def zone_columns() -> tuple[str, ...]:
-    """Every zone column, in build order. `zone_other` is always the last.
-
-    Derived from config, never a literal -- the same rule `train.may_be_nan`
-    learned the hard way. An install with no zones ticked gets just
-    `zone_other`, which is then simply "away", and nothing downstream cares.
-    """
+    """Every zone column in build order, `zone_other` last. Derived from
+    config, never a literal -- see `train.may_be_nan`."""
     return (*(f"zone_{slug}" for slug in config.zone_slugs()), "zone_other")
 
 
@@ -307,13 +180,9 @@ def cross_subject_lag_column(horizon: int, slug: str, days: int) -> str:
 
 
 def cross_subject_lag_columns(horizon: int) -> tuple[str, ...]:
-    """The other subjects' state at the target slot, on the nearest legal day.
-
-    Nearest only, not every lag. The full cross product is 48 horizons x every
-    subject x every safe lag, which would more than double a table that is
-    already too wide to browse, to say the same thing five times with
-    increasing staleness.
-    """
+    """The other subjects' state at the target slot, on the nearest legal day
+    only: the full cross product says the same thing five times with increasing
+    staleness."""
     lags = safe_daily_lags(horizon)
     if not lags:
         return ()
@@ -324,30 +193,15 @@ def cross_subject_lag_columns(horizon: int) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 # The long form
 #
-# The built table is WIDE: one row per (subject, slot), with a `tgt{h}h_*` block
-# per horizon. That is the right shape on disk -- the Data tab reads per-column
-# statistics straight out of the parquet footer, and `safe_daily_lags` stays a
-# positive selection over column NAMES, which is what keeps the leakage gate
-# structural.
-#
-# It is the wrong shape for the model. One fit per horizon cannot share what
-# h=25 and h=26 obviously have in common, and MEASURED on 173 days that costs
-# real skill: the per-horizon models run from +17.8% at h=1 to **-20.2% at
-# h=48**, worse than the trivial baseline they are scored against, because each
-# of the 48 is overfitting the same ~500 person-days independently.
-#
-# So the table is melted to one row per (subject, slot, horizon) with
-# horizon-relative names, and `horizon_h` becomes a feature the model can split
-# on. The melt is where the gate is applied: a lag this horizon may not see is
-# never copied across, so it arrives as NaN by omission rather than by a mask
-# somebody has to remember to write.
+# The table is wide on disk (footer stats, and the leakage gate stays a
+# selection over column names) and melted for the model, one row per (subject,
+# slot, horizon). The melt is where the lag gate is applied, by omission.
 # ---------------------------------------------------------------------------
 
 HORIZON_COLUMN = "horizon_h"
 
-# The lag whose offset varies with the horizon (1 d below +25 h, 2 d above it),
-# carried explicitly so the model is told which it is holding rather than having
-# to infer it from `horizon_h`.
+# The lag whose offset varies with the horizon, carried explicitly rather than
+# inferred from `horizon_h`.
 OTHER_LAG_DAYS_COLUMN = "other_lag_days"
 
 TARGET_COLUMN = "y"
@@ -358,13 +212,8 @@ def long_target_calendar_columns() -> tuple[str, ...]:
 
 
 def long_shipped_columns() -> tuple[str, ...]:
-    """What the pooled model is FED, against `long_columns`'s what the table HAS.
-
-    The two differ only by `SHIPPED_EXTRAS`. Keeping them apart is what lets
-    `long_frame` mint a candidate column -- so it exists to be measured, and so
-    `nan_allowed` still tolerates it -- while `train.base_features` leaves it
-    out until it has earned a place.
-    """
+    """What the pooled model is FED, against `long_columns`'s what the table
+    HAS. They differ only by `SHIPPED_EXTRAS`."""
     return (*long_columns(), *extra_long_columns())
 
 
@@ -377,14 +226,9 @@ def long_cross_subject_lag_columns() -> tuple[str, ...]:
 
 
 def long_columns() -> tuple[str, ...]:
-    """Everything `tgt{h}h_*` collapses to, in melt order.
-
-    Seventeen-plus-n_subjects columns per horizon become this many columns
-    total. The two whose *definition* shifts at the h=24/25 boundary --
-    `sclim{N}` averages 14 days below it and 13 above, `other_{slug}_lag` steps
-    from a 1 d to a 2 d offset -- keep one name each, which is why
-    `OTHER_LAG_DAYS_COLUMN` exists.
-    """
+    """Everything `tgt{h}h_*` collapses to, in melt order. Two names shift
+    meaning at the h=24/25 boundary, which is why `OTHER_LAG_DAYS_COLUMN`
+    exists."""
     return (
         *long_target_calendar_columns(),
         *long_daily_lag_columns(),
@@ -396,14 +240,9 @@ def long_columns() -> tuple[str, ...]:
 
 
 def _long_renames(horizon: int) -> dict[str, str]:
-    """Wide column -> long column, for one horizon.
-
-    A POSITIVE selection, exactly as `train.features_for` has always been: a
-    daily lag that reaches past the origin is simply absent from this mapping,
-    so it lands in the melted frame as NaN. Nothing has to remember to mask it.
-    `test_features` asserts the resulting NaNs directly, because a test written
-    against the feature list would pass vacuously on a long table.
-    """
+    """Wide column -> long column, for one horizon. A POSITIVE selection: a lag
+    that reaches past the origin is simply absent, so it lands as NaN with
+    nothing to remember to mask."""
     out = {f"y_{horizon}h": TARGET_COLUMN}
     for name in ALL_CALENDAR_COLUMNS:
         out[f"tgt{horizon}h_{name}"] = f"tgt_{name}"
@@ -430,16 +269,9 @@ def origin_columns(table: pd.DataFrame) -> list[str]:
 
 def long_frame(table: pd.DataFrame, horizons=None,
                subjects: tuple[str, ...] | None = None) -> pd.DataFrame:
-    """Melt the wide table to one row per (subject, slot, horizon).
-
-    Chunked per horizon and concatenated once, so peak memory is the result
-    rather than the result plus a 48-way intermediate.
-
-    `subjects` filters before melting rather than after, so a caller that wants
-    one subject does not pay to melt the other two. Both families train over
-    every subject, the house included, so the add-on itself passes nothing --
-    the parameter is for the explorer and the tests.
-    """
+    """Melt the wide table to one row per (subject, slot, horizon). `subjects`
+    filters before melting; the add-on passes nothing, it is for the explorer
+    and the tests."""
     horizons = config.HORIZONS_H if horizons is None else horizons
     if subjects is not None:
         table = table[table["subject"].isin(subjects)]
@@ -461,9 +293,7 @@ def long_frame(table: pd.DataFrame, horizons=None,
     return out.sort_values(["subject", "time", HORIZON_COLUMN]).reset_index(drop=True)
 
 
-# Every family a built column can belong to, in the order the panel lists them:
-# what the model is aiming at, then what it knows now, then what it knows about
-# the slot it is aiming at.
+# Every family a built column can belong to, in the order the panel lists them.
 FAMILIES: tuple[str, ...] = (
     "key", "state", "target", "proximity", "calendar", "zone",
     "cross_subject", "horizon_target", "target_calendar", "daily_lag",
@@ -475,24 +305,15 @@ FAMILIES: tuple[str, ...] = (
 def column_family(name: str) -> str:
     """Which family a feature column belongs to.
 
-    Here rather than in the panel's server because THIS module mints the names:
-    `_add_horizon_columns` builds `tgt{h}h_lag{k}d`, `_add_cross_subject` builds
-    `other_{slug}`, `_add_zones` builds `zone_{slug}`. A classifier living
-    anywhere else goes stale the moment a family is added, and goes stale
-    silently -- a thousand columns is far past the point where anyone would notice a
-    handful quietly reclassified as "unknown". `test_features` asserts that
-    every column of a real `build()` lands somewhere, which is the guard.
-
-    A thousand columns is also why this exists at all: the table cannot be browsed as a
-    table, so the panel summarises it by family instead.
+    Here because this module mints the names; a classifier anywhere else goes
+    stale silently, and `test_features` asserts every built column lands
+    somewhere.
     """
     if name in ("time", "subject"):
         return "key"
     if name == "home_frac":
         return "target"
-    # Separate from `home_frac`, because they are 48 columns rather than one and
-    # they are answers rather than inputs -- the panel offers the origin target
-    # as something to chart and summarises these by count.
+    # Separate from `home_frac`: 48 answer columns rather than one input.
     if name.startswith("y_"):
         return "horizon_target"
     if name in STATE_COLUMNS:
@@ -508,18 +329,14 @@ def column_family(name: str) -> str:
     if name.startswith("other_"):
         return "cross_subject"
     if name.startswith("tgt"):
-        # tgt{h}h_<rest>. The suffix decides, and the shapes are disjoint.
-        # `other_` is tested before `lag`, because a cross-subject lag ends in
-        # one: tgt48h_other_alice_lag2d would otherwise never be reached.
+        # `other_` before `lag`: a cross-subject lag ends in one.
         rest = name.split("_", 1)[1] if "_" in name else ""
         if rest.startswith("other_"):
             return "cross_subject_lag"
         if rest.startswith("lag"):
             return "daily_lag"
-        # BEFORE the plain `wclim` test, and for the same reason `other_` is
-        # tested before `lag`: tgt36h_wclim4_slope_back starts with `wclim`, so
-        # the level branch would swallow it and the two could never be priced
-        # apart -- which is the whole reason families exist.
+        # Slope before level, or `wclim4_slope_back` is swallowed by the level
+        # branch and the two can never be priced apart.
         if rest.startswith("wclim") and "_slope_" in rest:
             return "climatology_slope"
         if rest.startswith("wclim"):
@@ -564,16 +381,10 @@ FAMILY_WORDS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def grid(start: pd.Timestamp, stop: pd.Timestamp) -> pd.DatetimeIndex:
-    """Left edges of every whole slot in [start, stop].
-
-    A slot's window runs FORWARD from its left edge: slot `t` is `[t, t+30min)`,
-    which `slot_fraction` and `test_half_a_slot_away_is_a_half` both depend on.
-    So the newest row here is the IN-PROGRESS slot, labelled by an `observed_at`
-    up to 30 minutes old but carrying the present state carried forward through
-    the rest of its window. It reads as stale and is not; do not "fix" it by
-    phase-shifting the grid, which only makes the newest row a longer trailing
-    average and strictly less responsive. See `nowcast.py`.
-    """
+    """Left edges of every whole slot in [start, stop]: slot `t` is
+    `[t, t+30min)`. The newest row is therefore the IN-PROGRESS slot -- it reads
+    as stale and is not, and phase-shifting the grid only makes it less
+    responsive. See `nowcast.py`."""
     freq = f"{config.GRID_MINUTES}min"
     return pd.date_range(start.ceil(freq), stop.floor(freq), freq=freq,
                          tz="UTC", name="time")
@@ -581,27 +392,10 @@ def grid(start: pd.Timestamp, stop: pd.Timestamp) -> pd.DatetimeIndex:
 
 def slot_fraction(events: list[tuple[str, str]], slots: pd.DatetimeIndex,
                   match: str, minutes: int | None = None) -> pd.DataFrame:
-    """Time-weighted fraction of each slot whose state equals `match`.
-
-    A slot runs FORWARD from its left edge: slot `t` covers `[t, t+minutes)`.
-    `test_half_a_slot_away_is_a_half` pins that down, and it is the reason the
-    newest row of a `build` is the in-progress slot rather than a finished one.
-
-    Returns a frame indexed by `slots` with `frac` and `coverage`, where
-    coverage is the fraction of the slot actually spanned by observations.
-    A slot with no observation at all gets coverage 0 and frac NaN -- an
-    unobserved slot is not an empty house.
-
-    The step function is integrated exactly: slot boundaries are inserted into
-    the event timeline before integrating, so no segment straddles two slots and
-    a state change mid-slot is split between them in proportion to its duration.
-
-    `minutes` defaults to the modelling grid. It is a parameter only so that
-    `nowcast` can reuse this exact integration over a shorter window -- the
-    arithmetic here is subtle enough that a second copy of it would be a
-    liability, and two definitions of "fraction of a window spent at home"
-    would be worse still.
-    """
+    """Time-weighted fraction of each slot whose state equals `match`, with
+    `coverage`. An unobserved slot gets coverage 0 and frac NaN -- it is not an
+    empty house. `minutes` is a parameter only so `nowcast` can reuse this
+    integration."""
     minutes = config.GRID_MINUTES if minutes is None else minutes
     slot_seconds = minutes * 60
     n = len(slots)
@@ -611,7 +405,11 @@ def slot_fraction(events: list[tuple[str, str]], slots: pd.DatetimeIndex,
         return empty
 
     times = pd.to_datetime([t for t, _ in events], utc=True, format="ISO8601")
-    values = np.array([1.0 if str(v).strip() == match else 0.0 for _, v in events])
+    # NaN, not 0.0, for "no reading": the segment leaves both numerator and
+    # denominator, so a silent tracker costs coverage instead of reading as away.
+    values = np.array([np.nan if config.is_empty(v)
+                       else 1.0 if str(v).strip() == match else 0.0
+                       for _, v in events])
     order = np.argsort(times.asi8, kind="stable")
     times, values = times[order], values[order]
 
@@ -644,24 +442,13 @@ def slot_fraction(events: list[tuple[str, str]], slots: pd.DatetimeIndex,
 
 def observability(event_times: pd.DatetimeIndex, slots: pd.DatetimeIndex,
                   max_silence_h: float = None) -> np.ndarray:
-    """Which slots were actually observed, as opposed to merely carried forward.
+    """Which slots were observed rather than carried forward: a slot inside a
+    silence longer than `max_silence_h` is unobservable.
 
-    A slot is unobservable if it sits inside a silence longer than
-    `max_silence_h`. Returns a boolean array aligned to `slots`.
-
-    This exists because the step function in `slot_fraction` holds the last
-    known state forward for as long as it has to, and "as long as it has to"
-    turned out to be 653 hours: HA recorded nothing between 2026-06-26 and
-    2026-07-23, and the first build of this table duly reported three straight
-    weeks of `home_frac == 1.00` for all three subjects. See config.MAX_SILENCE_H
-    for why 12 hours separates that from the nightly phone doze.
-
-    The mask is computed once from the union of the *person* trackers and
-    applied to every subject, including the house. group.home_people is
-    event-driven -- it only writes on a change, so its own median gap is 67
-    minutes and its p95 is 23 hours -- so judging it by its own silence would
-    blank almost all of it. When the trackers were down, nobody's occupancy is
-    known, and that includes the house's.
+    A recorder outage once produced three weeks of `home_frac == 1.00`. The
+    mask comes from the union of the person trackers and is applied to every
+    subject including the house, whose group is event-driven and would blank
+    itself.
     """
     if max_silence_h is None:
         max_silence_h = config.MAX_SILENCE_H
@@ -672,9 +459,8 @@ def observability(event_times: pd.DatetimeIndex, slots: pd.DatetimeIndex,
     times = event_times.sort_values()
     limit = np.int64(max_silence_h * 3600 * 1e9)
 
-    # For each slot, the surrounding pair of observations. A slot is observable
-    # when that pair is no further apart than the limit, and when the slot is
-    # inside the observed span at all.
+    # A slot is observable when its surrounding pair of observations is no
+    # further apart than the limit, and it lies inside the observed span at all.
     after = np.searchsorted(times.asi8, slots.asi8, side="right")
     inside = (after > 0) & (after < len(times))
     idx = np.clip(after, 1, len(times) - 1)
@@ -684,13 +470,9 @@ def observability(event_times: pd.DatetimeIndex, slots: pd.DatetimeIndex,
 
 def numeric_on_grid(pairs: list[tuple[str, float]], slots: pd.DatetimeIndex,
                     stale_after_min: float | None) -> np.ndarray:
-    """Last numeric reading at or before each slot.
-
-    `stale_after_min=None` carries the last value forward indefinitely, which is
-    right for a sensor whose silence is meaningful -- see config.DISTANCE_STALE_MIN
-    for the measurements behind that. Pass a number for anything that drifts
-    while you are not looking.
-    """
+    """Last numeric reading at or before each slot. `stale_after_min=None`
+    carries forward indefinitely -- right where silence is meaningful (see
+    `config.DISTANCE_STALE_MIN`), wrong for anything that drifts."""
     out = np.full(len(slots), np.nan)
     if not pairs or len(slots) == 0:
         return out
@@ -713,11 +495,8 @@ def numeric_on_grid(pairs: list[tuple[str, float]], slots: pd.DatetimeIndex,
 
 def minutes_in_state(events: list[tuple[str, str]], slots: pd.DatetimeIndex) -> np.ndarray:
     """Minutes since the last state *change*, at each slot's left edge.
-
-    Occupancy is strongly duration-dependent -- "home for eight hours" and "home
-    for four minutes" predict very different next hours -- and a boosted tree
-    cannot derive this from the state alone.
-    """
+    Occupancy is duration-dependent and a tree cannot derive this from the
+    state alone."""
     n = len(slots)
     if n == 0 or not events:
         return np.full(n, np.nan)
@@ -761,9 +540,8 @@ def _subject_frame(source, subject: config.Subject, start: str, stop: str | None
     frame["coverage"] = occupancy["coverage"].to_numpy()
     frame["minutes_in_state"] = minutes_in_state(events, slots)
 
-    # People only. The house is a group whose state collapses to home/not_home,
-    # so it has no zone of its own; `build` fills its columns with the union
-    # over the people instead.
+    # People only: the house is a group with no zone of its own; `build` fills
+    # its columns from the people.
     if subject.is_person:
         _add_zones(frame, events, slots)
 
@@ -773,9 +551,8 @@ def _subject_frame(source, subject: config.Subject, start: str, stop: str | None
     _add_next_alarm(frame, source, subject, start, stop, slots)
 
     if observable is not None:
-        # Unobserved is not "away", and it is not "home" either.
-        # The house's zone columns do not exist yet -- `build` fills them from
-        # the people, who have already been blanked here.
+        # Unobserved is neither away nor home. The house's zone columns do not
+        # exist yet -- `build` fills them from the people, already blanked here.
         blank = [c for c in ("home_frac", "minutes_in_state",
                              *zone_columns(), *PROXIMITY_COLUMNS)
                  if c in frame.columns]
@@ -788,10 +565,9 @@ def presence_events(source, subject: config.Subject, start: str,
                     stop: str | None) -> list[tuple[str, str]]:
     """`home`/away transitions for one subject.
 
-    The house is normally a person group, but a group is not required: with no
-    group configured its presence is the OR over the people, merged from their
-    individual traces. That keeps `group` from being a hard dependency for
-    something Home Assistant can already tell us.
+    With no group configured the house is the OR over the people; a person
+    enters that merge at their first observation, so somebody added today does
+    not make the house unknown retroactively.
     """
     if subject.is_person or subject.entity_id:
         return source.seeded_states(subject.entity_id, start, stop, seed_days=14)
@@ -805,8 +581,16 @@ def presence_events(source, subject: config.Subject, start: str,
         key=lambda item: item[0])
     for when, index, value in stamped:
         latest[index] = value
+        # Asymmetric on purpose: one person known home makes the house home
+        # despite unknowns; nobody known home plus an unknown is unknown, not empty.
         anyone = any(v == config.HOME_STATE for v in latest.values())
-        state = config.HOME_STATE if anyone else "not_home"
+        all_known = all(not config.is_empty(v) for v in latest.values())
+        state = config.HOME_STATE if anyone else (
+            "not_home" if all_known else "unknown")
+        # Several people can write at one instant; only the last state held for
+        # any time.
+        if merged and merged[-1][0] == when:
+            merged.pop()
         if not merged or merged[-1][1] != state:
             merged.append((when, state))
     return merged
@@ -815,22 +599,12 @@ def presence_events(source, subject: config.Subject, start: str,
 def _add_next_alarm(frame: pd.DataFrame, source, subject: config.Subject,
                     start: str, stop: str | None,
                     slots: pd.DatetimeIndex) -> None:
-    """Hours from each slot to that person's next phone alarm, or NaN.
+    """Hours from each slot to that person's next phone alarm, or NaN -- the
+    only signal here that knows about tomorrow.
 
-    **The only signal here that knows about TOMORROW.** Everything else is a
-    lagging measurement of what this household usually does -- a weekday median,
-    a trailing rate, a partner's habits. An alarm is a statement of intent made
-    the evening before, and it moves on exactly the nights the routine moves.
-
-    The companion app writes an ISO timestamp while an alarm is set and the
-    literal `absent` when none is, so `absent` must CLEAR the value rather than
-    be skipped. That is why this reads `seeded_states` and parses each event
-    itself instead of going through `source.numeric`, which drops every
-    non-float row and would carry a cancelled alarm forward forever.
-
-    Self-limiting against a phone that stops reporting: the carried value is an
-    absolute timestamp, so once it is in the past it stops producing a positive
-    number and the column goes NaN on its own.
+    The app writes the literal `absent` when none is set, so this parses
+    `seeded_states` itself: `source.numeric` drops that row and would carry a
+    cancelled alarm forward forever.
     """
     if not subject.next_alarm_entity:
         frame["next_alarm_h"] = np.nan
@@ -853,9 +627,7 @@ def _add_next_alarm(frame: pd.DataFrame, source, subject: config.Subject,
         frame["next_alarm_h"] = np.nan
         return
 
-    # The state in force at each slot's left edge: the last event at or before
-    # it. `searchsorted` rather than a merge, because the slots are already
-    # sorted and this is one pass.
+    # The state in force at each slot's left edge.
     index = np.searchsorted(pd.DatetimeIndex(stamps), slots, side="right") - 1
     hours = np.full(len(slots), np.nan)
     for i, at in enumerate(index):
@@ -873,13 +645,9 @@ def _add_next_alarm(frame: pd.DataFrame, source, subject: config.Subject,
 
 def _add_proximity(frame: pd.DataFrame, source, subject: config.Subject,
                    start: str, stop: str | None, slots: pd.DatetimeIndex) -> None:
-    """Distance to home and direction of travel, on the grid.
-
-    Three cases, all of which have to work: a real Proximity sensor, a distance
-    synthesised by the collector from GPS, and nothing at all. The third is not
-    an error -- the columns go NaN, HistGradientBoosting ignores them, and the
-    ship gate prices what is left.
-    """
+    """Distance to home and direction of travel, on the grid. Three cases: a
+    real Proximity sensor, a synthesised distance, or nothing at all -- the
+    third is not an error, the columns go NaN."""
     from .discover import synthetic_distance_entity
 
     distance_entity = subject.distance_entity
@@ -913,9 +681,8 @@ def _add_proximity(frame: pd.DataFrame, source, subject: config.Subject,
         frame["dir_away"] = (delta > 0.05).astype(float).where(delta.notna())
 
 
-# The value a resolved event takes when the person is away but in none of the
-# enabled zones. A real string rather than NaN so `slot_fraction` can integrate
-# it exactly like any other state, which is what makes the columns sum to one.
+# Away but in no enabled zone. A real string rather than NaN, so
+# `slot_fraction` integrates it like any state and the columns sum to one.
 ZONE_OTHER = "__other__"
 
 
@@ -923,24 +690,11 @@ def _resolve_zone_events(events: list[tuple[str, str]],
                          name_map: dict[str, str]) -> list[tuple[str, str]]:
     """Person state strings -> zone entity ids.
 
-    **The one place in this package that reads a zone's friendly name**, and it
-    is worth saying why it reads one at all. Home Assistant writes the zone's
-    NAME into the person's state, and the store keeps `(entity_id, ts, value)`
-    with no attributes -- so `zone.*`'s `persons` list and `person.*`'s
-    `in_zones` list, both of which are entity-id keyed and rename-proof, exist
-    only in the present and cannot be reconstructed over history. A name is the
-    only per-person zone signal history actually contains.
-
-    What broke before was not the join, it was a hardcoded `OFFICE_STATES =
-    {"work"}` that matched nothing and said nothing about it for five months.
-    So: `name_map` is built from the LIVE zone entities (config.zone_name_map,
-    refreshed every boot), never from a literal, and everything it fails to
-    translate is counted by `unmatched_away_states` rather than being folded
-    silently into "away". A rename now shows up as a number on the status page.
-
-    A zone the user has NOT enabled resolves to ZONE_OTHER, which is the whole
-    point of the enable list: an untick means "lump this in with everywhere
-    else", not "pretend they were home".
+    The one place that reads a zone's friendly name, because a name is the only
+    per-person zone signal the archive contains -- entity-id-keyed attributes
+    exist only in the present. `name_map` comes from the live zones, never a
+    literal, and anything unresolved is counted by `unmatched_away_states`
+    rather than folded into "away".
     """
     resolved: list[tuple[str, str]] = []
     for when, value in events:
@@ -954,13 +708,8 @@ def _resolve_zone_events(events: list[tuple[str, str]],
 
 def _add_zones(frame: pd.DataFrame, events: list[tuple[str, str]],
                slots: pd.DatetimeIndex) -> None:
-    """One column per enabled zone, plus `zone_other`, for one person.
-
-    Reuses the events `_subject_frame` already fetched and the same
-    `slot_fraction` integration as `home_frac`, so within a fully covered slot
-    `home_frac + sum(zone_*) + zone_other == 1` by construction. test_features
-    pins that.
-    """
+    """One column per enabled zone plus `zone_other`, over the same integration
+    as `home_frac`, so a covered slot sums to one. `test_features` pins that."""
     resolved = _resolve_zone_events(events, config.zone_name_map())
     for zone in config.ZONES:
         frame[f"zone_{zone.slug}"] = slot_fraction(
@@ -970,14 +719,8 @@ def _add_zones(frame: pd.DataFrame, events: list[tuple[str, str]],
 
 
 def unmatched_away_states(source, start: str, stop: str | None) -> dict[str, int]:
-    """Away-states that match no enabled zone, and how many times each occurs.
-
-    The guard the old friendly-name match never had. A renamed zone turns its
-    whole history into rows this returns, and `server._feature_groups` puts the
-    count where the user will see it. `not_home` is excluded: it is Home
-    Assistant's own word for "away, in no zone at all", not a name that failed
-    to resolve.
-    """
+    """Away-states matching no enabled zone, with counts -- a renamed zone shows
+    up here. `not_home` is excluded: it is HA's own word for "in no zone"."""
     known = set(config.zone_name_map())
     counts: dict[str, int] = {}
     for person in config.PEOPLE:
@@ -994,12 +737,8 @@ def unmatched_away_states(source, start: str, stop: str | None) -> dict[str, int
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# The calendar, in one place
-#
-# Slot-of-day, the weekend flag and the holiday flag were each spelled out in
-# several modules -- the slot arithmetic in six -- and `_holiday_flags` existed
-# twice with different exception handling. Everything that labels a day or a
-# slot reads these now, so a change to the grid or the calendar is one edit.
+# The calendar, in one place: everything that labels a day or a slot reads
+# these, so a change to the grid or the calendar is one edit.
 # ---------------------------------------------------------------------------
 
 def slots_per_hour() -> int:
@@ -1007,12 +746,9 @@ def slots_per_hour() -> int:
 
 
 def slot_of_day(local: pd.Series) -> pd.Series:
-    """0 .. SLOTS_PER_DAY-1 for a tz-aware LOCAL datetime series.
-
-    Local, not UTC: a slot is a wall-clock position, and the two differ by an
-    hour for half the year. On the autumn transition day two UTC slots map to
-    one local slot; the callers decide what that means for them.
-    """
+    """0 .. SLOTS_PER_DAY-1 for a tz-aware LOCAL datetime series: a slot is a
+    wall-clock position, and on the autumn transition two UTC slots map to one
+    local slot."""
     return local.dt.hour * slots_per_hour() + local.dt.minute // config.GRID_MINUTES
 
 
@@ -1022,15 +758,9 @@ def is_weekend(dow) -> np.ndarray:
 
 
 def holiday_flags(dates) -> np.ndarray:
-    """Public holidays as 1.0/0.0, or all-zeros when the calendar is unknown.
-
-    Takes a tz-aware Series or a DatetimeIndex; the LOCAL date is what is
-    looked up. `country_holidays` raises for a country the library does not
-    cover, and Home Assistant's `country` can be unset entirely. Neither is a
-    reason to abort a six-month feature build -- a flat column is simply a
-    feature that carries nothing, which the model already handles -- so every
-    failure degrades to zeros, once with a debug line.
-    """
+    """Public holidays as 1.0/0.0, or zeros when the calendar is unknown. An
+    unsupported or unset country must not abort a six-month build, so every
+    failure degrades to a flat column with one debug line."""
     index = pd.DatetimeIndex(dates)
     zeros = np.zeros(len(index))
     if not config.HOLIDAY_COUNTRY or len(index) == 0:
@@ -1046,13 +776,8 @@ def holiday_flags(dates) -> np.ndarray:
 
 
 def _cyclical(local: pd.Series, prefix: str = "") -> pd.DataFrame:
-    """Sine/cosine encodings of time-of-day, weekday and month.
-
-    Trees can split a raw hour just fine, but they cannot see that 23:30 and
-    00:00 are adjacent, so every model has to relearn the wrap from data it does
-    not have much of. The abandoned first attempt at this problem used the same
-    encoding; it was the one good idea in it.
-    """
+    """Sine/cosine encodings of time-of-day, weekday and month: trees can split
+    a raw hour but cannot see that 23:30 and 00:00 are adjacent."""
     slot = slot_of_day(local)
     dow = local.dt.dayofweek
     month = local.dt.month
@@ -1066,8 +791,7 @@ def _cyclical(local: pd.Series, prefix: str = "") -> pd.DataFrame:
     out[f"{prefix}month_cos"] = np.cos(2 * np.pi * (month - 1) / 12)
     out[f"{prefix}is_weekend"] = is_weekend(dow)
     out[f"{prefix}is_holiday"] = holiday_flags(local)
-    # The same clock as an integer, for the edge the circle cannot cut cheaply.
-    # See INTEGER_CALENDAR_COLUMNS. Always built; served only when named in
+    # The same clock as an integer, always built and served only via
     # SHIPPED_EXTRAS.
     out[f"{prefix}slot"] = slot.astype(float)
     out[f"{prefix}dow"] = dow.astype(float)
@@ -1075,16 +799,11 @@ def _cyclical(local: pd.Series, prefix: str = "") -> pd.DataFrame:
 
 
 def _liveness(source, start: str, stop: str | None) -> pd.DatetimeIndex:
-    """Every moment we can show that history was being recorded.
+    """Every moment history can be shown to have been recorded: the collector's
+    heartbeats plus every tracked entity's state changes.
 
-    The union of the collector's heartbeats (exact, but only since the add-on
-    was installed) and every tracked entity's state changes (a proxy, and the
-    only thing available for the backfilled prefix).
-
-    Using ALL tracked entities rather than just the people matters on a
-    change-only source: MEASURED, the two person entities alone have a p95 gap
-    of 9.2 h, while the union of the nine tracked entities has a p95 of 0.1 h.
-    A mask built on the former calls a quiet night an outage.
+    All tracked entities, not just the people -- on a change-only source the
+    people alone go quiet for hours and a quiet night reads as an outage.
     """
     times = pd.DatetimeIndex([], tz="UTC")
 
@@ -1096,8 +815,7 @@ def _liveness(source, start: str, stop: str | None) -> pd.DatetimeIndex:
     tracked = [s.entity_id for s in config.SUBJECTS]
     tracked += [s.distance_entity for s in config.SUBJECTS]
     tracked += [s.direction_entity for s in config.SUBJECTS]
-    # Still collected, and still counted as evidence the recorder was alive,
-    # even though no feature reads a zone's own count any more.
+    # Still evidence the recorder was alive, though no feature reads them.
     tracked += [z.entity_id for z in config.ZONES]
     for entity in tracked:
         if not entity:
@@ -1110,11 +828,8 @@ def _liveness(source, start: str, stop: str | None) -> pd.DatetimeIndex:
 
 
 def _localise(times: pd.Series) -> pd.Series:
-    """Local time, with a message worth reading when the zone is wrong.
-
-    `tz_convert` on an unknown zone raises deep inside pandas, which is a poor
-    way to learn that Home Assistant reported something unexpected.
-    """
+    """Local time, with a readable error: `tz_convert` on an unknown zone
+    raises deep inside pandas."""
     try:
         return times.dt.tz_convert(config.TIMEZONE)
     except Exception as err:
@@ -1124,50 +839,27 @@ def _localise(times: pd.Series) -> pd.Series:
 
 
 def _at_offset(table: pd.DataFrame, keyed: pd.Series, delta: pd.Timedelta) -> np.ndarray:
-    """`home_frac` for the same subject, `delta` away from each row's time.
-
-    An explicit join on a shifted timestamp, never `.shift()`. The grid has
-    holes wherever a slot fell below the coverage threshold, and a positional
-    shift would then quietly pair rows that are hours apart while labelling them
-    as one slot.
-    """
+    """`home_frac` for the same subject `delta` away. An explicit join on a
+    shifted timestamp, never `.shift()`: the grid has holes and a positional
+    shift pairs rows hours apart."""
     index = pd.MultiIndex.from_arrays([table["subject"], table["time"] + delta])
     return keyed.reindex(index).to_numpy()
 
 
 def _at_time_offset(table: pd.DataFrame, keyed: pd.Series,
                     delta: pd.Timedelta) -> np.ndarray:
-    """The subject-blind twin of `_at_offset`, for household-wide series.
-
-    The work zones and the other subjects' traces describe somebody other than
-    the row being built, so they are keyed on time alone. Same explicit join for
-    the same reason -- the grid has holes.
-    """
+    """The subject-blind twin of `_at_offset`, for household-wide series keyed
+    on time alone. Same explicit join, same reason."""
     return keyed.reindex(table["time"] + delta).to_numpy()
 
 
 def deepest_lookback_days() -> int:
-    """How far back a build has to reach before every feature is real.
-
-    `predict.LOOKBACK_DAYS` is derived from this rather than hand-set, so that
-    widening any window here cannot silently start serving a NaN column. Every
-    term is a whole-day reach measured backwards from the TARGET slot; the
-    horizon itself is added on top by the caller.
-    """
-    # Tracks what is SERVED, not what is built.
-    #
-    # Both halves matter. A served candidate whose build did not reach far
-    # enough would average fewer weeks in production than in training --
-    # silently, since a short reach fills it with NaN rather than failing --
-    # which is the hazard `predict.LOOKBACK_DAYS` derives from this function to
-    # avoid. But an UNSERVED candidate has no such hazard, because nothing reads
-    # it, and charging the serving path for it is a real cost: every cycle is a
-    # full lookback rebuild, every five minutes. Building `wclim8` unconditionally
-    # while nothing served it took LOOKBACK_DAYS from 32 to 60 days for nothing.
-    #
-    # The training build is unaffected either way: `server.do_train` calls
-    # `features.build(source)` with no start, so the parquet always spans the
-    # whole archive and a candidate stays measurable while it is unserved.
+    """How far back a build must reach before every feature is real.
+    `predict.LOOKBACK_DAYS` derives from this so widening a window cannot
+    silently start serving NaN."""
+    # Tracks what is SERVED, not what is built: an unserved candidate has no
+    # NaN hazard, and charging every five-minute rebuild for its lookback is a
+    # real cost. The training build always spans the whole archive.
     weeks = (WIDE_CLIMATOLOGY_WEEKS if "wclim_wide" in SHIPPED_EXTRAS
              else CLIMATOLOGY_WEEKS)
     return max(7 * weeks, SLOT_CLIMATOLOGY_DAYS, max(DAILY_LAGS))
@@ -1199,38 +891,24 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
             column = f"tgt{horizon}h_lag{days}d"
             new[column] = _at_offset(table, keyed, ahead - pd.Timedelta(days=days))
 
-        # Same-weekday climatology of the target slot, from the trailing weeks.
-        #
-        # Every width is a PREFIX of one offset list, so `wclim4` is bit for bit
-        # what it was before the wide one existed and the extra cost is the
-        # extra joins alone.
-        #
-        # No horizon gate is needed here and it is worth saying why, since the
-        # daily lags next door need one: the nearest weekly input is
-        # `t + h - 168 h`, which for h <= 48 is at least 120 h before the
-        # origin. A weekly offset cannot reach the future.
+        # Same-weekday climatology of the target slot. Widths are prefixes of
+        # one offset list, so `wclim4` is unchanged. No horizon gate is needed:
+        # the nearest weekly input is at least 120 h before the origin.
         weeks = []
         for week in range(1, max(CLIMATOLOGY_WIDTHS) + 1):
             weeks.append(_at_offset(table, keyed, ahead - pd.Timedelta(days=7 * week)))
         with warnings.catch_warnings():
-            # An all-NaN row is the honest answer for the first weeks of
-            # history -- there is no same-weekday climatology yet. NaN is what
-            # the model should see; the warning is noise.
+            # An all-NaN row is the honest answer for the first weeks; the
+            # RuntimeWarning is noise.
             warnings.simplefilter("ignore", RuntimeWarning)
             for width in CLIMATOLOGY_WIDTHS:
                 column = (climatology_column(horizon) if width == CLIMATOLOGY_WEEKS
                           else wide_climatology_column(horizon))
                 new[column] = np.nanmean(np.vstack(weeks[:width]), axis=0)
 
-            # The slopes either side, from the SAME climatology an hour earlier
-            # and an hour later.
-            #
-            # Computed from their own offsets rather than by shifting to the
-            # row at `t + 1 h`. That version is legal in training and always
-            # NaN in production -- `predict.current_rows` serves the newest row
-            # per subject, so no later row exists -- which is the quietest kind
-            # of train/serve skew there is: populated in every training row and
-            # absent in every served one.
+            # The slopes either side, computed from their own offsets, not by
+            # shifting to `t + 1 h`: that version is legal in training and
+            # always NaN in production, since serving uses the newest row.
             width = TRANSITION_SOURCE_WEEKS
             neighbours = {}
             for step in (-1, 1):
@@ -1243,12 +921,8 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
             new[back] = here - neighbours[-1]
             new[forward] = neighbours[1] - here
 
-        # The same slot on every recent day, weekdays POOLED. Fourteen samples
-        # against the weekday climatology's four: blunter, and much quieter.
-        # baseline.py measured that ~24 samples per (weekday, slot) cell is not
-        # enough to estimate a probability, and the weekday version has far
-        # fewer -- so give the tree both widths and let it choose per split
-        # rather than picking one for all 48 horizons.
+        # The same slot on every recent day, weekdays POOLED -- blunter and
+        # much quieter than four weekday samples; the tree gets both.
         daily = [_at_offset(table, keyed, ahead - pd.Timedelta(days=k))
                  for k in slot_climatology_days(horizon)]
         with warnings.catch_warnings():
@@ -1257,14 +931,9 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
                 np.nanmean(np.vstack(daily), axis=0) if daily
                 else np.full(len(table), np.nan))
 
-        # Everyone else's state IN THE TARGET SLOT, on the nearest legal day.
-        #
-        # `_add_cross_subject` is right that reading the partner at the target
-        # slot would be reading the answer -- but the partner at the target slot
-        # `k` days ago is not the answer, it is the same construction
-        # `tgt{h}h_lag{k}d` already uses for the row's own subject, gated the
-        # same way. In a household this is exactly the information the long
-        # horizons are missing.
+        # Everyone else's state IN THE TARGET SLOT, `k` days ago: not the
+        # answer, the same construction as the row's own `lag{k}d`, gated the
+        # same way.
         lags = safe_daily_lags(horizon)
         if lags:
             back = ahead - pd.Timedelta(days=min(lags))
@@ -1273,8 +942,7 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
                 values = (_at_time_offset(table, wide[slug], back)
                           if slug in wide.columns else np.full(len(table), np.nan))
                 # A subject never mirrors itself: that column is already
-                # tgt{h}h_lag{k}d, and two names for one number is how a tree
-                # gets talked into splitting on it twice.
+                # tgt{h}h_lag{k}d.
                 new[cross_subject_lag_column(horizon, slug, min(lags))] = np.where(
                     is_self == slug, np.nan, values)
 
@@ -1282,12 +950,8 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_cross_subject(table: pd.DataFrame) -> pd.DataFrame:
-    """The other people's state at the ORIGIN time.
-
-    Origin, never target: at prediction time we know where everyone is now, and
-    nothing about where they will be. Reading the partner's state at the target
-    slot would be reading the answer.
-    """
+    """The other people's state at the ORIGIN, never the target: reading the
+    partner at the target slot would be reading the answer."""
     wide = table.pivot_table(index="time", columns="subject", values="home_frac",
                              aggfunc="first")
     for slug in config.all_slugs():
@@ -1308,21 +972,15 @@ def _add_cross_subject(table: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def history_start(source) -> str:
-    """The earliest moment worth asking for.
-
-    There is no fixed date any more -- the original hardcoded the day one
-    particular InfluxDB got its first write. A store knows its own span; an
-    Influx does not, so it gets a generous floor and returns what it has.
-    """
+    """The earliest moment worth asking for. A store knows its own span; an
+    Influx does not, so it gets a floor and returns what it has."""
     span = getattr(getattr(source, "store", None), "span", None)
     if span:
         first = span().get("first")
         if first:
             return first
 
-    # An Influx does not carry its own span, so ask it for the earliest point
-    # rather than guessing. See InfluxSource.first_seen for why guessing high is
-    # expensive rather than merely untidy.
+    # An Influx carries no span, so ask for the earliest point rather than guess.
     first_seen = getattr(source, "first_seen", None)
     if first_seen:
         earliest = first_seen([s.entity_id for s in config.SUBJECTS if s.entity_id])
@@ -1333,12 +991,29 @@ def history_start(source) -> str:
         "%Y-%m-%dT%H:%M:%SZ")
 
 
-def build(source, start: str | None = None, stop: str | None = None) -> pd.DataFrame:
-    """Build the modelling table.
+def usable_history_days(source, stop: str | None = None) -> float:
+    """Days of history a model could actually be fitted on -- counted the way
+    training counts it, so missing data cannot make the add-on look ready
+    early. EXPENSIVE: call it from the worker, never a request handler."""
+    if not config.PEOPLE:
+        return 0.0
+    start = history_start(source)
+    end = (pd.Timestamp(stop) if stop else pd.Timestamp.now(tz="UTC")).floor(
+        f"{config.GRID_MINUTES}min")
+    slots = grid(pd.Timestamp(start), end)
+    if not len(slots):
+        return 0.0
 
-    Full rebuild every time: the whole history is a handful of range reads and
-    an incremental version would be a correctness risk for no measurable saving.
-    """
+    valid = observability(_liveness(source, start, end.isoformat()), slots)
+    for person in config.PEOPLE:
+        events = presence_events(source, person, start, end.isoformat())
+        valid &= slot_fraction(events, slots, config.HOME_STATE)["frac"].notna().to_numpy()
+    return float(np.count_nonzero(valid)) / config.SLOTS_PER_DAY
+
+
+def build(source, start: str | None = None, stop: str | None = None) -> pd.DataFrame:
+    """Build the modelling table. Full rebuild every time: an incremental
+    version would be a correctness risk for no measurable saving."""
     config.require()
     start = start or history_start(source)
     start_ts = pd.Timestamp(start)
@@ -1347,8 +1022,7 @@ def build(source, start: str | None = None, stop: str | None = None) -> pd.DataF
     if len(slots) == 0:
         raise ValueError(f"empty grid for {start}..{stop_ts.isoformat()}")
 
-    # One observability mask for everyone, from the trackers that report
-    # continuously. See features.observability.
+    # One observability mask for everyone -- see `observability`.
     observable = observability(_liveness(source, start, stop), slots)
 
     frames = {
@@ -1356,11 +1030,8 @@ def build(source, start: str | None = None, stop: str | None = None) -> pd.DataF
         for subject in config.SUBJECTS
     }
 
-    # The house has no zone of its own -- `presence_events` collapses a group to
-    # home/not_home -- so it gets the union over the people: "is ANYONE in this
-    # zone", which is exactly the household reading the old per-person
-    # `office_{slug}` columns carried. fmax rather than max so a person whose
-    # slot is unobserved does not blank the whole household.
+    # The house gets the union over the people -- "is anyone in this zone".
+    # `fmax` so one unobserved person does not blank the household.
     people = [frames[s.slug] for s in config.PEOPLE]
     house = frames[config.HOUSE_SLUG]
     for column in zone_columns():
@@ -1380,10 +1051,8 @@ def build(source, start: str | None = None, stop: str | None = None) -> pd.DataF
     table = _add_cross_subject(table)
     table = _add_horizon_columns(table)
 
-    # Placeholders for the companion-app sensors that nothing computes yet.
-    # `next_alarm_h` is now filled in `_add_next_alarm` and only lands here on
-    # a subject that has no alarm entity; the rest are still declared-and-empty.
-    # See BUILT_NOT_SHIPPED.
+    # Placeholders for the companion-app sensors nothing computes yet;
+    # `next_alarm_h` only lands here for a subject with no alarm entity.
     for column in BUILT_NOT_SHIPPED:
         if column not in table.columns:
             table[column] = np.nan
@@ -1406,7 +1075,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", type=Path, default=config.FEATURES_PATH)
     args = parser.parse_args(argv)
 
-    _, _, source = runtime.bootstrap()
+    _, _, source, _ = runtime.bootstrap()
 
     began = dt.datetime.now()
     table = build(source, args.start, args.stop)

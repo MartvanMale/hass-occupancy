@@ -1,14 +1,7 @@
-"""The arrival ETA, and the condition it is conditional on.
-
-`eta.py` answers "how long until you are home, GIVEN you are on your way". The
-model enforces that in training by discarding anything more than `MAX_LEAD_MIN`
-from an arrival. These tests are about enforcing it at serving time too, which
-is where it was missing.
-
-`alice`, because she is the conftest household's person with a proximity entity.
-An unconfigured name makes `current_row` return None for a reason that has
-nothing to do with the gate -- which is how the first version of these tests
-passed without exercising it at all.
+"""The arrival ETA and the condition it is conditional on. Training discards
+anything more than `MAX_LEAD_MIN` from an arrival; these are about enforcing that
+at SERVING time, which is where it was missing. `alice`, because she is the
+fixture's person with a proximity entity.
 """
 
 import datetime as dt
@@ -36,16 +29,9 @@ def _distance_trace(kilometres):
 
 
 def test_no_eta_is_served_to_somebody_sitting_still_far_from_home():
-    """The bug this exists to stop, with the numbers that produced it.
-
-    Somebody at their desk: 32.6 km out, closing 0.0 km/h, direction neither
-    towards nor away. The model answered **169 minutes** -- the top of its
-    trained range -- for a person who had not moved and would not be home for
-    six hours. It could not answer otherwise: `MAX_LEAD_MIN` discards
-    everything beyond three hours from TRAINING, so the model cannot express a
-    longer wait, and nothing at serving time asked whether the question was in
-    range.
-    """
+    """The bug this exists to stop. `MAX_LEAD_MIN` discards everything beyond
+    three hours from TRAINING, so the model cannot express a longer wait -- and
+    nothing at serving time asked whether the question was in range."""
     assert eta.current_row(_distance_trace([32.61] * 21), "alice") is None, \
         "a stationary person is not on a journey home"
 
@@ -79,9 +65,8 @@ def test_somebody_already_home_still_gets_no_eta():
 
 def test_an_artifact_fitted_on_another_feature_list_is_refused_at_load(tmp_path, caplog):
     """The artifact carries no version; its feature list IS the contract. One
-    fitted on an older `FEATURES` used to load fine and then fail inside
-    scikit-learn on every cycle, swallowed, so the sensor read `unknown`
-    forever with nothing saying why."""
+    fitted on an older `FEATURES` loaded fine and then failed inside
+    scikit-learn on every cycle, swallowed."""
     import pickle
 
     caplog.set_level("WARNING")

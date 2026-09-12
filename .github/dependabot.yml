@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+
+  # Edge only: occupancy-forecast/ is generated, and promote.sh overwrites it.
+  - package-ecosystem: pip
+    directory: "/occupancy-forecast-edge"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      numerical:
+        patterns: ["numpy", "pandas", "pyarrow", "scikit-learn", "joblib"]
+
+  # No npm, deliberately: package-lock.json feeds panel/dist/.source-hash, so
+  # every lock bump would fail check-panel.sh until build-panel.sh is re-run.

@@ -2,20 +2,10 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 
 import { Icon } from './Icon'
 
 /**
- * A dropdown, because the native one could not be made to look like the panel.
- *
- * A browser draws an open `<select>` itself, with the operating system's colours
- * and no CSS reaching inside it: on a dark panel that meant a white list of 159
- * countries with no way to search it. Replacing the control is the only way to
- * style the open state, so this is the ARIA combobox pattern rather than a div
- * that happens to look like one -- it is reachable by keyboard, it announces
- * itself, and Escape closes it.
- *
- * The filter box is opt-in per picker rather than switched on by counting the
- * options. Only the holiday calendar asks for it -- it has 159 countries and is
- * unusable without one -- and the zone and person-group pickers stay plain
- * dropdowns however many entities a household turns out to have. A threshold
- * would mean the ninth zone silently changing a control the user knows.
+ * A dropdown, because no CSS reaches inside an open native `<select>`: on a
+ * dark panel that was a white list of 159 countries with no way to search it.
+ * The ARIA combobox pattern, so it is keyboard-reachable and Escape closes it.
+ * The filter box is opt-in per picker, never switched on by counting options.
  */
 
 export interface Option {
@@ -23,9 +13,8 @@ export interface Option {
   label: string
 }
 
-/** Roughly the popup's height. Below this much room, open upwards instead --
- *  the panel is an iframe, and a popup is clipped by it where a native one
- *  would have escaped to the desktop. */
+/** Roughly the popup's height. Below this much room, open upwards -- an iframe
+ *  clips what the desktop would not. */
 const POPUP_H = 260
 
 export function Select({
@@ -71,15 +60,9 @@ export function Select({
     button.current?.focus()
   }
 
-  // Opening resets the filter and points the cursor at what is already chosen,
-  // so Enter twice is a no-op rather than a silent change to the first option.
-  //
-  // Keyed on `open` ALONE, deliberately. Every caller builds `options` as an
-  // array literal in render, so listing it here re-ran this on every parent
-  // render -- and the parent re-renders on every status poll, so an open
-  // picker had its search box wiped and re-focused every ten seconds while
-  // the user was typing into it. The values read inside are the ones current
-  // at the moment of opening, which is what "opening resets" means.
+  // Keyed on `open` ALONE: every caller builds `options` as an array literal in
+  // render, so listing it wiped and re-focused the search box on every status
+  // poll.
   useEffect(() => {
     if (!open) return
     setQuery('')
@@ -207,10 +190,8 @@ export function Select({
                 onClick={() => choose(option.value)}
               >
                 <span>{option.label}</span>
-                {/* A tick, not just aqua text. On the dark popup surface the
-                    accent measures 4.16:1 against 14px text -- under AA -- and
-                    "which one is chosen" is not a thing to say in colour
-                    alone anyway. */}
+                {/* A tick, not just aqua text: "which one is chosen" is not a
+                    thing to say in colour alone. */}
                 {option.value === value && <Icon name="check" />}
               </li>
             ))}

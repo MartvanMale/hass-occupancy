@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# Run when a numerical pin in <tree>/requirements.txt changes (~75s).
-# Checks both shipping architectures: amd64 by installing and RUNNING the wheels,
-# aarch64 -- which cannot run here -- by disassembling them for ARMv8.1 LSE
-# outside libgcc's dispatch, the pyarrow 21.0.0 bug that aborted on a Pi 4.
-# Not in test.sh: no network there, and it runs the developer's native arch.
-#
-#   scripts/check-pins.sh [tree] [--only arm|amd64] [--update-baseline]
-#
+# Run when a numerical pin in <tree>/requirements.txt changes. amd64 installs and
+# RUNS the wheels; aarch64, which cannot run here, is disassembled for ARMv8.1 LSE
+# outside libgcc's dispatch -- the pyarrow 21.0.0 bug that aborted on a Pi 4.
 # --update-baseline is honest only once the pin has run on the actual Pi.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/container-guard.sh
 
 TREE="occupancy-forecast-edge"
 ONLY="both"
@@ -39,20 +35,22 @@ if [[ ! -f "$TREE/requirements.txt" ]]; then
     exit 2
 fi
 
+guard_start
+
 amd64_status="skipped"
 arm_status="skipped"
 
-# Both halves run even if the first fails, so one invocation reports everything.
-# Note the `|| status=$?` on each: inside an `if ! cmd` branch $? is the status
-# of the negation and is always 0, which reports a failed run as a pass.
+# Both halves run even if the first fails. `|| status=$?` on each, because inside
+# an `if ! cmd` branch $? is the negation's status: always 0, a failure as a pass.
 if [[ "$ONLY" != "arm" ]]; then
     echo "=== amd64: executing the pinned stack ==="
     status=0
-    docker run --rm --platform linux/amd64 \
+    guard_run pins-amd64 --platform linux/amd64 \
         -e HOME=/tmp -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
         -v "$PWD/$TREE/requirements.txt":/requirements.txt:ro \
         -v "$PWD/scripts/cpu_smoke.py":/cpu_smoke.py:ro \
         python:3.13-slim \
+        timeout -k 30 600 \
         sh -c 'pip install --quiet --no-cache-dir --root-user-action=ignore \
                    -r /requirements.txt \
                && exec python /cpu_smoke.py' || status=$?
@@ -66,17 +64,17 @@ if [[ "$ONLY" != "arm" ]]; then
     echo
 fi
 
-# Root here, unlike above: apt-get needs it for the cross binutils. Hence the
-# chown -- --update-baseline is the only write to the repo, and a root-owned
-# file would outlive the run.
+# Root here, for apt-get; hence the chown, since --update-baseline is the only
+# write to the repo and a root-owned file would outlive the run.
 if [[ "$ONLY" != "amd64" ]]; then
     echo "=== aarch64: reading the instructions ==="
     status=0
-    docker run --rm \
+    guard_run pins-arm \
         -e HOME=/tmp -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
         -e OWNER="$(id -u):$(id -g)" \
         -v "$PWD":/w -w /w \
         python:3.13-slim \
+        timeout -k 30 900 \
         sh -c '
             set -e
             apt-get update -qq >/dev/null 2>&1 || {

@@ -1,0 +1,148 @@
+# The suite and the real add-on image on both architectures, plus an emulated
+# Pi 4. CodeQL runs through GitHub's default setup and is not in here. Actions
+# are pinned to SHAs; .github/dependabot.yml moves them.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+
+jobs:
+  # On a PR, build stable only if it changed (it moves only at promotion), and
+  # run the pin jobs only if a pin, the Dockerfile or build.yaml moved.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      trees: ${{ steps.pick.outputs.trees }}
+      pins: ${{ steps.pick.outputs.pins }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: pick
+        run: |
+          set -euo pipefail
+          trees='["occupancy-forecast-edge","occupancy-forecast"]'
+          pins=true
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              changed=$(git diff --name-only HEAD^ HEAD)
+              grep -q '^occupancy-forecast/' <<<"$changed" \
+                  || trees='["occupancy-forecast-edge"]'
+              grep -qE '(requirements.*\.txt|Dockerfile|build\.yaml)$' <<<"$changed" \
+                  || pins=false
+          fi
+          echo "trees=$trees" >> "$GITHUB_OUTPUT"
+          echo "pins=$pins" >> "$GITHUB_OUTPUT"
+          echo "trees: $trees    pins: $pins"
+
+  # scripts/test.sh without the container; the pins resolve to the same wheels.
+  suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      OMP_NUM_THREADS: 2
+      OPENBLAS_NUM_THREADS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: occupancy-forecast-edge/panel/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: occupancy-forecast-edge/panel
+      - run: npx tsc --noEmit
+        working-directory: occupancy-forecast-edge/panel
+      - name: the committed bundle matches its source
+        run: scripts/check-panel.sh occupancy-forecast-edge
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: occupancy-forecast-edge/requirements-dev.txt
+      # A missing wheel must fail here, not start a twenty-minute source build.
+      - run: "pip install --only-binary=:all: -r requirements-dev.txt"
+        working-directory: occupancy-forecast-edge
+      # One line per test: the runner timestamps each, so a slow one is visible.
+      - run: python -m pytest -v --durations=15
+        working-directory: occupancy-forecast-edge
+
+  # Native on each architecture: both base tags are single-arch.
+  image:
+    needs: plan
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: ${{ fromJSON(needs.plan.outputs.trees) }}
+        arch: [amd64, aarch64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/build-image.sh ${{ matrix.tree }} ${{ matrix.arch }}
+      - run: scripts/smoke-image.sh ${{ matrix.tree }} ${{ matrix.arch }}
+
+  # The arm64 runners have LSE, so they cannot clear a Pi 4; this models its
+  # Cortex-A72. Advisory, and a job rather than a step so the PR shows it.
+  cortex-a72:
+    needs: plan
+    if: needs.plan.outputs.pins == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 75
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Invoked explicitly, not via binfmt, which only routes foreign arches.
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
+          qemu-aarch64-static -version | head -1
+      - run: scripts/build-image.sh occupancy-forecast-edge aarch64
+      - run: scripts/smoke-image.sh occupancy-forecast-edge aarch64 --qemu-a72
+      - if: always()
+        run: |
+          echo "cortex-a72 (qemu-user, ARMv8.0): ${{ job.status }}" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  # Needs PyPI, hence advisory. Never --update-baseline: that claims hardware.
+  pins-arm:
+    needs: plan
+    if: needs.plan.outputs.pins == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/check-pins.sh occupancy-forecast-edge --only arm

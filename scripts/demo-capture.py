@@ -2,14 +2,8 @@
 """Screenshot the panel against the demo instance, light and dark.
 
 Wants `mcr.microsoft.com/playwright/python` -- the PYTHON image; the plain
-`playwright` tag is the Node one and has neither the module nor pip. The
-`capture` service in compose.yaml gets this right:
-
-    docker compose run --rm capture
-
-Or against a demo-serve.py already running on the host:
-
-    scripts/demo-capture.py --url http://127.0.0.1:8099 --out ~/occupancy-demo/shots
+`playwright` tag is the Node one and has neither the module nor pip.
+`docker compose run --rm capture` gets this right.
 """
 from __future__ import annotations
 
@@ -31,10 +25,8 @@ def capture(url: str, out: Path, settle_ms: int, no_sandbox: bool = False) -> in
     written = 0
     args = ["--force-color-profile=srgb"]
     if no_sandbox:
-        # Chromium's sandbox needs user namespaces, which a container often does
-        # not have -- and inside one the sandbox is buying very little anyway,
-        # since the container is the boundary. Opt-in rather than always-on so a
-        # run on the host keeps it.
+        # Chromium's sandbox needs user namespaces a container often lacks, and the
+        # container is already the boundary. Opt-in, so a host run keeps it.
         args.append("--no-sandbox")
     with sync_playwright() as p:
         browser = p.chromium.launch(args=args)

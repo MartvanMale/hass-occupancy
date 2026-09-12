@@ -1,0 +1,9 @@
+# Line endings are a repo policy, not a per-clone accident: run.sh's shebang and
+# panel/dist/.source-hash (a hash over working-tree BYTES) both break under CRLF.
+* text=auto eol=lf
+
+# Vendored fonts.
+*.woff2 binary
+
+# Vendored SIL licence, CRLF as shipped; it is inside the .source-hash input set.
+OFL.txt -text

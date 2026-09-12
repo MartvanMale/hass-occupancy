@@ -1,15 +1,8 @@
 """Feature-table tests.
 
 Every test here guards a way this pipeline can be silently wrong rather than
-loudly broken -- which is the only failure mode that matters, given that the
-implementation this replaces ran for five months writing `went_to_office=False`
-on every row and nothing ever noticed. The zone tests at the bottom are the
-direct descendants of that bug: they exist because the per-person zone columns
-are keyed on a friendly name, and a rename has to be loud.
-
-Runnable two ways:
-    pytest occupancy_forecast/tests/test_features.py
-    python3 occupancy_forecast/tests/test_features.py
+loudly broken. The zone tests at the bottom exist because the per-person zone
+columns are keyed on a friendly name, and a rename has to be loud.
 """
 
 import sys
@@ -30,12 +23,9 @@ def _slots(n: int, start="2026-05-01T00:00:00Z") -> pd.DatetimeIndex:
 
 
 def _wide_table(days: int = 40) -> pd.DataFrame:
-    """A real `features.build()` output, for the tests that melt it.
-
-    Built rather than hand-written: the melt is a mapping between two sets of
-    column names, and a hand-written frame would only ever prove the mapping
-    agrees with itself.
-    """
+    """A real `features.build()` output, for the tests that melt it. Built, not
+    hand-written: a hand-written frame would only prove the melt's mapping
+    agrees with itself."""
     start = pd.Timestamp("2026-04-01T00:00:00Z")
     events = {}
     for index, subject in enumerate(config.SUBJECTS):
@@ -83,13 +73,9 @@ def test_half_a_slot_away_is_a_half():
 
 
 def test_a_ninety_second_blip_barely_moves_the_slot():
-    """GPS jitter must not flip a slot.
-
-    Measured on a real installation: 19% of one person's episodes are under five
-    minutes, and 11 of 28 workplace-zone episodes are under two. Under a
-    last-observation-carried-forward resample a blip landing on a grid point
-    flips the whole slot; here it costs its own duration and nothing more.
-    """
+    """GPS jitter must not flip a slot. Under a last-observation-carried-forward
+    resample a blip landing on a grid point flips the whole slot; here it costs
+    its own duration and nothing more."""
     slots = _slots(1)
     events = [("2026-04-30T23:00:00Z", "home"),
               ("2026-05-01T00:10:00Z", "not_home"),
@@ -108,17 +94,13 @@ def test_an_unobserved_slot_is_nan_not_zero():
 
 
 # ---------------------------------------------------------------------------
-# observability: the bug that fabricated three weeks of labels
+# observability: a silence is not a state
 # ---------------------------------------------------------------------------
 
 def test_a_long_silence_is_not_observed():
-    """The 653-hour hole of 2026-06-26..07-23, in miniature.
-
-    Without this the step function carries the last known state across the
-    entire outage, and the table reports three straight weeks of
-    `home_frac == 1.00` for every subject -- a fold whose base rate is literally
-    1.000. The first build of this table did exactly that.
-    """
+    """A multi-week recorder outage, in miniature. Without this the step
+    function carries the last known state across it, and every subject reads
+    `home_frac == 1.00` for weeks."""
     slots = _slots(96)  # two days
     events = pd.DatetimeIndex(["2026-05-01T00:00:00Z", "2026-05-02T23:30:00Z"])
     observable = features.observability(events, slots)
@@ -126,12 +108,9 @@ def test_a_long_silence_is_not_observed():
 
 
 def test_the_nightly_doze_is_still_observed():
-    """The counterweight: phones go quiet 21:00-03:00 every single night.
-
-    Blanking those would delete 27% of the history and every night in it, which
-    is when occupancy is most predictable. The measured worst case is 10.3 h, so
-    a 12 h threshold has to accept 6 h comfortably.
-    """
+    """The counterweight: phones go quiet for hours every night, and blanking
+    that would delete every night in the history -- when occupancy is most
+    predictable."""
     slots = _slots(24)  # 12 hours
     events = pd.DatetimeIndex(["2026-05-01T00:00:00Z", "2026-05-01T06:00:00Z",
                                "2026-05-01T12:00:00Z"])
@@ -150,11 +129,8 @@ def test_the_threshold_sits_between_the_two():
 
 def test_daily_lags_never_reach_past_the_origin():
     """`tgt{h}h_lag{k}d` is home_frac at t + h - 24k. It must not be in the future.
-
-    At 36 h the target's "yesterday" is twelve hours ahead of the origin.
-    Including it would train a model that cannot be served -- and it would score
-    beautifully while doing so, which is what makes this worth a test.
-    """
+    At 36 h the target's "yesterday" is twelve hours ahead of the origin: a
+    model trained on it would score beautifully and could not be served."""
     for horizon in config.HORIZONS_H:
         for days in features.safe_daily_lags(horizon):
             assert 24 * days >= horizon, (
@@ -170,17 +146,9 @@ def test_the_gate_is_actually_binding_somewhere():
 
 
 def test_the_long_frame_has_no_value_in_a_lag_it_may_not_see():
-    """**The most important test in this file.**
-
-    The gate used to be enforced by a feature LIST: `features_for(36)` simply
-    never named `tgt36h_lag1d`, so the leaky column sat in the parquet and no
-    model could reach it. One pooled model has one feature list, so that
-    protection is gone and `lag1d` is a real column on every row -- it must
-    carry NO VALUE above +24 h.
-
-    Asserting on the feature list here would now pass vacuously while the model
-    trained on twelve hours of the future. So this asserts on the data.
-    """
+    """One pooled model has one feature list, so `lag1d` is a real column on
+    every row and must carry NO VALUE above +24 h. Asserting on the feature list
+    would pass vacuously; this asserts on the data."""
     wide = _wide_table()
     long = features.long_frame(wide)
     for days in features.DAILY_LAGS:
@@ -211,11 +179,8 @@ def test_the_long_frame_carries_the_same_numbers_as_the_wide_one():
 
 
 def test_the_long_frame_says_which_lag_the_cross_subject_column_holds():
-    """`other_{slug}_lag` steps from a 1 d to a 2 d offset at the h=24/25 line.
-
-    One name, two meanings, so the offset travels as a column of its own rather
-    than leaving the model to infer it from `horizon_h`.
-    """
+    """`other_{slug}_lag` steps from a 1 d to a 2 d offset at the h=24/25 line:
+    one name, two meanings, so the offset travels as a column of its own."""
     long = features.long_frame(_wide_table())
     for horizon, expected in ((24, 1.0), (25, 2.0)):
         part = long[long[features.HORIZON_COLUMN] == float(horizon)]
@@ -229,10 +194,8 @@ def test_no_feature_is_a_target():
 
 
 def test_every_column_a_horizon_reads_has_a_family():
-    """`column_family` is what lets the panel summarise a thousand-column table it
-    cannot show as a table. An unclassified column falls into "unknown" and is
-    silently mis-summarised, which at this width nobody would spot -- so the
-    classifier is asserted against the names the code actually mints."""
+    """`column_family` lets the panel summarise a table it cannot show; an
+    unclassified column falls into "unknown" and is silently mis-summarised."""
     minted = {"time", "subject", "home_frac", *features.BUILT_NOT_SHIPPED}
     minted.update(train.origin_features())
     for horizon in config.HORIZONS_H:
@@ -251,12 +214,9 @@ def test_every_column_a_horizon_reads_has_a_family():
 
 
 def test_phone_sensors_are_built_but_not_shipped():
-    """Companion-app sensors are usually enabled long after the recorder started.
-
-    A column that is NaN for all but the last few days of the history trains as
-    "unknown" on every row and is worse than not having the feature at all.
-    Shipping one should be a deliberate tuple edit, not an accident.
-    """
+    """Companion-app sensors are usually enabled long after the recorder
+    started, so the column is NaN for most of the history: worse than none.
+    Shipping one should be a deliberate tuple edit, not an accident."""
     assert not set(train.base_features()) & set(features.BUILT_NOT_SHIPPED)
 
 
@@ -266,15 +226,9 @@ def test_phone_sensors_are_built_but_not_shipped():
 
 def test_a_slot_faces_forward_from_its_left_edge():
     """Slot `t` covers `[t, t+30min)`, not the half hour before it.
-
-    Worth its own test because the whole table reads as half an hour stale if
-    you assume otherwise -- `observed_at` on a published forecast is a slot's
-    LEFT EDGE, and the newest row is the in-progress slot with the present
-    state carried through the part that has not happened yet. Somebody
-    (reasonably) read that as staleness and phase-shifted the grid to "fix" it,
-    which made the newest row a 30-minute trailing average and strictly less
-    responsive. See nowcast.py.
-    """
+    `observed_at` is a slot's LEFT EDGE; reading that as staleness and
+    phase-shifting the grid makes the newest row a trailing average. See
+    nowcast.py."""
     slots = _slots(1, start="2026-05-01T19:30:00Z")
     events = [("2026-05-01T18:00:00Z", "home"),
               ("2026-05-01T19:40:00Z", "not_home")]
@@ -285,12 +239,8 @@ def test_a_slot_faces_forward_from_its_left_edge():
 
 
 def test_responsiveness_is_phase_dependent_which_is_why_nowcast_exists():
-    """The measured motivation for the nowcast, pinned so it cannot drift.
-
-    A departure before the slot's midpoint reads away at once; one after it
-    keeps the house occupied until the slot turns over. 0-15 minutes, and the
-    caller does not get to know which.
-    """
+    """A departure before the slot's midpoint reads away at once; one after it
+    keeps the house occupied until the slot turns over."""
     slots = _slots(1, start="2026-05-01T19:30:00Z")
 
     def state_now(departure: str) -> float:
@@ -320,9 +270,8 @@ def test_a_shorter_window_is_the_same_arithmetic():
 # ---------------------------------------------------------------------------
 
 def test_the_calendar_helpers_are_the_one_spelling_of_the_calendar():
-    """`slot_of_day`, `is_weekend` and `holiday_flags` replaced six copies of
-    the slot arithmetic and two `_holiday_flags` with different exception
-    handling. Pinned on both input shapes callers use."""
+    """Every caller's slot, weekend and holiday arithmetic goes through these,
+    so they are pinned on both input shapes callers use."""
     times = pd.Series(pd.date_range("2026-04-25T06:00", periods=5, freq="30min",
                                     tz=config.TIMEZONE))            # a Saturday
     assert list(features.slot_of_day(times)) == [12, 13, 14, 15, 16]
@@ -366,15 +315,8 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # Zones
 #
-# A zone used to be a work zone belonging to one person, read from the zone
-# entity's numeric person-count. It is now a plain place the user ticked, read
-# per person from that person's own state -- which is the only per-person zone
-# signal history contains, and the one thing the old count could never give:
-# one housemate standing in another's work zone is a fact a household count
-# cannot hold.
-#
-# The join is on the zone's FRIENDLY NAME, which is the thing that broke the
-# previous implementation. These tests exist to make that break loud.
+# Read per person from that person's own state, the only per-person zone
+# signal history has. Joined on the FRIENDLY NAME, so a rename must be loud.
 # ---------------------------------------------------------------------------
 
 class _Events:
@@ -404,19 +346,15 @@ def _zoned(**overrides):
 
 
 def test_a_ticked_zone_becomes_a_column_named_after_the_zone():
-    """Not after the person. That rename is the whole point of the change."""
+    """Not after the person: a zone is a place anyone can be in."""
     _zoned()
     assert features.zone_columns() == ("zone_alice_office", "zone_market",
                                        "zone_other")
 
 
 def test_the_zone_columns_and_home_partition_a_covered_slot():
-    """home + every zone + other == 1, because they are one state machine.
-
-    The columns are built by the same `slot_fraction` integration as
-    `home_frac`, so this is true by construction -- and asserting it is what
-    catches a future column that double-counts or drops time on the floor.
-    """
+    """home + every zone + other == 1, because they are one state machine; this
+    catches a future column that double-counts or drops time on the floor."""
     _zoned()
     slots = _slots(1)
     events = [("2026-04-30T23:00:00Z", "home"),
@@ -455,13 +393,9 @@ def test_an_unticked_zone_is_lumped_in_with_everywhere_else():
 
 
 def test_a_renamed_zone_is_counted_rather_than_silently_swallowed():
-    """The scar this whole diagnostic exists for.
-
-    Rename `zone.alice_office` in Home Assistant and every historical row still
-    says the OLD name. Those rows land in `zone_other`, which is defensible --
-    but it must not happen quietly, because that is exactly how the previous
-    implementation spent five months writing a column that meant nothing.
-    """
+    """Rename a zone in Home Assistant and every historical row still says the
+    OLD name; those rows land in `zone_other`, which is defensible but must not
+    happen quietly."""
     _zoned()
     events = [("2026-05-01T00:00:00Z", "Alice Office"),      # current name
               ("2026-05-01T01:00:00Z", "Kantoor Alice"),     # what it was called
@@ -479,15 +413,11 @@ def test_a_renamed_zone_is_counted_rather_than_silently_swallowed():
 
 
 def test_the_house_sees_a_zone_any_of_the_people_are_in():
-    """The house has no state of its own, so it gets the union.
-
-    This is the household reading the old `office_{slug}` columns carried, and
-    losing it would quietly make the house model blinder than the person models.
-    """
+    """The house has no state of its own, so it gets the union; without it the
+    house model would be quietly blinder than the person models."""
     _zoned()
-    # Events inside the window as well as before it: `_liveness` builds the
-    # observability mask from state changes, and a slot with no evidence that
-    # anything was recording is NaN by design rather than zero.
+    # Events inside the window as well as before it: a slot with no evidence
+    # that anything was recording is NaN by design, not zero.
     source = _Events({
         "person.alice": [("2026-04-30T23:00:00Z", "Supermarket"),
                          ("2026-05-01T00:10:00Z", "Supermarket")],
@@ -503,7 +433,6 @@ def test_the_house_sees_a_zone_any_of_the_people_are_in():
 
     # And the house is a UNION, not a partition: Bob home while Alice is at the
     # supermarket sums past one, which is correct and must not be "fixed".
-    # Measured on the real history: 2229 of 6871 covered house rows do this.
     zoned = sum(house[c].iloc[0] for c in features.zone_columns())
     assert house["home_frac"].iloc[0] + zoned > 1.0
 
@@ -515,15 +444,10 @@ def test_every_zone_column_lands_in_the_zone_family():
 
 
 def test_an_unserved_candidate_does_not_widen_the_serving_reach():
-    """`predict.LOOKBACK_DAYS` derives from `deepest_lookback_days`, and every
-    serving cycle is a full lookback rebuild -- every five minutes.
-
-    Building the wide climatology unconditionally while nothing served it took
-    that from 32 to 60 days for a feature no model reads. The reach has to track
-    what is SERVED. The other direction still has to hold: the moment a
-    candidate IS served, the reach widens with it, or production would average
-    fewer weeks than training did and nothing would say so.
-    """
+    """`predict.LOOKBACK_DAYS` derives from `deepest_lookback_days` and every
+    serving cycle is a full lookback rebuild, so the reach tracks what is SERVED
+    -- and widens the moment a candidate is, or production averages fewer weeks
+    than training."""
     before = features.SHIPPED_EXTRAS
     try:
         features.SHIPPED_EXTRAS = ()

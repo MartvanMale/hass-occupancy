@@ -56,9 +56,8 @@ def test_the_bands_are_offsets_from_now_not_clock_times():
 
 
 def test_history_it_never_saw_is_not_shaded():
-    """The one failure mode worth avoiding. A slot with no evidence is drawn as
-    awake, because inventing a night is how a chart explains a dip that never
-    happened."""
+    """A slot with no evidence is drawn as awake, because inventing a night is
+    how a chart explains a dip that never happened."""
     now = dt.datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
     assert night.bands({}, now, 48) == []
     assert night.weekly_pattern([], now) == {}

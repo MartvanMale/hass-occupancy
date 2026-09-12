@@ -1,16 +1,7 @@
 /**
- * The one bit of chart arithmetic worth sharing.
- *
- * `TimeSeries`, `Curves` and `ScoreByHorizon` all draw a line through points
- * some of which are not there, and all three have to break rather than bridge:
- * `slot_fraction` returns NaN for a slot nobody observed, and
- * `explore.metrics_summary` skips a horizon whose training produced no metrics
- * and nulls a field that is missing from `metrics.json`. Joining across either
- * one draws a straight, confident line through the exact region where there is
- * no evidence at all -- which is the failure this project has already fixed once
- * (see "Stop the Data tab blacking out on a fold with nothing to score").
- *
- * So: a null point lifts the pen, and the caller decides what a null is.
+ * The one bit of chart arithmetic worth sharing: a null point lifts the pen,
+ * and the caller decides what a null is. All three charts must break rather
+ * than bridge -- a joined line is confident through the region with no evidence.
  */
 export interface Pt {
   x: number
@@ -29,13 +20,8 @@ export function linePath(points: (Pt | null)[]): string {
   return out.join(' ')
 }
 
-/**
- * A filled band between two lines, one closed sub-path per unbroken run.
- *
- * One `M ... Z` for the whole thing would close the shape straight across any
- * gap, filling a region the data says nothing about -- the same mistake as
- * bridging, in two dimensions instead of one.
- */
+/** A filled band between two lines, one closed sub-path per unbroken run: one
+ *  `M ... Z` would fill across a gap. */
 export function bandPath(lo: (Pt | null)[], hi: (Pt | null)[]): string {
   const out: string[] = []
   let run: { lo: Pt; hi: Pt }[] = []
@@ -62,13 +48,8 @@ export function bandPath(lo: (Pt | null)[], hi: (Pt | null)[]): string {
 export const clamp = (v: number, min: number, max: number) =>
   Math.max(min, Math.min(max, v))
 
-/**
- * Contiguous runs of `true`, as [start, end] index pairs, inclusive.
- *
- * The accumulator behind every gap band: `TimeSeries` shades unobserved slots,
- * `Verification` shades unpublished ones, `Curves` shades hours no model
- * forecast. Each had its own copy of this loop.
- */
+/** Contiguous runs of `true`, as inclusive index pairs. The accumulator behind
+ *  every gap band. */
 export function runs(flags: boolean[]): [number, number][] {
   const out: [number, number][] = []
   flags.forEach((on, i) => {
