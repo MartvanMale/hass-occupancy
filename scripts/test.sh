@@ -25,6 +25,10 @@ guard_run tsc \
 # has to mean it is fresh. If this fails: scripts/build-panel.sh, then re-test.
 scripts/check-panel.sh occupancy-forecast-edge
 
+# The repository is public and DEVELOPMENT.md's "Never" forbids a real name or
+# entity id in the tree; until this ran, nothing enforced it.
+scripts/check-privacy.sh
+
 # Tagged with a hash of the pins it holds, so a moved pin cannot be served a
 # stale image -- the same trick as panel/dist/.source-hash, without the compare.
 tag="occupancy-forecast-test:$(cat occupancy-forecast-edge/requirements.txt \

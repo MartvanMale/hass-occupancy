@@ -87,7 +87,7 @@ sensor.occupancy_forecast_<who>_hours_until_away        h
 sensor.occupancy_forecast_<who>_out_today               %    chance of a day out to a tracked zone
 sensor.occupancy_forecast_<who>_out_departure           ts   the hour they usually leave on such a day
 sensor.occupancy_forecast_<who>_out_return              ts   and the hour they usually get back
-sensor.occupancy_forecast_<who>_next_change_at          ts   the model says a change is coming, the routine times it
+sensor.occupancy_forecast_<who>_next_change_at          ts   the model says a change is coming; the routine may only sharpen the hour
 ```
 
 **`minutes_until_home` is conditional on arriving.** It is trained only on

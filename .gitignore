@@ -12,6 +12,12 @@ __pycache__/
 *.pkl
 models/
 
+# Raw data by another name: a notebook carries its OUTPUTS, and an analysis of
+# one household's archive prints that household's movements cell by cell. The
+# research lives outside the repo -- see DEVELOPMENT.md's "Never".
+*.ipynb
+notebooks/
+
 # The panel's toolchain. The built bundle IS committed -- DEVELOPMENT.md ("The panel") says why.
 node_modules/
 

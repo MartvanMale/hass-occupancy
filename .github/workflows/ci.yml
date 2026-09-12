@@ -84,7 +84,8 @@ jobs:
       # A missing wheel must fail here, not start a twenty-minute source build.
       - run: "pip install --only-binary=:all: -r requirements-dev.txt"
         working-directory: occupancy-forecast-edge
-      - run: python -m pytest -q
+      # One line per test: the runner timestamps each, so a slow one is visible.
+      - run: python -m pytest -v --durations=15
         working-directory: occupancy-forecast-edge
 
   # Native on each architecture: both base tags are single-arch.

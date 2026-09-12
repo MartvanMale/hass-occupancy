@@ -10,6 +10,18 @@
 
 ### Fixed
 
+- **"Next expected change" no longer names an hour the forecast disagrees
+  with.** That row, and the `Next change at` sensor with it, took its time from
+  the "Out today" routine, which only counts days you reached one of your
+  configured zones. A day out that never reached one of them therefore looked
+  like a day nobody left, and the row fell back to a departure time measured on
+  your other weekdays — naming an hour the 48-hour chart beside it read as you
+  being home. It is now timed from a second routine built on leaving the house at
+  all, which may only sharpen the forecast's own hour rather than replace it,
+  and the row says how many of that weekday you actually went out on. "Out
+  today", "Out departure" and "Out return" are unchanged. The new routine
+  appears after the next training run; until then the row shows the forecast's
+  own timing.
 - The "Was it right?" chart now works when the add-on reads its history from
   InfluxDB; until now such installs recorded nothing at all. Existing `influx`
   installs start empty and fill over the following 30 days. There is still no

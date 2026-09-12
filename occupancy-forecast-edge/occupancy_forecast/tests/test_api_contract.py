@@ -28,10 +28,15 @@ OUT_ROUTINE_KEYS = {
     "departure_hour", "departure_sd", "departure_from",
     "return_hour", "return_sd", "return_from", "fitted_at",
 }
+# Its twin on the next-change row, fitted on "left the house" rather than
+# "reached a configured zone" -- hence `n_left_weekday` where the other counts
+# out-days. Same shape otherwise, so one card component reads both.
+DEPARTURE_ROUTINE_KEYS = (OUT_ROUTINE_KEYS - {"n_out_weekday"}) | {"n_left_weekday"}
 SUBJECT_FORECAST_KEYS = {"subject", "current", "observed_at", "curve",
                          "next_departure_h",
                          "next_arrival_h", "eta_minutes", "next_change", "out"}
-NEXT_CHANGE_KEYS = {"direction", "in_hours", "at", "at_from"}
+NEXT_CHANGE_KEYS = {"direction", "in_hours", "at", "at_from", "routine_at",
+                    "routine_day"}
 WORKER_KEYS = {"phase", "cycles", "seconds_since_phase", "stalled",
                "stalled_since", "stalled_in", "stalls"}
 LISTENER_KEYS = {"connected"}          # the rest are optional in the type
@@ -359,6 +364,30 @@ def test_the_out_routine_carries_every_field_the_card_reads():
     # and the card renders a sentence rather than a zero when they are absent.
     assert today["departure_hour"] is None or isinstance(today["departure_hour"], float)
     assert today["departure_from"] in {"weekday", "overall"}
+
+
+def test_the_departure_routine_carries_every_field_the_row_reads():
+    """`routine_day` on the next-change row. Same discipline as the out routine,
+    on the wider label -- and `n_left_weekday` is what tells a weekday they
+    usually go out on from one they rarely do, which is why the field exists."""
+    import datetime as dt
+
+    import pandas as pd
+
+    from occupancy_forecast import config, departure
+    from occupancy_forecast.tests.test_outing import _table
+
+    config.configure(make_settings(zones=["zone.alice_office"],
+                                   zone_names={"zone.alice_office": "Alice Office"}))
+    begin = dt.date(2026, 1, 5)
+    went = {(begin + dt.timedelta(days=7 * w + d)).isoformat()
+            for w in range(12) for d in (1, 4)}
+    routine = departure.fit_routine(departure.label_days(_table(went, days=84)))
+
+    today = departure.today(routine, "alice", pd.Timestamp("2026-03-31T06:00Z"))
+    assert DEPARTURE_ROUTINE_KEYS <= set(today)
+    assert today["departure_hour"] is None or isinstance(today["departure_hour"], float)
+    assert today["departure_from"] in {"weekday", "overall", "never"}
 
 
 def test_verification_carries_every_field_the_was_it_right_card_reads(tmp_path):
