@@ -111,7 +111,10 @@ def install(data: Path) -> None:
     def bootstrap(path: Path = config.CONFIG_PATH):
         config.configure(settings)
         ha = DemoHomeAssistant()
-        return settings, ha, StoreSource(HistoryStore(config.HISTORY_DB), ha)
+        # One store object, the way `runtime.build_source` wires it on `store`:
+        # the forecast log and the source read through the same handle.
+        log = HistoryStore(config.HISTORY_DB)
+        return settings, ha, StoreSource(log, ha), log
 
     runtime.bootstrap = bootstrap
     runtime.home_assistant = DemoHomeAssistant

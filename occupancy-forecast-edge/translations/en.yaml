@@ -7,46 +7,54 @@ configuration:
       How much the add-on writes to its log. `info` logs transitions and one
       heartbeat an hour; `debug` adds a line per five-minute cycle.
   source:
-    name: History source
+    name: History source (moved)
     description: >-
-      Where training history comes from. `store` keeps its own archive under
-      /data from the moment the add-on is installed. `influx` reads an
-      InfluxDB v2 bucket that Home Assistant's InfluxDB integration already
-      fills, and trains from it immediately.
+      MOVED to the Setup tab of the add-on's own panel in 0.4.0. This option is
+      read once, on the first start after the update, to carry your existing
+      value across; after that it is ignored and editing it here does nothing.
   admin_users:
     name: Admin users
     description: >-
       Home Assistant user ids allowed to save the configuration, retrain and
-      reload. Empty means every user who can open the panel.
+      reload. Empty means every user who can open the panel. Stays here on
+      purpose: it is what gates the panel form, so it must not be settable from
+      inside that form.
   influx_url:
-    name: InfluxDB URL
-    description: Only read when the source is `influx`.
+    name: InfluxDB URL (moved)
+    description: >-
+      MOVED to the Setup tab in 0.4.0, where a Check connection button can test
+      it. Read once on the first start after the update, then ignored.
   influx_org:
-    name: InfluxDB organisation
-    description: Only read when the source is `influx`.
+    name: InfluxDB organisation (moved)
+    description: >-
+      MOVED to the Setup tab in 0.4.0. Read once on the first start after the
+      update, then ignored.
   influx_bucket:
-    name: InfluxDB bucket
-    description: The bucket Home Assistant's InfluxDB integration writes to.
+    name: InfluxDB bucket (moved)
+    description: >-
+      MOVED to the Setup tab in 0.4.0. Read once on the first start after the
+      update, then ignored.
   influx_token:
-    name: InfluxDB token
+    name: InfluxDB token (moved)
     description: >-
-      A read-only token scoped to that bucket. The add-on only ever queries;
-      it never writes to InfluxDB.
+      MOVED to the Setup tab in 0.4.0. Read once on the first start after the
+      update, then ignored. The add-on only ever queries InfluxDB; a read-only
+      token scoped to the bucket is enough.
   mqtt_host:
-    name: MQTT broker host
+    name: MQTT broker host (moved)
     description: >-
-      Only for a broker that is not a Supervisor add-on -- EMQX, or Mosquitto
-      on another machine. Set it and these five win over the Mosquitto add-on;
-      leave it empty and that add-on is used as before.
+      MOVED to the Setup tab in 0.4.0, and only ever needed for a broker that is
+      not a Supervisor add-on. Read once on the first start after the update,
+      then ignored. Supervisor's own broker is still found automatically.
   mqtt_port:
-    name: MQTT broker port
-    description: Only read when a broker host is set.
+    name: MQTT broker port (moved)
+    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
   mqtt_user:
-    name: MQTT username
-    description: Only read when a broker host is set.
+    name: MQTT username (moved)
+    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
   mqtt_password:
-    name: MQTT password
-    description: Only read when a broker host is set.
+    name: MQTT password (moved)
+    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
   mqtt_ssl:
-    name: MQTT over TLS
-    description: Only read when a broker host is set.
+    name: MQTT over TLS (moved)
+    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.

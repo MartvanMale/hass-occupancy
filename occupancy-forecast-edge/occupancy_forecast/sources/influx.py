@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
+import urllib.error
 import urllib.request
 
 
@@ -38,6 +39,11 @@ class InfluxSource:
                      "Accept": "application/csv"})
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             body = response.read().decode()
+        # 1.8's compatibility mode ALWAYS prefixes the CSV with `#datatype`,
+        # `#group` and `#default`; 2.x sends them only when the dialect asks, and
+        # we never ask. Unconditional, because skipping it wrongly is silent.
+        body = "\n".join(line for line in body.splitlines()
+                         if not line.startswith("#"))
         rows = []
         for row in csv.DictReader(io.StringIO(body)):
             # A `union` of two schemas repeats the header mid-body, and
@@ -217,6 +223,133 @@ from(bucket: "{self.bucket}")
                 "sample": edge.get("sample") or [],
             })
         return {"span": _span_of(entities), "entities": entities}
+
+
+# -- the connection check, for the panel ------------------------------------
+#
+# Staged so a failure names its own cause: a typo'd port must not read as a bad
+# token. Every message here is written by us -- a library's own text can carry
+# the address it was dialling, which is the `log.SEE_THE_LOG` rule again.
+
+CHECK_TIMEOUT = 8
+
+
+def _stage(name: str, ok: bool, detail: str) -> dict:
+    return {"name": name, "ok": ok, "detail": detail}
+
+
+def _server_version(url: str, timeout: int) -> str | None:
+    """`/ping` is unauthenticated on both 1.x and 2.x, which is what separates
+    "is this URL even InfluxDB" from "are these credentials right"."""
+    request = urllib.request.Request(f"{url.rstrip('/')}/ping", method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.headers.get("X-Influxdb-Version")
+
+
+def _hints(version: str) -> list[str]:
+    """What a 1.x server needs spelled out; otherwise it is a support thread.
+
+    2.x needs none of it, so the list is empty and the panel shows nothing.
+    """
+    if not version.lstrip("v").startswith("1."):
+        return []
+    return [
+        "On 1.x the token is `username:password`, not an API token.",
+        "On 1.x the bucket is `database/retention-policy`, such as "
+        "`homeassistant/autogen` -- not a bucket name.",
+        "On 1.x the org is required by the endpoint and ignored by the server.",
+    ]
+
+
+def check_connection(url: str, token: str, org: str, bucket: str,
+                     entity_ids: list[str] | None = None,
+                     timeout: int = CHECK_TIMEOUT) -> dict:
+    """Can this add-on actually read history from this server? Never raises.
+
+    Stops at the first failed stage: past one, the next only produces a second
+    way of saying the same thing.
+    """
+    stages: list[dict] = []
+    version = ""
+    if not url:
+        return {"ok": False, "version": None, "hints": [],
+                "stages": [_stage("reachable", False, "No URL to test.")]}
+
+    try:
+        found = _server_version(url, timeout)
+    except urllib.error.HTTPError as err:
+        found, _ = None, err
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "version": None, "hints": [], "stages": [_stage(
+            "reachable", False,
+            f"Nothing answered at {url}. Check the host and port, and that "
+            f"Home Assistant can reach it.")]}
+    if not found:
+        return {"ok": False, "version": None, "hints": [], "stages": [_stage(
+            "reachable", False,
+            f"Something answered at {url}, but it did not identify itself as "
+            f"InfluxDB. A reverse proxy or the wrong port would look like this.")]}
+    version = found
+    flavour = ("InfluxDB %s -- Flux compatibility mode" % version.lstrip("v")
+               if version.lstrip("v").startswith("1.")
+               else "InfluxDB %s" % version.lstrip("v"))
+    stages.append(_stage("reachable", True, flavour))
+    hints = _hints(version)
+
+    source = InfluxSource(url, token, org, bucket=bucket, timeout=timeout)
+    try:
+        rows = source._query("buckets()", timed=False)
+    except urllib.error.HTTPError as err:
+        detail = {
+            401: "The server refused the token. On 1.x it must be "
+                 "`username:password`; on 2.x it is an API token.",
+            403: "The token was recognised but is not allowed to read. Give it "
+                 "read access to the bucket.",
+        }.get(err.code, f"The server answered {err.code} when asked for its "
+                        f"buckets.")
+        stages.append(_stage("credentials", False, detail))
+        return {"ok": False, "version": version, "hints": hints, "stages": stages}
+    except Exception:  # noqa: BLE001
+        stages.append(_stage("credentials", False,
+                             "The server stopped answering while listing its buckets."))
+        return {"ok": False, "version": version, "hints": hints, "stages": stages}
+    stages.append(_stage("credentials", True, "Accepted."))
+
+    names = sorted({r["name"] for r in rows if r.get("name")})
+    if bucket not in names:
+        # Listing them is what untangles 1.x's `database/retention-policy` form.
+        seen = ", ".join(names) if names else "none at all"
+        stages.append(_stage("bucket", False,
+                             f"No bucket called {bucket!r}. This token can see: {seen}."))
+        return {"ok": False, "version": version, "hints": hints, "stages": stages}
+    stages.append(_stage("bucket", True, f"Found {bucket!r}."))
+
+    # The stage that matters: it is what catches a parse that answers zero rows
+    # against a full database, and over a longer window a short retention policy.
+    selector = source._tags([e for e in (entity_ids or []) if e.startswith("person.")])
+    if not selector:
+        stages.append(_stage("rows", False, "No people are configured yet, so "
+                                            "there is nothing to count."))
+        return {"ok": False, "version": version, "hints": hints, "stages": stages}
+    flux = (f'from(bucket: "{bucket}")\n'
+            f'  |> range(start: -24h)\n'
+            f'  |> filter(fn: (r) => ({selector}) and r._field == "state")\n'
+            f'  |> count()\n')
+    try:
+        counted = sum(int(r["_value"]) for r in source._query(flux, timed=False)
+                      if str(r.get("_value", "")).lstrip("-").isdigit())
+    except Exception:  # noqa: BLE001
+        stages.append(_stage("rows", False,
+                             "The server refused the history query."))
+        return {"ok": False, "version": version, "hints": hints, "stages": stages}
+    ok = counted > 0
+    stages.append(_stage(
+        "rows", ok,
+        f"{counted} rows for the configured people in the last 24 hours."
+        if ok else
+        "No rows for the configured people in the last 24 hours. The bucket is "
+        "readable, so check that Home Assistant is writing person entities to it."))
+    return {"ok": ok, "version": version, "hints": hints, "stages": stages}
 
 
 def _empty_span() -> dict:

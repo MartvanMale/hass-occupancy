@@ -104,8 +104,10 @@ h1 { font-size: var(--title-size); font-weight: 400; line-height: 1.2; margin: 0
 .tab[aria-selected=true] { background: rgba(var(--rgb-aqua), .2);
                            color: rgb(var(--rgb-aqua)); }
 @media (max-width: 30rem) {
-  .tabs { width: 100%; margin-left: 0; }
-  .tab { flex: 1 1 0; justify-content: center; }
+  /* Two rows of two: four tabs do not fit one phone row, and `flex: 1 1 0` on a
+     row that cannot shrink below its labels pushed the whole page sideways. */
+  .tabs { width: 100%; margin-left: 0; flex-wrap: wrap; }
+  .tab { flex: 1 1 40%; min-width: 0; justify-content: center; }
 }
 
 /* 24rem: a row is a shape, a line of text and a select naming an entity. */
@@ -114,6 +116,14 @@ h1 { font-size: var(--title-size); font-weight: 400; line-height: 1.2; margin: 0
          /* Each card as tall as its own contents; stretched, a three-row card
             next to a six-row one was mostly white. */
          align-items: start; }
+
+/* Settings, not status: a 24rem card is too narrow for a label beside its own
+   control. Columns fill in source order, so Setup groups People and Zones into
+   one `.stack` rather than letting them take a column each.
+   `min(30rem, 100%)`, never a bare 30rem: a bare floor is wider than a phone,
+   so the grid overflowed sideways and the card never got narrow enough for the
+   field query below to fire. */
+.cards.wide { grid-template-columns: repeat(auto-fit, minmax(min(30rem, 100%), 1fr)); }
 
 /* Exactly two columns, for a grid of PAIRS rather than of peers: `align-items:
    stretch` overrides `.cards`, because the two cards of a row are read across. */
@@ -255,12 +265,23 @@ h1 { font-size: var(--title-size); font-weight: 400; line-height: 1.2; margin: 0
 .card { background: var(--card); border-radius: var(--card-radius);
         padding: var(--spacing); align-content: start;
         container-type: inline-size; }
+/* A flex line, so a card can carry the verdict on its own subject: "connected"
+   belongs on the broker card, not in a status box on the other side of the tab. */
 .card > .title { font-size: var(--subtitle-size); font-weight: 500;
-                 margin: 4px 4px 2px; }
+                 margin: 4px 4px 2px; display: flex; gap: 8px;
+                 align-items: center; justify-content: space-between; }
 .card > .title small { font-size: var(--secondary-size); font-weight: 400;
                        color: var(--text-2); }
 .card > .subtitle { font-size: var(--secondary-size); color: var(--text-2);
                     line-height: 1.45; margin: 0 4px 10px; }
+
+/* A read-only summary, not a peer of the form it sits with: the page's own
+   ground and a hairline. `outline`, like `.popup`, so it takes no layout width.
+   Its own bottom gap, like `.banner`: it stands alone rather than inside a
+   `.cards` grid, and that grid is what spaces every other card. */
+.card.quiet { background: transparent;
+              outline: 1px solid rgba(var(--rgb-grey), .25);
+              margin-bottom: var(--spacing); }
 
 .row { display: flex; align-items: center; gap: var(--spacing);
        padding: 6px 4px; border-radius: var(--control-radius); }
@@ -287,6 +308,27 @@ label.row:hover { background: rgba(var(--rgb-grey), .12); }
    are two claims. */
 .secondary .routine { display: block; margin-top: 2px; }
 .row.off .primary { color: var(--text-2); }
+
+/* A SETTING row, where `.row` is a STATUS row. Flex sizes a text input by its
+   own value, so a URL, an org and a bucket ended up three different widths down
+   one card; a grid gives every control the same track. `.plain` drops the icon. */
+.field { display: grid; gap: var(--spacing); align-items: center;
+         padding: 6px 4px; border-radius: var(--control-radius);
+         grid-template-columns: var(--icon-size) minmax(0, 1fr) minmax(8rem, 14rem); }
+.field.plain { grid-template-columns: minmax(0, 1fr) minmax(8rem, 14rem); }
+.field > :last-child { justify-self: stretch; }
+/* Except a checkbox, which has a fixed size and would otherwise sit alone at
+   the left of a track sized for a text field. */
+.field > input[type=checkbox] { justify-self: start; }
+.field .select, .field .text, .field .text input { width: 100%; }
+/* The CARD's width, not the window's: on a phone the whole grid is one ~24rem
+   column and the hint would be squeezed into a third of it, while a `.cards.wide`
+   column on a desktop is ~39rem and has room for both. */
+@container (max-width: 26rem) {
+  .field { grid-template-columns: var(--icon-size) minmax(0, 1fr); }
+  .field.plain { grid-template-columns: minmax(0, 1fr); }
+  .field > :last-child { grid-column: 1 / -1; }
+}
 /* Digits meant to be compared down a column, and nowhere else -- an entity id in
    mono reads as a config file. `tabular-nums` holds the columns in the fallback face. */
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -314,6 +356,28 @@ button:hover { background: rgba(var(--rgb-aqua), .3); }
 button:disabled { opacity: .5; cursor: default; }
 button svg { width: 20px; height: 20px; fill: currentColor; }
 .actions { display: flex; align-items: center; gap: var(--spacing); padding: 4px; }
+
+/* Save docks, because the tick you just changed can be two screens above it.
+   `z-index: 1`, not more: Select's popup is 10 and has to stay over this. */
+.actions.dock { position: sticky; bottom: 0; z-index: 1;
+                background: var(--card); border-radius: var(--card-radius);
+                padding: 12px; margin-top: var(--spacing);
+                box-shadow: 0 -6px 20px rgba(0, 0, 0, .18); }
+.actions .dirty { font-size: var(--secondary-size); color: var(--text-2);
+                  margin-left: auto; }
+
+/* Only ever on screen when it is true, and only for the one case where a
+   connection changes what ANOTHER tab means. */
+.banner { display: flex; align-items: center; gap: var(--spacing);
+          background: rgba(var(--rgb-red), .14);
+          border-radius: var(--card-radius); padding: 12px var(--spacing);
+          margin-bottom: var(--spacing); font-size: var(--primary-size); }
+.banner svg { width: 20px; height: 20px; flex: 0 0 auto;
+              fill: rgb(var(--rgb-red)); }
+.banner .secondary { margin-top: 2px; }
+/* Orange: still collecting is the add-on working as designed, not a fault. */
+.banner.warn { background: rgba(var(--rgb-orange), .14); }
+.banner.warn svg { fill: rgb(var(--rgb-orange)); }
 
 /* A GRID, not a wrapping flex row: content-sized buttons wrapped to a ragged
    right edge. `auto-fit` on a 9.5rem floor, so four items divide evenly at 4, 2 and 1. */
@@ -373,6 +437,31 @@ p.empty.error { color: rgb(var(--rgb-red)); }
 .days input::-webkit-outer-spin-button,
 .days input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .days input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+/* Free text, borrowing the numeric field's ground and height so a card that
+   mixes the two does not look assembled from two kits. */
+.text { display: inline-flex; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.text input { font: inherit; font-size: var(--primary-size); color: var(--text);
+              width: 11rem; max-width: 100%;
+              height: var(--control-height); padding: 0 10px; border: none;
+              border-radius: var(--control-radius);
+              background: rgba(var(--rgb-grey), .12); }
+.text.wide input { width: 18rem; }
+.text input:hover { background: rgba(var(--rgb-grey), .2); }
+.text input:focus { outline: 2px solid rgba(var(--rgb-aqua), .6); }
+.text input::placeholder { color: var(--text-2); }
+
+/* The connection check's report: one line per stage, in attempt order. */
+.stages { list-style: none; margin: 0; padding: 4px; display: grid; gap: 6px; }
+.stages li { display: flex; align-items: flex-start; gap: 8px;
+             font-size: var(--secondary-size); color: var(--text-2);
+             overflow-wrap: anywhere; }
+.stages svg { width: 18px; height: 18px; flex: 0 0 auto; margin-top: 1px; }
+.stages li.pass svg { fill: rgb(var(--rgb-aqua)); }
+.stages li.fail svg { fill: rgb(var(--rgb-red)); }
+.stages li.fail { color: var(--text); }
+.hints { margin: 4px 0 0; padding: 0 4px 4px 20px; font-size: var(--secondary-size);
+         color: var(--text-2); display: grid; gap: 4px; }
 
 .popup ul { list-style: none; margin: 0; padding: 0;
             max-height: 15rem; overflow-y: auto; }

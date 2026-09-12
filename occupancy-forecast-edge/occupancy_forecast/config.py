@@ -110,6 +110,9 @@ DEFAULT_DEPARTURE_THRESHOLD = 0.5
 DEFAULT_ARRIVAL_THRESHOLD = 0.5
 DEFAULT_CROSSING_MIN_HOURS = 2
 
+# Write-only settings: stored and used, never served back. See `Settings.public`.
+SECRETS = ("influx_token", "mqtt_password")
+
 
 @dataclass
 class Settings:
@@ -134,6 +137,20 @@ class Settings:
     home_latitude: float | None = None
     home_longitude: float | None = None
     source: str = "store"                                # "store" | "influx"
+    # Where the history and the broker live. Panel-owned since 0.4.0; the
+    # matching add-on options are read once, by `runtime.import_legacy_options`.
+    influx_url: str = ""
+    influx_org: str = ""
+    influx_bucket: str = "homeassistant"
+    influx_token: str = ""                               # secret; see SECRETS
+    mqtt_host: str = ""                                  # empty -> Supervisor's broker
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_password: str = ""                              # secret; see SECRETS
+    mqtt_ssl: bool = False
+    # When the add-on options were imported, so "where did my token go" has an
+    # answer. Its presence is also what stops the import running twice.
+    migrated_from_options: str | None = None
     # A `schedule.*` entity shading the night on the chart; decoration only.
     day_schedule: str | None = None
     # How the curve is reduced to "hours until away/home". See the docstring.
@@ -145,6 +162,19 @@ class Settings:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
+
+    def public(self) -> dict:
+        """Everything `GET /api/config` may serve. Never a secret's VALUE.
+
+        That GET is deliberately open -- the panel needs it on load -- so a
+        secret here would be readable by anyone who can open the panel, not only
+        by `admin_users`. A `_set` flag says whether one is stored; a mask would
+        be written straight back as the password by the next save.
+        """
+        out = asdict(self)
+        for name in SECRETS:
+            out[f"{name}_set"] = bool(out.pop(name))
+        return out
 
     @classmethod
     def from_json(cls, text: str) -> "Settings":
@@ -335,13 +365,28 @@ def zone_name_map() -> dict[str, str]:
 # Deliberately NO host default: an unset variable must fail, not silently dial
 # somebody else's broker.
 
-def mqtt_settings() -> dict:
+def mqtt_settings(settings: "Settings | None" = None) -> dict:
+    """A broker set in the panel wins; otherwise Supervisor's own mqtt service.
+
+    The service is DISCOVERY, not configuration -- it is how an ordinary
+    Mosquitto install works with the panel's broker card left empty -- so it
+    stays in the environment rather than moving into config.json.
+    """
+    chosen = settings if settings is not None else SETTINGS
+    if chosen is not None and chosen.mqtt_host:
+        return {
+            "host": chosen.mqtt_host,
+            "port": int(chosen.mqtt_port or 1883),
+            "username": chosen.mqtt_user or None,
+            "password": chosen.mqtt_password or None,
+            "ssl": bool(chosen.mqtt_ssl),
+        }
     host = os.environ.get("MQTT_HOST")
     if not host:
         raise RuntimeError(
-            "no MQTT broker: expected MQTT_HOST from the mqtt_host add-on option "
-            "or from Supervisor's mqtt service. Set mqtt_host in the add-on "
-            "options, or install the Mosquitto add-on.")
+            "no MQTT broker: nothing in the panel's broker card and no mqtt "
+            "service from Supervisor. Fill in the broker on the add-on's "
+            "Connections tab, or install the Mosquitto add-on.")
     return {
         "host": host,
         "port": int(os.environ.get("MQTT_PORT", "1883")),

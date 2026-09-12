@@ -76,6 +76,9 @@ export interface Status {
    *  model was ever trained; the absence is how the strip tells them apart. */
   best_baseline: Record<string, string>
   mqtt: Mqtt
+  /** The Influx server's own version string, from the last connection check.
+   *  Null until one has run; discovered, never stored. */
+  influx_version: string | null
   listener: Listener
   last_train: string | null
   /** How long the last train took, end to end. Null until one has been timed --
@@ -118,7 +121,8 @@ export interface Candidates {
   has_proximity: boolean
 }
 
-/** `config.Settings`, as `asdict` renders it. */
+/** `config.Settings`, as `Settings.public()` renders it -- so a secret arrives
+ *  only as the `_set` flag beside it, never as its value. */
 export interface Settings {
   /** A `schedule.*` entity for the household's waking hours, or null.
    *  Shades the forecast chart and nothing else. */
@@ -133,6 +137,19 @@ export interface Settings {
   /** Days of published forecasts kept for the "Was it right?" chart.
    *  0 means never pruned. */
   forecast_retention_days: number
+  source: 'store' | 'influx'
+  influx_url: string
+  influx_org: string
+  /** On InfluxDB 1.x this is `database/retention-policy`, not a bucket name. */
+  influx_bucket: string
+  /** Whether a token is stored. The token itself is never served. */
+  influx_token_set: boolean
+  /** Empty means Supervisor's own broker, which is the ordinary case. */
+  mqtt_host: string
+  mqtt_port: number
+  mqtt_user: string
+  mqtt_password_set: boolean
+  mqtt_ssl: boolean
 }
 
 /** What POST /api/config accepts. A key left out is a setting left alone. */
@@ -152,6 +169,45 @@ export interface ConfigPatch {
   /** Days of published forecasts kept for the "Was it right?" chart.
    *  0 means never pruned. */
   forecast_retention_days: number
+  source: 'store' | 'influx'
+  influx_url: string
+  influx_org: string
+  influx_bucket: string
+  mqtt_host: string
+  mqtt_port: number
+  mqtt_user: string
+  mqtt_ssl: boolean
+  /** The two write-only fields, and the ONE deliberate exception to the rule
+   *  above. The form is never given the stored value, so it cannot send it
+   *  back: absent means keep it, a string sets it, null forgets it. */
+  influx_token?: string | null
+  mqtt_password?: string | null
+}
+
+/** One stage of the connection check, in the order they are attempted. */
+export interface CheckStage {
+  name: 'reachable' | 'credentials' | 'bucket' | 'rows'
+  ok: boolean
+  detail: string
+}
+
+/** What POST /api/config/check answers. Stops at the first failed stage. */
+export interface InfluxCheck {
+  ok: boolean
+  /** From `/ping`'s `X-Influxdb-Version`. Shown, never branched on. */
+  version: string | null
+  stages: CheckStage[]
+  /** What a 1.x server needs spelled out; empty on 2.x. */
+  hints: string[]
+}
+
+/** What POST /api/config/check-broker answers. One connect, so one verdict --
+ *  and it is the only place the broker's address is ever named, because that
+ *  endpoint is admin-gated and `/api/status` is not. */
+export interface BrokerCheck {
+  ok: boolean
+  host: string | null
+  detail: string
 }
 
 // --- the Overview tab -----------------------------------------------------

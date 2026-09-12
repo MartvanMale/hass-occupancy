@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { getCandidates, getSettings, getStatus, saveConfig } from './api'
-import type { Candidates, Settings, Status } from './types'
+import { checkBroker, checkInflux, getCandidates, getSettings, getStatus, saveConfig } from './api'
+import type { BrokerCheck, Candidates, InfluxCheck, Settings, Status } from './types'
 import { Icon, Shape } from './components/Icon'
-import { ConfigView } from './views/ConfigView'
+import { SaveDock } from './components/SaveDock'
+import { ConfigView, type Connection } from './views/ConfigView'
+import { ConnectionsView } from './views/ConnectionsView'
 import { DataView } from './views/DataView'
 import { OverviewView } from './views/OverviewView'
 
@@ -24,10 +26,23 @@ const VIEWS = [
   // a thing you do once.
   { id: 'overview', label: 'Overview', icon: 'house' },
   { id: 'config', label: 'Setup', icon: 'tune' },
+  // After Setup, not before it: this is the tab you open twice -- the day you
+  // install and the day something breaks -- so it must not be the landing page.
+  { id: 'connections', label: 'Connections', icon: 'mqtt-on' },
   { id: 'data', label: 'Data', icon: 'chart' },
 ] as const
 
 type View = (typeof VIEWS)[number]['id']
+
+/** Only ever on screen before the first GET answers, so the defaults just have
+ *  to be harmless -- `applySettings` replaces the whole object. */
+const EMPTY_CONNECTION: Connection = {
+  source: 'store',
+  influx_url: '', influx_org: '', influx_bucket: 'homeassistant',
+  influx_token: '', influx_token_set: false,
+  mqtt_host: '', mqtt_port: '1883', mqtt_user: '',
+  mqtt_password: '', mqtt_password_set: false, mqtt_ssl: false,
+}
 
 export function App() {
   const [view, setView] = useState<View>('overview')
@@ -48,6 +63,28 @@ export function App() {
   const [retention, setRetention] = useState<string>('30')
   const [loaded, setLoaded] = useState(false)
 
+  // The connection half, grouped: ten more `useState` pairs threaded through
+  // ConfigView's props would be the larger half of this file.
+  const [connection, setWholeConnection] = useState<Connection>(EMPTY_CONNECTION)
+  const setConnection = useCallback(
+    (patch: Partial<Connection>) => setWholeConnection((c) => ({ ...c, ...patch })),
+    [],
+  )
+  const [influxCheck, setInfluxCheck] = useState<InfluxCheck | null>(null)
+  const [influxChecking, setInfluxChecking] = useState(false)
+  const [brokerCheck, setBrokerCheck] = useState<BrokerCheck | null>(null)
+  const [brokerChecking, setBrokerChecking] = useState(false)
+  // What the server last gave us, kept so the form can tell whether it differs.
+  // One form backs Setup and Connections, so a save from either writes both --
+  // which is only honest if the button says there is something to write.
+  const [loadedSettings, setLoadedSettings] = useState<Settings | null>(null)
+
+  // Typed, so they can be mid-edit. An empty field must not reach the server as
+  // Number('') === 0, which is the one value that means something else.
+  const retentionOk = /^\d+$/.test(retention.trim())
+  const portOk = /^\d+$/.test(connection.mqtt_port.trim())
+    && Number(connection.mqtt_port) >= 1 && Number(connection.mqtt_port) <= 65535
+
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -62,8 +99,48 @@ export function App() {
     setArrival(s.arrival_threshold.toFixed(2))
     setMinHours(String(s.crossing_min_hours))
     setRetention(String(s.forecast_retention_days))
+    // The two secrets are deliberately not seeded -- the server never sends
+    // them. An empty box means "keep what is stored"; the `_set` flags say so.
+    setWholeConnection({
+      source: s.source,
+      influx_url: s.influx_url,
+      influx_org: s.influx_org,
+      influx_bucket: s.influx_bucket,
+      influx_token: '',
+      influx_token_set: s.influx_token_set,
+      mqtt_host: s.mqtt_host,
+      mqtt_port: String(s.mqtt_port),
+      mqtt_user: s.mqtt_user,
+      mqtt_password: '',
+      mqtt_password_set: s.mqtt_password_set,
+      mqtt_ssl: s.mqtt_ssl,
+    })
+    setLoadedSettings(s)
     setLoaded(true)
   }, [])
+
+  // Compared field by field against what was loaded. A typed secret always
+  // counts: the form cannot compare it with something it was never given.
+  const dirty = loadedSettings != null && (
+    connection.influx_token !== '' || connection.mqtt_password !== ''
+    || people.join() !== loadedSettings.people.join()
+    || zones.join() !== loadedSettings.zones.join()
+    || house !== (loadedSettings.house_entity ?? '')
+    || holiday !== (loadedSettings.holiday_country ?? '')
+    || daySchedule !== (loadedSettings.day_schedule ?? '')
+    || Number(departure) !== loadedSettings.departure_threshold
+    || Number(arrival) !== loadedSettings.arrival_threshold
+    || Number(minHours) !== loadedSettings.crossing_min_hours
+    || Number(retention) !== loadedSettings.forecast_retention_days
+    || connection.source !== loadedSettings.source
+    || connection.influx_url !== loadedSettings.influx_url
+    || connection.influx_org !== loadedSettings.influx_org
+    || connection.influx_bucket !== loadedSettings.influx_bucket
+    || connection.mqtt_host !== loadedSettings.mqtt_host
+    || Number(connection.mqtt_port) !== loadedSettings.mqtt_port
+    || connection.mqtt_user !== loadedSettings.mqtt_user
+    || connection.mqtt_ssl !== loadedSettings.mqtt_ssl
+  )
 
   useEffect(() => {
     let live = true
@@ -123,6 +200,18 @@ export function App() {
         arrival_threshold: Number(arrival),
         crossing_min_hours: Number(minHours),
         forecast_retention_days: Number(retention),
+        source: connection.source,
+        influx_url: connection.influx_url,
+        influx_org: connection.influx_org,
+        influx_bucket: connection.influx_bucket,
+        mqtt_host: connection.mqtt_host,
+        mqtt_port: Number(connection.mqtt_port),
+        mqtt_user: connection.mqtt_user,
+        mqtt_ssl: connection.mqtt_ssl,
+        // Sent only when typed into: the form was never given the stored value,
+        // so sending an empty box would blank the password it cannot see.
+        ...(connection.influx_token ? { influx_token: connection.influx_token } : {}),
+        ...(connection.mqtt_password ? { mqtt_password: connection.mqtt_password } : {}),
       })
       setSaved(true)
       if (savedTimer.current) clearTimeout(savedTimer.current)
@@ -135,6 +224,42 @@ export function App() {
       setError((err as Error).message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function onCheckInflux() {
+    setInfluxChecking(true)
+    setInfluxCheck(null)
+    try {
+      setInfluxCheck(await checkInflux({
+        influx_url: connection.influx_url,
+        influx_org: connection.influx_org,
+        influx_bucket: connection.influx_bucket,
+        // Blank means "the token already stored", so a saved one is testable.
+        influx_token: connection.influx_token,
+      }))
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setInfluxChecking(false)
+    }
+  }
+
+  async function onCheckBroker() {
+    setBrokerChecking(true)
+    setBrokerCheck(null)
+    try {
+      setBrokerCheck(await checkBroker({
+        mqtt_host: connection.mqtt_host,
+        mqtt_port: Number(connection.mqtt_port) || 1883,
+        mqtt_user: connection.mqtt_user,
+        mqtt_ssl: connection.mqtt_ssl,
+        mqtt_password: connection.mqtt_password,
+      }))
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBrokerChecking(false)
     }
   }
 
@@ -181,34 +306,56 @@ export function App() {
       </header>
 
       <div role="tabpanel" id={`panel-${view}`} aria-labelledby={`tab-${view}`}>
-        {view === 'config' ? (
-          <ConfigView
-            status={status}
-            candidates={candidates}
-            people={people}
-            zones={zones}
-            house={house}
-            holiday={holiday}
-            daySchedule={daySchedule}
-            setDaySchedule={setDaySchedule}
-            departure={departure}
-            arrival={arrival}
-            minHours={minHours}
-            retention={retention}
-            loaded={loaded}
-            saving={saving}
-            saved={saved}
-            error={error}
-            onSubmit={onSubmit}
-            togglePerson={togglePerson}
-            toggleZone={toggleZone}
-            setHouse={setHouse}
-            setHoliday={setHoliday}
-            setDeparture={setDeparture}
-            setArrival={setArrival}
-            setMinHours={setMinHours}
-            setRetention={setRetention}
-          />
+        {view === 'config' || view === 'connections' ? (
+          /* ONE form over both tabs, so there is one Save and one dirty state:
+             two forms would each quietly write the other tab's fields. */
+          <form onSubmit={onSubmit}>
+            {view === 'config' ? (
+              <ConfigView
+                status={status}
+                candidates={candidates}
+                people={people}
+                zones={zones}
+                house={house}
+                holiday={holiday}
+                daySchedule={daySchedule}
+                setDaySchedule={setDaySchedule}
+                departure={departure}
+                arrival={arrival}
+                minHours={minHours}
+                retention={retention}
+                togglePerson={togglePerson}
+                toggleZone={toggleZone}
+                setHouse={setHouse}
+                setHoliday={setHoliday}
+                setDeparture={setDeparture}
+                setArrival={setArrival}
+                setMinHours={setMinHours}
+                setRetention={setRetention}
+              />
+            ) : (
+              <ConnectionsView
+                status={status}
+                connection={connection}
+                setConnection={setConnection}
+                influxCheck={influxCheck}
+                influxChecking={influxChecking}
+                onCheckInflux={onCheckInflux}
+                brokerCheck={brokerCheck}
+                brokerChecking={brokerChecking}
+                onCheckBroker={onCheckBroker}
+              />
+            )}
+            <SaveDock
+              loaded={loaded}
+              saving={saving}
+              saved={saved}
+              dirty={dirty}
+              complaint={error ?? (retentionOk
+                ? portOk ? null : 'The broker port must be a whole number between 1 and 65535.'
+                : 'Days to keep must be a whole number of days, 0 or more.')}
+            />
+          </form>
         ) : view === 'data' ? (
           <DataView status={status} />
         ) : (

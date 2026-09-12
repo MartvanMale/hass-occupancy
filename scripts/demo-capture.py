@@ -13,7 +13,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-TABS = [("overview", "Overview"), ("config", "Setup"), ("data", "Data")]
+TABS = [("overview", "Overview"), ("config", "Setup"),
+        ("connections", "Connections"), ("data", "Data")]
 
 # Wide enough for the panel's two-column layout, and a phone, because Ingress is
 # opened from the Home Assistant app at least as often as from a desktop.
