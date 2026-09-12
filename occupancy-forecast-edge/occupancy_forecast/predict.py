@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 import paho.mqtt.client as mqtt
 
-from . import config, eta as eta_mod, evaluate, features, log, nowcast
-from . import outing as outing_mod, train
+from . import config, departure as departure_mod, eta as eta_mod, evaluate
+from . import features, log, nowcast, outing as outing_mod, train
 
 _log = log.get(__name__)
 
@@ -226,32 +226,49 @@ def _model_curve(models: dict[int, dict], row: pd.Series) -> dict[int, float]:
     return out
 
 
+# How far a measured routine hour may move the model's own crossing. Beyond it
+# the two are naming DIFFERENT events -- a short errand against a long evening
+# absence -- and the card would contradict the chart beside it.
+ROUTINE_MAX_SHIFT_H = 3
+
+
 def _next_change(routine: dict | None, subject: str, observed_at: pd.Timestamp,
                  departure_h: int | None, arrival_h: int | None) -> dict:
-    """The model decides WHETHER a change is coming, the routine decides WHEN,
-    read for the day the change FALLS ON rather than today. Falls back to the
-    crossing's hour, and `at_from` records which was used.
+    """The model decides WHETHER a change is coming and which hour; the routine
+    may SHARPEN that hour but never relocate it, read for the day the change
+    FALLS ON rather than today. `at_from` records which was used, and
+    `routine_day` carries the evidence behind the routine's offer.
     """
     direction = ("leaving" if departure_h is not None
                  else "arriving" if arrival_h is not None else None)
     if direction is None:
-        return {"direction": None, "in_hours": None, "at": None, "at_from": None}
+        return {"direction": None, "in_hours": None, "at": None, "at_from": None,
+                "routine_at": None, "routine_day": None}
 
     hours = int(departure_h if direction == "leaving" else arrival_h)
     when = observed_at + pd.Timedelta(hours=hours)
-    day = outing_mod.today(routine or {}, subject, when) or {}
-    hour = (day.get("departure_hour") if direction == "leaving"
-            else day.get("return_hour"))
-    if hour is None:
-        return {"direction": direction, "in_hours": hours,
-                "at": when.isoformat(), "at_from": "crossing"}
-    return {"direction": direction, "in_hours": hours,
-            "at": outing_mod.at_hour(when, hour), "at_from": "routine"}
+    day = departure_mod.today(routine or {}, subject, when)
+    answer = {"direction": direction, "in_hours": hours, "at": when.isoformat(),
+              "at_from": "crossing", "routine_at": None, "routine_day": day}
+    if not day:
+        return answer
+
+    key = "departure" if direction == "leaving" else "return"
+    answer["routine_at"] = routine_at = outing_mod.at_hour(when, day[f"{key}_hour"])
+    # `overall` is a median off the OTHER weekdays -- worth showing, never
+    # enough to overrule a horizon this model actually scored.
+    if routine_at is None or day[f"{key}_from"] != "weekday":
+        return answer
+    moment = pd.Timestamp(routine_at)
+    if abs(moment - when) > pd.Timedelta(hours=ROUTINE_MAX_SHIFT_H):
+        return answer
+    return {**answer, "at": moment.isoformat(), "at_from": "routine"}
 
 
 def predict_rows(models: dict[int, dict], rows: pd.DataFrame,
                  etas: dict[str, float | None] | None = None,
-                 out_routine: dict | None = None) -> list[dict]:
+                 out_routine: dict | None = None,
+                 departure_routine: dict | None = None) -> list[dict]:
     """One record per subject; `curve` is SPARSE, its keys what was served.
     The record exists even when `curve` is empty: `current` and the ETA are
     observations, and the entities must exist from the first minute.
@@ -300,7 +317,7 @@ def predict_rows(models: dict[int, dict], rows: pd.DataFrame,
             "model_version": train.MODEL_VERSION,
         }
         record["next_change"] = _next_change(
-            out_routine, row["subject"], pd.Timestamp(row["time"]),
+            departure_routine, row["subject"], pd.Timestamp(row["time"]),
             record["next_departure_h"], record["next_arrival_h"])
         results.append(record)
     return results
@@ -579,13 +596,14 @@ def publish(results: list[dict], client: mqtt.Client) -> None:
 
 def run_cycle(models: dict[int, dict], client: mqtt.Client | None, source,
               eta_models: dict[str, dict] | None = None,
-              out_routine: dict | None = None) -> list[dict]:
+              out_routine: dict | None = None,
+              departure_routine: dict | None = None) -> list[dict]:
     """The single serving path, for the CLI and the HTTP server. With no client
     the forecast is still computed, so a broker outage is not a modelling fault.
     """
     rows = current_rows(source)
     results = predict_rows(models, rows, arrival_etas(eta_models or {}, source),
-                           out_routine or {})
+                           out_routine or {}, departure_routine or {})
     if client is not None:
         publish(results, client)
     return results

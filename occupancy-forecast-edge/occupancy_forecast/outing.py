@@ -286,15 +286,6 @@ ROUTINE_NAME = "out_routine.json"
 MIN_ROUTINE_DAYS = 45
 
 
-def _summarise(values: pd.Series) -> tuple[float | None, float | None, int]:
-    """Median, spread and count -- the median never travels without the other two."""
-    clean = values.dropna()
-    if clean.empty:
-        return None, None, 0
-    sd = float(clean.std()) if len(clean) > 1 else None
-    return float(clean.median()), (None if sd is None or np.isnan(sd) else sd), len(clean)
-
-
 def fit_routine(days: pd.DataFrame) -> dict:
     """One table of numbers per person: how often, and at what hours. Fitted
     over all history rather than causally: causality is a property of the
@@ -315,8 +306,9 @@ def fit_routine(days: pd.DataFrame) -> dict:
         by_weekday: dict[str, dict] = {}
         for dow, group in usable.groupby("dow"):
             here = group[group["out"] > 0]
-            depart, depart_sd, n_depart = _summarise(here["departure_hour"])
-            back, back_sd, _ = _summarise(here.get("out_return_hour", pd.Series(dtype=float)))
+            depart, depart_sd, n_depart = departure.summarise(here["departure_hour"])
+            back, back_sd, _ = departure.summarise(
+                here.get("out_return_hour", pd.Series(dtype=float)))
             by_weekday[str(int(dow))] = {
                 "n": int(len(group)), "n_out": int(len(here)),
                 "rate": float(group["out"].mean()),
@@ -325,8 +317,9 @@ def fit_routine(days: pd.DataFrame) -> dict:
                 "return_hour": back, "return_sd": back_sd,
             }
 
-        depart, depart_sd, _ = _summarise(went["departure_hour"])
-        back, back_sd, _ = _summarise(went.get("out_return_hour", pd.Series(dtype=float)))
+        depart, depart_sd, _ = departure.summarise(went["departure_hour"])
+        back, back_sd, _ = departure.summarise(
+            went.get("out_return_hour", pd.Series(dtype=float)))
         out[subject] = {
             "subject": subject,
             "fitted_at": fitted_at,

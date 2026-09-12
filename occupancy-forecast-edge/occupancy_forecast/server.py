@@ -94,7 +94,7 @@ _state: dict = {
     # What was published, held here rather than on the source so an Influx
     # install has one too.
     "forecast_log": None,
-    "models": {}, "eta_models": {}, "out_routine": {},
+    "models": {}, "eta_models": {}, "out_routine": {}, "departure_routine": {},
     "loaded_at": None, "last_collect": None, "last_predict": None,
     "last_train": None, "last_train_seconds": None, "training_started_at": None,
     # The full text, and what `/api/status` may show of it -- see log.SEE_THE_LOG.
@@ -135,6 +135,7 @@ def _load_models() -> None:
     _state["models"] = predict_mod.load_models(config.MODELS_DIR)
     _state["eta_models"] = eta_mod.load_models(config.MODELS_DIR)
     _state["out_routine"] = outing_mod.load_routine(config.MODELS_DIR)
+    _state["departure_routine"] = departure.load_routine(config.MODELS_DIR)
     _state["loaded_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
@@ -213,7 +214,7 @@ def _record_forecasts(results: list[dict]) -> None:
 def do_predict() -> list[dict]:
     results = predict_mod.run_cycle(
         _state["models"], _broker.client(), _state["source"], _state["eta_models"],
-        _state["out_routine"])
+        _state["out_routine"], _state["departure_routine"])
     _state["forecast"] = results
     _state["last_predict"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     _record_forecasts(results)
@@ -276,6 +277,15 @@ def do_train() -> dict:
         _log.info("out routine fitted for %d person(s)", len(routine))
     except Exception as err:  # noqa: BLE001
         _log.error("out routine failed: %s", err)
+    # Guarded SEPARATELY from the one above, which reads the configured zones:
+    # this one reads none, and it is what times the next-change row.
+    try:
+        with phases("departure routine"):
+            leaving = departure.fit_routine(departure.label_days(table))
+            departure.save_routine(leaving, config.MODELS_DIR)
+        _log.info("departure routine fitted for %d subject(s)", len(leaving))
+    except Exception as err:  # noqa: BLE001
+        _log.error("departure routine failed: %s", err)
     _load_models()
     elapsed = time.monotonic() - started
     train_mod.stamp_duration(elapsed, config.MODELS_DIR)

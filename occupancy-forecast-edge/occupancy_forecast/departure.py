@@ -7,6 +7,7 @@ recorder outage, so such a day is dropped, never labelled "did not leave".
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -80,9 +81,9 @@ def _longest_nan_run(values: np.ndarray) -> int:
 
 
 def label_days(table: pd.DataFrame) -> pd.DataFrame:
-    """`(subject, date) -> candidate, left_today, departure_hour`. A day is a
-    CANDIDATE only where the question has an answer; one that fails any test is
-    dropped, never recorded as "did not leave".
+    """`(subject, date) -> candidate, left_today, departure_hour, return_hour`.
+    A day is a CANDIDATE only where the question has an answer; one that fails
+    any test is dropped, never recorded as "did not leave".
     """
     origin, cap = origin_slot(), last_departure_slot()
     threshold = evaluate.HOME_THRESHOLD
@@ -110,6 +111,20 @@ def label_days(table: pd.DataFrame) -> pd.DataFrame:
                     departure = d
                     break
 
+        # The LAST return of the day, not the first: back for the evening is
+        # what `outing.label_out_days` already means by a return hour, and two
+        # senses of the word on one dashboard is worse than either. A return
+        # after midnight yields None rather than wrapping to 00:30.
+        arrival = None
+        if departure is not None:
+            for r in range(config.SLOTS_PER_DAY - MIN_AWAY_SLOTS, departure, -1):
+                window = values[r:r + MIN_AWAY_SLOTS]
+                if np.isnan(values[r - 1]) or np.isnan(window).any():
+                    continue
+                if values[r - 1] < threshold and (window >= threshold).all():
+                    arrival = r
+                    break
+
         rows.append({
             "subject": subject,
             "date": pd.Timestamp(date),
@@ -120,6 +135,9 @@ def label_days(table: pd.DataFrame) -> pd.DataFrame:
             "departure_slot": departure,
             "departure_hour": (None if departure is None
                                else departure / features.slots_per_hour()),
+            "return_slot": arrival,
+            "return_hour": (None if arrival is None
+                            else arrival / features.slots_per_hour()),
         })
     return pd.DataFrame(rows).sort_values(["subject", "date"]).reset_index(drop=True)
 
@@ -228,10 +246,157 @@ def feature_frame(days: pd.DataFrame) -> pd.DataFrame:
     return days
 
 
+# --- the routine, which is what is actually served -------------------------
+# `outing.py` has a twin fitted on "reached a configured zone", a far rarer day.
+# On a weekday it has too few hours for it borrows the overall median, which
+# serves a working-day hour on a weekend. This one is fitted on `left_today`.
+
+ROUTINE_NAME = "departure_routine.json"
+
+# History before a routine is published at all. Below this the per-weekday
+# medians are single observations wearing a median's clothes.
+MIN_ROUTINE_DAYS = 45
+
+
+def summarise(values: pd.Series) -> tuple[float | None, float | None, int]:
+    """Median, spread and count -- the median never travels without the other two."""
+    clean = values.dropna()
+    if clean.empty:
+        return None, None, 0
+    sd = float(clean.std()) if len(clean) > 1 else None
+    return float(clean.median()), (None if sd is None or np.isnan(sd) else sd), len(clean)
+
+
+def fit_routine(days: pd.DataFrame) -> dict:
+    """One table of numbers per person: how often they leave, and at what hours.
+    Fitted over all history rather than causally -- causality is a property of
+    the EVALUATION, and this is the artifact being served forward.
+
+    The house is INCLUDED, unlike `outing.fit_routine`: a house goes to no
+    office, but it does empty and fill, and that is the row the panel draws.
+    """
+    frame = feature_frame(days)
+    fitted_at = pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds")
+    out: dict[str, dict] = {}
+    for subject, part in frame.groupby("subject", sort=False):
+        usable = part[part["candidate"]]
+        if len(usable) < MIN_ROUTINE_DAYS:
+            continue
+        weight, base = _fit_rate_shrink(usable)
+        left = usable[usable["left_today"]]
+
+        by_weekday: dict[str, dict] = {}
+        for dow, group in usable.groupby("dow"):
+            here = group[group["left_today"]]
+            depart, depart_sd, n_depart = summarise(here["departure_hour"])
+            back, back_sd, n_back = summarise(here["return_hour"])
+            by_weekday[str(int(dow))] = {
+                "n": int(len(group)), "n_left": int(len(here)),
+                "rate": float(group["left_today"].mean()),
+                "departure_hour": depart, "departure_sd": depart_sd,
+                "departure_n": n_depart,
+                "return_hour": back, "return_sd": back_sd, "return_n": n_back,
+            }
+
+        depart, depart_sd, _ = summarise(left["departure_hour"])
+        back, back_sd, _ = summarise(left["return_hour"])
+        out[subject] = {
+            "subject": subject,
+            "fitted_at": fitted_at,
+            "n_days": int(len(usable)),
+            "n_left": int(len(left)),
+            "base_rate": float(usable["left_today"].mean()),
+            "shrink_weight": weight,
+            "shrink_base": base,
+            "by_weekday": by_weekday,
+            "overall": {"departure_hour": depart, "departure_sd": depart_sd,
+                        "return_hour": back, "return_sd": back_sd},
+        }
+    return out
+
+
+def save_routine(routine: dict, models_dir=None):
+    from pathlib import Path
+
+    models_dir = Path(models_dir or config.MODELS_DIR)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    path = models_dir / ROUTINE_NAME
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(routine, indent=2))
+    tmp.replace(path)
+    return path
+
+
+def load_routine(models_dir=None) -> dict:
+    """JSON rather than a pickle: there is no estimator in it, and it must be
+    checkable with `cat`.
+    """
+    from pathlib import Path
+
+    path = Path(models_dir or config.MODELS_DIR) / ROUTINE_NAME
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (ValueError, OSError):
+        return {}
+
+
+def today(routine: dict, subject: str, at: pd.Timestamp | None = None) -> dict | None:
+    """What to expect of this person on `at`'s local date: how likely they are to
+    leave, and at what hours. Every number comes with the count behind it and the
+    spread around it; a median off four Saturdays and one off thirty differ.
+    """
+    entry = routine.get(subject)
+    if not entry:
+        return None
+    at = at if at is not None else pd.Timestamp.now(tz="UTC")
+    local = at.tz_convert(config.tzinfo())
+    weekday = (entry.get("by_weekday") or {}).get(str(int(local.dayofweek))) or {}
+    overall = entry.get("overall") or {}
+
+    thin = weekday.get("n", 0) < MIN_WEEKDAY_SAMPLES
+    rate = entry["shrink_base"] if thin else weekday.get("rate", entry["shrink_base"])
+    probability = float(baseline.shrink(np.array([rate], dtype=float),
+                                        entry["shrink_weight"],
+                                        entry["shrink_base"])[0])
+
+    def hours(key: str) -> tuple[float | None, float | None, str]:
+        # A weekday seen often enough with NO departures is an ANSWER, not a
+        # gap; the overall median there would be an hour nobody earned.
+        if (weekday.get("n", 0) >= MIN_WEEKDAY_SAMPLES
+                and weekday.get("n_left", 0) == 0):
+            return None, None, "never"
+        # Each hour gated on ITS OWN count: a weekday with departures but no
+        # returns before midnight has one answer and not the other.
+        if (weekday.get(f"{key}_n", 0) >= MIN_WEEKDAY_SAMPLES
+                and weekday.get(f"{key}_hour") is not None):
+            return weekday[f"{key}_hour"], weekday.get(f"{key}_sd"), "weekday"
+        return overall.get(f"{key}_hour"), overall.get(f"{key}_sd"), "overall"
+
+    departure_h, departure_sd, departure_from = hours("departure")
+    return_h, return_sd, return_from = hours("return")
+    return {
+        "probability": round(probability, 4),
+        "weekday": int(local.dayofweek),
+        "n_weekday": int(weekday.get("n", 0)),
+        "n_left_weekday": int(weekday.get("n_left", 0)),
+        "departure_hour": departure_h,
+        "departure_sd": departure_sd,
+        "departure_from": departure_from,
+        "return_hour": return_h,
+        "return_sd": return_sd,
+        "return_from": return_from,
+        "fitted_at": entry.get("fitted_at"),
+    }
+
+
 # ---------------------------------------------------------------------------
-# Everything below is the model half, deliberately NOT wired in: it did not
-# clear the ship bar, and the day-level gate fires on random labels at these
-# sample sizes. `outing.py`'s plain arithmetic ships instead.
+# Everything below is the model half, deliberately NOT wired in: benched twice
+# against `fit_routine` above and beaten both times. A bimodal weekday puts its
+# median in the trough between the two peaks, so a POINT ESTIMATE is the wrong
+# object however much history it gets -- a distribution over the slot grid is
+# the open idea, not a better estimator.
 
 # Below this a fit has fewer same-weekdays than `MIN_WEEKDAY_SAMPLES` needs.
 MIN_TRAIN_DAYS = 60

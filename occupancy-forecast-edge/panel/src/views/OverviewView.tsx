@@ -20,9 +20,14 @@ import { percent, pretty, relativeTime } from '../format'
 
 const CURVE_ACCENT = ['blue', 'orange', 'aqua', 'red'] as const
 
+function clock(at: Date): string {
+  return at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+
 /**
- * The one sentence a row shows. The model decides WHETHER and the routine decides
- * WHEN -- see `predict._next_change`. The date is named when it is not today.
+ * The one sentence a row shows. The model decides WHETHER and which hour; the
+ * routine may only sharpen it -- see `predict._next_change`. The date is named
+ * when it is not today.
  */
 function changeSentence(change: NextChange): string {
   // Not "no change expected", a claim about the house: the curve is sparse, so
@@ -33,12 +38,33 @@ function changeSentence(change: NextChange): string {
   const at = new Date(change.at)
   if (Number.isNaN(at.getTime())) return 'No arrival or departure time is predicted.'
 
-  const clock = at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   const sameDay = at.toDateString() === new Date().toDateString()
-  const when = sameDay ? clock : `${clock} ${dayWord(at)}`
+  const when = sameDay ? clock(at) : `${clock(at)} ${dayWord(at)}`
   return change.direction === 'leaving'
     ? `Expected to leave around ${when}.`
     : `Expected back around ${when}.`
+}
+
+/**
+ * How well-supported that time is. Without it the card states a rare day as
+ * confidently as a routine one, which is what made an hour the chart beside it
+ * read as "home" look like a forecast.
+ */
+function supportClause(change: NextChange): string {
+  const day = change.routine_day
+  if (day === null || change.at === null) return ''
+  const at = new Date(change.at)
+  if (Number.isNaN(at.getTime()) || day.n_weekday < 3) return ''
+
+  const weekday = at.toLocaleDateString(undefined, { weekday: 'long' })
+  const support = `Left on ${day.n_left_weekday} of ${day.n_weekday} ${weekday}s`
+  // The spread only where it describes the time actually shown: on a refused
+  // routine hour it is the spread around a moment the row does not name.
+  const sd = change.direction === 'leaving' ? day.departure_sd : day.return_sd
+  if (change.at_from !== 'routine' || sd === null || !(sd > 0)) return `${support}.`
+  const ms = sd * 3_600_000
+  return `${support}, usually ${clock(new Date(at.getTime() - ms))}`
+    + `–${clock(new Date(at.getTime() + ms))}.`
 }
 
 /** "tomorrow", or a weekday name past that. */
@@ -100,16 +126,19 @@ function ChangeRows({ subjects, house }: { subjects: SubjectForecast[]; house: s
     <>
       {subjects.map((s) => {
         const change: NextChange = s.next_change
-          ?? { direction: null, in_hours: null, at: null, at_from: null }
+          ?? { direction: null, in_hours: null, at: null, at_from: null,
+               routine_at: null, routine_day: null }
         const leaving = change.direction === 'leaving'
         const arriving = change.direction === 'arriving'
         const name = s.subject === house ? 'The house' : pretty(s.subject)
         // `eta_minutes` is null unless they are demonstrably travelling, so the
         // sentence needs no "if already on the way" hedge.
-        const secondary = changeSentence(change) +
-          (arriving && s.eta_minutes !== null
-            ? ` On the way, ${Math.round(s.eta_minutes)} min out.`
-            : '')
+        const secondary = [
+          changeSentence(change),
+          supportClause(change),
+          arriving && s.eta_minutes !== null
+            ? `On the way, ${Math.round(s.eta_minutes)} min out.` : '',
+        ].filter(Boolean).join(' ')
         return (
           <Row
             key={s.subject}

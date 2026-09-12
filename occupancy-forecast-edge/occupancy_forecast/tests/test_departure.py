@@ -125,6 +125,29 @@ def test_the_earliest_sustained_absence_is_the_departure():
     assert row["departure_hour"] == 7.5
 
 
+def test_the_latest_return_is_the_return():
+    """The mirror of the rule above, and deliberately the OTHER end: the walk at
+    07:30 and the dinner at 17:00 bracket the day, and "back for the evening" is
+    the one an automation waits on."""
+    row = _one(_table(_away("07:30", "08:00", "17:00", "17:30")))
+    assert row["departure_hour"] == 7.5
+    assert row["return_hour"] == 18.0, "the first slot home after the LAST absence"
+
+
+def test_a_return_after_midnight_yields_no_hour_rather_than_wrapping():
+    """Out from 21:30 and not back before the day ends. A wrapped 00:30 would
+    read as coming home before leaving."""
+    row = _one(_table(_away("21:30", "22:00", "22:30", "23:00", "23:30")))
+    assert row["left_today"] and row["departure_hour"] == 21.5
+    assert pd.isna(row["return_hour"])
+
+
+def test_a_day_she_never_left_has_no_return_either():
+    row = _one(_table())
+    assert not row["left_today"]
+    assert pd.isna(row["return_hour"])
+
+
 def test_the_labels_do_not_depend_on_row_order():
     """A guard against an unsorted groupby quietly deciding the answer."""
     table = _table(_away("07:30", "08:00"))
@@ -188,3 +211,99 @@ def test_a_subject_never_mirrors_itself_in_the_partner_column():
     own = f"other_{SUBJECT}_wday_hour"
     if own in days.columns:
         assert days[own].isna().all()
+
+
+# --- the routine, which is what times the next-change row ------------------
+
+MONDAY = "2026-03-02"
+
+
+def _weeks(by_weekday: dict[int, tuple[float, float] | None], weeks: int = 9,
+           skip: dict[int, set[int]] | None = None) -> pd.DataFrame:
+    """Consecutive days from a Monday; `by_weekday[dow]` is (leave, return), or
+    None for a day spent in. `skip[dow]` names week indices to stay in on."""
+    skip = skip or {}
+    begin = dt.date.fromisoformat(MONDAY)
+    frames = []
+    for offset in range(weeks * 7):
+        date = begin + dt.timedelta(days=offset)
+        hours = by_weekday.get(date.weekday())
+        spec = {}
+        if hours is not None and offset // 7 not in skip.get(date.weekday(), set()):
+            leave, back = hours
+            for slot in range(int(leave * 2), int(back * 2)):
+                spec[f"{slot // 2:02d}:{(slot % 2) * 30:02d}"] = 0.0
+        frames.append(_table(spec, date=date.isoformat()))
+    return pd.concat(frames, ignore_index=True)
+
+
+def _routine(**kwargs) -> dict:
+    return departure.fit_routine(departure.label_days(_weeks(**kwargs)))
+
+
+def test_the_routine_measures_each_weekday_on_its_own_days():
+    """THE INCIDENT, from the fitting end. A weekend hour is a weekend fact; a
+    routine reporting the working-day hour for it named an hour that weekday
+    never earned."""
+    routine = _routine(by_weekday={0: (8.0, 17.0), 1: (8.0, 17.0), 2: (8.0, 17.0),
+                                   3: (8.0, 17.0), 4: (8.0, 17.0),
+                                   5: (9.5, 12.0), 6: None})
+    saturday = routine[SUBJECT]["by_weekday"]["5"]
+    assert (saturday["n"], saturday["n_left"]) == (9, 9)
+    assert saturday["departure_hour"] == 9.5 and saturday["departure_n"] == 9
+    assert saturday["return_hour"] == 12.0
+    # The overall median is dominated by the five working days, which is exactly
+    # why a weekday is never allowed to borrow it -- see `today` below.
+    assert routine[SUBJECT]["overall"]["departure_hour"] == 8.0
+
+
+def test_a_weekday_she_never_leaves_on_publishes_no_hour_at_all():
+    """An ANSWER, not a gap: the overall median here would be an hour nobody
+    earned, which an automation cannot tell from a measured one."""
+    routine = _routine(by_weekday={0: (8.0, 17.0), 6: None})
+    sunday = departure.today(routine, SUBJECT,
+                             pd.Timestamp("2026-03-08T06:00Z"))
+    assert sunday["weekday"] == 6
+    assert sunday["departure_from"] == "never"
+    assert sunday["departure_hour"] is None
+
+
+def test_a_weekday_with_too_few_departures_is_labelled_overall_not_measured():
+    """A weekday with a couple of departures against nine observed. The hour
+    still has to come from somewhere, so it comes from the overall median AND
+    says so -- the label is what stops `_next_change` acting on it."""
+    routine = _routine(by_weekday={0: (8.0, 17.0), 5: (9.5, 12.0)},
+                       skip={5: {0, 1, 2, 3, 4, 5, 6}})       # 2 Saturdays out of 9
+    saturday = departure.today(routine, SUBJECT,
+                               pd.Timestamp("2026-03-07T06:00Z"))
+    assert saturday["n_weekday"] == 9 and saturday["n_left_weekday"] == 2
+    assert saturday["departure_from"] == "overall"
+    assert saturday["departure_hour"] == 8.0, "the working-day median, flagged as such"
+
+
+def test_the_house_gets_a_routine_unlike_the_out_routine():
+    """A house goes to no office, but it does empty and fill -- and the
+    next-change row draws it."""
+    table = pd.concat([_weeks(by_weekday={0: (8.0, 17.0), 5: (9.5, 12.0)}),
+                       _weeks(by_weekday={0: (8.0, 17.0), 5: (9.5, 12.0)})
+                       .assign(subject=config.HOUSE_SLUG)], ignore_index=True)
+    routine = departure.fit_routine(departure.label_days(table))
+    assert config.HOUSE_SLUG in routine
+
+
+def test_too_little_history_publishes_no_routine_at_all():
+    """Below the floor the per-weekday medians are single observations wearing a
+    median's clothes."""
+    assert _routine(by_weekday={0: (8.0, 17.0)}, weeks=4) == {}
+
+
+def test_a_routine_survives_a_round_trip_and_a_corrupt_file(tmp_path):
+    routine = _routine(by_weekday={0: (8.0, 17.0), 5: (9.5, 12.0)})
+    departure.save_routine(routine, tmp_path)
+    assert departure.load_routine(tmp_path)[SUBJECT]["n_left"] == \
+        routine[SUBJECT]["n_left"]
+
+    (tmp_path / departure.ROUTINE_NAME).write_text("{not json")
+    assert departure.load_routine(tmp_path) == {}, \
+        "a truncated write must not take the add-on down"
+    assert departure.load_routine(tmp_path / "nowhere") == {}

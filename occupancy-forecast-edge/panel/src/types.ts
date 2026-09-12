@@ -181,15 +181,44 @@ export interface SubjectForecast {
   next_change: NextChange | null
 }
 
-/** The model's verdict that a change is coming, timed by that person's routine.
- *  `at_from` says which quality of answer it is: `routine` is a measured hour,
- *  `crossing` is the model's own rounded one. */
+/** The model's verdict that a change is coming, optionally sharpened by that
+ *  person's routine. `at_from` says which quality of answer it is: `routine` is
+ *  a measured hour for that weekday, `crossing` is the model's own rounded one.
+ *  The routine may only move the crossing a few hours -- further than that and
+ *  the two are naming different events, so the crossing is kept. */
 export interface NextChange {
   direction: 'leaving' | 'arriving' | null
   /** The model's own crossing, in whole hours ahead. Kept for reference. */
   in_hours: number | null
   at: string | null
   at_from: 'routine' | 'crossing' | null
+  /** What the routine offered, whether or not it was used -- null when that day
+   *  had no hour to give. Shown so a refusal is visible rather than silent. */
+  routine_at: string | null
+  /** That person's routine for the day the change FALLS ON, not for today. Null
+   *  for the house before it has enough history, and on a fresh install. */
+  routine_day: DepartureRoutine | null
+}
+
+/** What this person's own history says about a given weekday -- NOT a model
+ *  forecast. Fitted on "left the house at all", so a short errand counts; its
+ *  twin `OutRoutine` counts only days that reached a configured zone. */
+export interface DepartureRoutine {
+  probability: number
+  weekday: number
+  n_weekday: number
+  n_left_weekday: number
+  departure_hour: number | null
+  departure_sd: number | null
+  /** 'weekday' is measured on that weekday and is the only one allowed to move
+   *  the crossing. 'overall' is a median off the OTHER weekdays -- worth
+   *  showing, never worth acting on. 'never' means that weekday has been seen
+   *  often enough with no departures at all, and the hours are null. */
+  departure_from: 'weekday' | 'overall' | 'never'
+  return_hour: number | null
+  return_sd: number | null
+  return_from: 'weekday' | 'overall' | 'never'
+  fitted_at: string | null
 }
 
 /** What this person's own history says about today -- NOT a model forecast.
