@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.3.0 - 2026-09-12
+
 ### Added
 
 - **How long the forecast record is kept is now a setting**, on the Setup tab

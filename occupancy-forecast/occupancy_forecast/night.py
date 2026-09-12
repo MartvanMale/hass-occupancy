@@ -1,18 +1,8 @@
 """When the household is asleep, for shading the forecast chart.
 
-**Decoration, and deliberately isolated.** Nothing here touches a feature, a
-model or a published entity: it exists so the 48-hour chart can grey out the
-hours nobody is expected to be awake, which is what makes a dip at 03:00 read
-differently from a dip at 15:00. If it fails, or if no schedule is configured,
-the chart simply has no bands.
-
-**Why the pattern is recovered from history rather than read off the entity.**
-A `schedule.*` entity publishes its current state and its next event, not its
-week. The chart needs the next 48 HOURS, which is future state, and Home
-Assistant will not tell anyone what a schedule is going to do. A weekly
-schedule does repeat, though, so a week of its own history is the schedule --
-sampled on a grid and projected forward. A household that changes its schedule
-sees the chart follow within a week, which for shading is soon enough.
+Decoration: nothing here touches a feature, a model or a published entity, and
+on failure the chart has no bands. A `schedule.*` entity publishes its current
+state, never its week, so the pattern is recovered from a week of its history.
 """
 from __future__ import annotations
 
@@ -44,9 +34,7 @@ def _sample(changes: list[dict], at: dt.datetime) -> str | None:
 
 def weekly_pattern(changes: list[dict], now: dt.datetime) -> dict[tuple[int, int], bool]:
     """`(weekday, slot) -> is the household awake`, from a week of history.
-
-    Slots are `STEP_MIN` minutes from local midnight. Keyed on local time
-    because a schedule is a local thing and the rest of this package is UTC.
+    Slots count `STEP_MIN` from LOCAL midnight: a schedule is a local thing.
     """
     pattern: dict[tuple[int, int], bool] = {}
     if not changes:
@@ -66,15 +54,9 @@ def weekly_pattern(changes: list[dict], now: dt.datetime) -> dict[tuple[int, int
 
 def bands(pattern: dict[tuple[int, int], bool], now: dt.datetime,
           hours: int) -> list[dict]:
-    """Contiguous asleep runs over the next `hours`, as offsets FROM NOW.
-
-    Hours rather than timestamps because that is the chart's x-axis: it plots
-    horizon, not clock time, so a band has to be expressed the same way or it
-    would land in the wrong place the moment the two disagree.
-
-    A slot the pattern never saw is treated as awake -- no shading. Inventing a
-    night from missing history would be the one failure mode worth avoiding,
-    since the whole point of the band is to explain a dip.
+    """Contiguous asleep runs over the next `hours`, as hour offsets FROM NOW
+    because the chart plots horizon. A slot the pattern never saw counts as
+    awake: inventing a night from missing history would defeat the band.
     """
     if not pattern:
         return []
@@ -97,11 +79,8 @@ def bands(pattern: dict[tuple[int, int], bool], now: dt.datetime,
 
 
 def night_bands(ha, now: dt.datetime, hours: int) -> list[dict]:
-    """The bands for the configured schedule, or nothing at all.
-
-    Never raises. A chart that cannot be shaded is a chart without shading, and
-    an add-on that refused to serve its forecast because a decoration failed
-    would be a poor trade.
+    """The bands for the configured schedule, or nothing at all. Never raises:
+    a failed decoration must not cost the forecast.
     """
     entity = config.DAY_SCHEDULE
     if not entity or ha is None:

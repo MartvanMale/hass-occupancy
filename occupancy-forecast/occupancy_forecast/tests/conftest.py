@@ -1,10 +1,8 @@
 """Give every test a configured installation.
 
-`config.configure()` used to be unnecessary because the identity was a block of
-literals. Now it is discovered, so a test has to say what it is testing against
--- which is itself the point: the fixture below is a synthetic household that
-matches nobody's real installation, so anything that quietly depends on one
-particular set of entity ids fails here rather than on a user's Home Assistant.
+The fixture below is a synthetic household matching nobody's real one, so
+anything that quietly depends on one particular set of entity ids fails here
+rather than on a user's Home Assistant.
 """
 
 import sys

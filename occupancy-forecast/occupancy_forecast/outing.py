@@ -1,32 +1,8 @@
 """Is this person going out today, and when?
 
-A separate module for a separate question, the same way `eta.py` is -- not more
-of `departure.py`, which is already long and is about a different target.
-
-**"Out" means a day spent in a zone the household configured.** A zone is that
-household's own statement that a place matters -- a workplace here, but as
-easily a school, a stable or a workshop -- so nothing new needs configuring and
-no threshold needs tuning. `zone_other` does not count: it means "in some zone
-nobody named", which is the opposite of a declaration.
-
-**Why this question and not "will they leave the house".** They leave on 84% of
-days, so that label is nearly constant and there is almost nothing in it to
-learn; measured, every model tried on it was refused. A day out to a tracked
-zone is 25-28% of days and it is the departure that matters -- it is the one
-that empties the house until the evening, and the one whose hour is predictable
-to within half an hour once it is separated from the gym and the school run.
-Measured on the real archive, the first departure of ANY kind has a standard
-deviation of 3.50 h; departures on a day out alone have 0.74 h.
-
-A household that configures somewhere it drops into briefly and often -- a gym
--- would want a per-person zone setting instead. That is a setting to add when
-somebody has one, not a guess to make now.
-
-**Everything causal, and the guard is the same one `departure._causal` documents.**
-A `groupby(dow).mean()` over the whole frame gives a beautiful number and has read
-the day it is predicting. Every feature here is shifted first, and the shift is
-what makes "strictly earlier" true -- it matters twice over, because the weekday
-rate is both a feature and the baseline the model has to beat.
+"Out" means a day spent in a zone the household configured; `zone_other` does
+not count. Not "will they leave the house", which is nearly constant. Everything
+is causal, for the reason `departure._causal` gives.
 """
 
 from __future__ import annotations
@@ -51,9 +27,8 @@ RECENT_DAYS = 28
 # Days of history before a fit is attempted at all.
 MIN_TRAIN_DAYS = 60
 
-# The effect size the model must clear, matching `departure`. 15 rather than the
-# occupancy family's 5 for the reason `eta.py` records: the geometry here is
-# looser, so a fold majority is weaker evidence and the gate has to ask for size.
+# 15 rather than the occupancy family's 5: the geometry here is looser, so a
+# fold majority is weaker evidence.
 MIN_SKILL_PCT = 15.0
 
 # Calendar width for the fold record. The predictions are made once and grouped
@@ -62,22 +37,15 @@ BUCKET_DAYS = 14
 
 
 def out_columns() -> list[str]:
-    """The zone columns that count as "somewhere that matters".
-
-    Derived from the configured zones rather than named here, so an installation
-    with different zones needs no code change -- the same rule `features`
-    follows for its own zone columns, and the same one `train.may_be_nan`
-    learned the hard way.
+    """The zone columns that count as "somewhere that matters", derived from the
+    configured zones so a different installation needs no code change.
     """
     return [c for c in features.zone_columns() if c != "zone_other"]
 
 
 def label_out_days(table: pd.DataFrame, days: pd.DataFrame) -> pd.DataFrame:
-    """Add `out` to labelled days: did they reach a configured zone.
-
-    `days` comes from `departure.label_days`, so candidacy -- home when asked,
-    the day watched, no hole big enough to hide a departure -- is decided in one
-    place and this cannot drift from it.
+    """Add `out` to labelled days: did they reach a configured zone. Candidacy
+    is decided in `departure.label_days`, so this cannot drift from it.
     """
     columns = [c for c in out_columns() if c in table.columns]
     if not columns:
@@ -93,20 +61,9 @@ def label_out_days(table: pd.DataFrame, days: pd.DataFrame) -> pd.DataFrame:
     went = went.rename("out").reset_index().rename(columns={"_date": "date"})
     went["date"] = pd.to_datetime(went["date"])
 
-    # And when they got HOME afterwards, which is the half of the routine the
-    # heating actually wants.
-    #
-    # **Measured, not assumed.** This used to be the last slot inside the zone,
-    # with a comment asserting that was "~20 minutes before they are home". That
-    # was a guess, and it was tolerable only while the number sat beside the
-    # model's own answer rather than being it. Somebody who stops at the shops
-    # on the way is home when they are home.
-    #
-    # The first slot back at `HOME_THRESHOLD` after the last slot in a zone, on
-    # the SAME local day. Same threshold `departure.label_days` reads, so the
-    # two halves of a day cannot drift apart. Same-day only: a return after
-    # midnight yields no hour rather than wrapping to 00:30, which is exactly
-    # what one Sunday in the first artifact did.
+    # Home again: the first slot at `HOME_THRESHOLD` after the last in a zone,
+    # the line `departure.label_days` draws; same local day only, so a return
+    # after midnight yields no hour rather than wrapping to 00:30.
     per_hour = features.slots_per_hour()
     keyed = keyed.assign(_in=present)
     local_all = keyed["time"].dt.tz_convert(config.tzinfo())
@@ -165,12 +122,8 @@ def _causal(days: pd.DataFrame) -> pd.DataFrame:
 
 
 def _partner(days: pd.DataFrame) -> pd.DataFrame:
-    """What the OTHER people did, as of the same morning.
-
-    "If she is out, he is not" is a fact about the household that no
-    per-weekday rate can express, and it is the kind of structure this model
-    exists to find. Shifted like everything else: yesterday's is knowable at
-    04:00 today, today's is not.
+    """What the OTHER people did, as of the same morning. Shifted like
+    everything else: yesterday's is knowable at 04:00 today, today's is not.
     """
     wide = days.pivot_table(index="date", columns="subject",
                             values="out_yesterday", aggfunc="first")
@@ -188,9 +141,7 @@ def _partner(days: pd.DataFrame) -> pd.DataFrame:
 def feature_columns() -> list[str]:
     """What the model reads. Derived, never spelled at a use site."""
     return [
-        # The weekday as a PLAIN INTEGER, for the reason `departure` gives: the
-        # weekday IS the signal here, and `dow == 4` is one split where
-        # isolating Friday from a sin/cos circle is a conjunction of four.
+        # A PLAIN INTEGER, for the reason `departure.feature_columns` gives.
         "dow", "is_weekend", "is_holiday",
         "wday_rate", "wday_n", "recent_rate",
         "out_yesterday", "days_since_out",
@@ -217,13 +168,9 @@ def _estimator():
 
 
 def _fit_rate_shrink(train: pd.DataFrame) -> tuple[float, float]:
-    """How far to pull the weekday rate toward the person's overall rate.
-
-    The same argument `departure._fit_rate_shrink` makes, and it matters more
-    here: at a 25% base rate a weekday seen three times says 0.00 or 0.33, and an
-    unshrunk baseline that emits confident zeros is an easy thing for a model to
-    beat for reasons that have nothing to do with skill. Calibrate the baseline
-    before believing the model.
+    """How far to pull the weekday rate toward the person's overall rate. A
+    weekday seen three times says 0.00 or 0.33, and an unshrunk baseline
+    emitting confident zeros is easy to beat for reasons unrelated to skill.
     """
     base = float(train["out"].mean())
     raw = train["wday_rate"].to_numpy(dtype=float)
@@ -237,13 +184,8 @@ def _fit_rate_shrink(train: pd.DataFrame) -> tuple[float, float]:
 
 
 def prequential(days: pd.DataFrame) -> pd.DataFrame:
-    """Predict each day from a model that has only seen earlier ones.
-
-    One fit per day rather than per fold, for the reason `departure.prequential`
-    records: a day-level label gives ~150 rows per person, so
-    `evaluate.calendar_folds` returns nothing at its 200-row floor. Predicting a
-    day at a time gives ~90-110 honestly out-of-sample predictions instead of a
-    handful, at milliseconds a fit on a table this size.
+    """Predict each day from a model that has only seen earlier ones: one fit
+    per day, for the reason `departure.prequential` records.
     """
     embargo = departure.label_embargo()
     out = []
@@ -334,15 +276,8 @@ def score_subject(subject: str, days: pd.DataFrame,
 
 
 # --- the routine, which is what is actually served -------------------------
-#
-# There is no model here and that is the finding, not an omission. Measured on
-# this household with a permutation null -- shuffle the label within
-# (subject, weekday), which holds the weekday rate and destroys everything else
-# -- a model scored p=0.12 for both people, and the 15% ship gate fired on 4-12%
-# of RANDOM label sets. At ~55 scored days the null has a standard deviation of
-# 13 points, so nothing short of a very large effect could be told from chance.
-# What ships is the calibrated arithmetic, which is good in absolute terms:
-# Brier 0.128/0.147 against a flat rate's ~0.21.
+# No model, and that is the finding: under a permutation null holding the
+# weekday rate the gate fired on RANDOM labels, so calibrated arithmetic ships.
 
 ROUTINE_NAME = "out_routine.json"
 
@@ -351,22 +286,10 @@ ROUTINE_NAME = "out_routine.json"
 MIN_ROUTINE_DAYS = 45
 
 
-def _summarise(values: pd.Series) -> tuple[float | None, float | None, int]:
-    """Median, spread and count -- the median never travels without the other two."""
-    clean = values.dropna()
-    if clean.empty:
-        return None, None, 0
-    sd = float(clean.std()) if len(clean) > 1 else None
-    return float(clean.median()), (None if sd is None or np.isnan(sd) else sd), len(clean)
-
-
 def fit_routine(days: pd.DataFrame) -> dict:
-    """One table of numbers per person: how often, and at what hours.
-
-    Fitted over all history rather than causally -- causality is a property of
-    the EVALUATION, and this is the artifact being served forward. The gate that
-    decided this ships rather than a model was measured causally, in
-    `prequential`.
+    """One table of numbers per person: how often, and at what hours. Fitted
+    over all history rather than causally: causality is a property of the
+    EVALUATION, and this is the artifact being served forward.
     """
     frame = feature_frame(days)
     fitted_at = pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds")
@@ -383,8 +306,9 @@ def fit_routine(days: pd.DataFrame) -> dict:
         by_weekday: dict[str, dict] = {}
         for dow, group in usable.groupby("dow"):
             here = group[group["out"] > 0]
-            depart, depart_sd, n_depart = _summarise(here["departure_hour"])
-            back, back_sd, _ = _summarise(here.get("out_return_hour", pd.Series(dtype=float)))
+            depart, depart_sd, n_depart = departure.summarise(here["departure_hour"])
+            back, back_sd, _ = departure.summarise(
+                here.get("out_return_hour", pd.Series(dtype=float)))
             by_weekday[str(int(dow))] = {
                 "n": int(len(group)), "n_out": int(len(here)),
                 "rate": float(group["out"].mean()),
@@ -393,8 +317,9 @@ def fit_routine(days: pd.DataFrame) -> dict:
                 "return_hour": back, "return_sd": back_sd,
             }
 
-        depart, depart_sd, _ = _summarise(went["departure_hour"])
-        back, back_sd, _ = _summarise(went.get("out_return_hour", pd.Series(dtype=float)))
+        depart, depart_sd, _ = departure.summarise(went["departure_hour"])
+        back, back_sd, _ = departure.summarise(
+            went.get("out_return_hour", pd.Series(dtype=float)))
         out[subject] = {
             "subject": subject,
             "fitted_at": fitted_at,
@@ -423,11 +348,8 @@ def save_routine(routine: dict, models_dir=None):
 
 
 def load_routine(models_dir=None) -> dict:
-    """JSON rather than a pickle, because there is no estimator in it.
-
-    A table of numbers a person can read with `cat` is worth more here than a
-    pickle: it is the thing being served, and it must be checkable against the
-    panel without a Python prompt.
+    """JSON rather than a pickle: there is no estimator in it, and it must be
+    checkable with `cat`.
     """
     from pathlib import Path
 
@@ -441,12 +363,9 @@ def load_routine(models_dir=None) -> dict:
 
 
 def today(routine: dict, subject: str, at: pd.Timestamp | None = None) -> dict | None:
-    """What to expect of this person today: how likely, and at what hours.
-
-    Every number comes back with the count behind it and the spread around it.
-    A median departure of 08:00 built from four Fridays and one from thirty are
-    different claims, and a sensor that shows only the hour makes them look the
-    same.
+    """What to expect of this person today: how likely, and at what hours. Every
+    number comes with the count behind it and the spread around it; a median off
+    four Fridays and one off thirty are different claims.
     """
     entry = routine.get(subject)
     if not entry:
@@ -464,12 +383,8 @@ def today(routine: dict, subject: str, at: pd.Timestamp | None = None) -> dict |
                                         entry["shrink_base"])[0])
 
     def hours(key: str) -> tuple[float | None, float | None, str]:
-        # A weekday seen often enough with NO days out is an ANSWER, not a
-        # gap: they do not go in on this weekday, so there is no hour to state.
-        # Falling through to the overall median here published 08:00 on a
-        # weekday the person had never once gone in on -- a number nobody
-        # earned, and one an automation reading the timestamp without the
-        # probability beside it would act on. Say nothing instead.
+        # A weekday seen often enough with NO days out is an ANSWER, not a gap;
+        # the overall median there would be an hour nobody earned.
         if (weekday.get("n", 0) >= MIN_WEEKDAY_SAMPLES
                 and weekday.get("n_out", 0) == 0):
             return None, None, "never"
@@ -496,22 +411,16 @@ def today(routine: dict, subject: str, at: pd.Timestamp | None = None) -> dict |
 
 
 def at_hour(at: pd.Timestamp, hour: float | None) -> str | None:
-    """A fractional local hour, as an ISO timestamp on `at`'s local date.
-
-    Home Assistant's `timestamp` device class wants a real moment, and a moment
-    is what a household wants too -- "08:00 today", not "8.0". A time already
-    past is still published: it is what was expected, and hiding it would make
-    the sensor unreadable exactly when someone is checking whether it was right.
+    """A fractional local hour as an ISO timestamp on `at`'s local date. A time
+    already past is still published: hiding it would make the sensor unreadable
+    exactly when someone is checking whether it was right.
     """
     if hour is None:
         return None
     tz = config.tzinfo()
     local = at.tz_convert(tz)
-    # WALL-CLOCK arithmetic, then localise. `midnight + Timedelta` is absolute
-    # arithmetic on a tz-aware stamp, so on the spring-forward day 8.0 rendered
-    # as 09:00 and on the fall-back day as 07:00 -- an hour wrong on exactly two
-    # days a year, on the three sensors an automation would act on. Build the
-    # naive local time first and let the zone say what instant it is.
+    # WALL-CLOCK arithmetic, then localise: `midnight + Timedelta` on a tz-aware
+    # stamp is an hour wrong on the two transition days.
     minutes = int(round(hour * 60))
     wall = (pd.Timestamp(local.date()) + pd.Timedelta(minutes=minutes))
     # A time inside the skipped hour lands on the far side of it; a time inside

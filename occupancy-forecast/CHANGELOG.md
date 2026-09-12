@@ -1,3 +1,65 @@
+## 0.3.0 - 2026-09-12
+
+### Added
+
+- **How long the forecast record is kept is now a setting**, on the Setup tab
+  under "Forecast record". Type a number of days; **0 keeps everything and
+  never deletes**. It still defaults to 30 days and feeds the "Was it right?"
+  chart only. Shortening it deletes the older rows on the next cycle and they
+  cannot be rebuilt.
+
+### Fixed
+
+- **"Next expected change" no longer names an hour the forecast disagrees
+  with.** That row, and the `Next change at` sensor with it, took its time from
+  the "Out today" routine, which only counts days you reached one of your
+  configured zones. A day out that never reached one of them therefore looked
+  like a day nobody left, and the row fell back to a departure time measured on
+  your other weekdays — naming an hour the 48-hour chart beside it read as you
+  being home. It is now timed from a second routine built on leaving the house at
+  all, which may only sharpen the forecast's own hour rather than replace it,
+  and the row says how many of that weekday you actually went out on. "Out
+  today", "Out departure" and "Out return" are unchanged. The new routine
+  appears after the next training run; until then the row shows the forecast's
+  own timing.
+- The "Was it right?" chart now works when the add-on reads its history from
+  InfluxDB; until now such installs recorded nothing at all. Existing `influx`
+  installs start empty and fill over the following 30 days. There is still no
+  local history archive on `influx`, so the first two cards on the Data tab
+  still say so.
+- A phone that stops reporting no longer counts as everybody being out. Those
+  stretches are now recorded as unknown and left out of training instead of
+  carrying the last known position forward. One person known to be at home
+  still counts as the house being occupied.
+- The Overview page now counts days of presence actually observed, rather than
+  the age of the oldest thing in the archive, when it says how long is left
+  before training, so a tracker that never reported no longer makes the add-on
+  look ready days early.
+- When something fails, the Data tab and the status API no longer repeat the
+  underlying error. A message from a library can carry the file it was reading
+  or the address of your broker, and both of those are readable by any Home
+  Assistant user rather than only the ones listed in `admin_users`. The panel
+  still says that something failed and when; the error itself now goes to the
+  add-on log, where the Log tab shows it.
+
+### Changed
+
+- The models are rebuilt once on upgrade, because the ones on disk were fitted
+  on the presence data this release corrects. Nothing is published until that
+  finishes -- previously an upgrade like this could have left the sensors
+  reading `unknown` until the next scheduled retrain, up to a week away.
+- On first start after upgrading, the add-on re-reads the last few days of
+  presence from Home Assistant's recorder to recover the gaps earlier versions
+  discarded. This happens once, not on every restart.
+- The first import from Home Assistant no longer asks the recorder for
+  everything at once, which on a long `purge_keep_days` could return tens of
+  megabytes on a small box. How much history you end up with is unchanged.
+- The Overview page no longer says "steady" or "no change expected" when it
+  simply has no prediction to give, and the horizon strip now distinguishes a
+  horizon where the model lost to its baseline from one that has not trained
+  yet. On a fresh install the old wording blamed a comparison that had never
+  run.
+
 ## 0.2.2 - 2026-09-09
 
 ### Added

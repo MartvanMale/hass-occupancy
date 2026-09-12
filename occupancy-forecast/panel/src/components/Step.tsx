@@ -1,24 +1,10 @@
 import type { ReactNode } from 'react'
 
 /**
- * One numbered step of the Data walkthrough.
- *
- * The Data tab used to be seven cards in the same auto-fit grid the other two
- * tabs use, which was the wrong shape for what it is. A grid says "here are
- * seven independent things, in whatever order they happened to fit". The tab is
- * actually one argument in order: a state change becomes a row, the rows become
- * a table, a horizon is allowed to read part of that table, and the result is
- * scored. Read as tiles, that argument does not survive. So: one column,
- * numbered, with a rail down the side.
- *
- * The slab inside a step is still a `Card`, deliberately. `.card` is the query
- * container that `@container (max-width: 30rem)` on `.row.control` measures, and
- * it is what the `Select` popup hangs off. Wrapping it rather than replacing it
- * means neither of those had to be re-derived, and nothing is inserted between
- * the card and its rows.
- *
- * The number is decorative and `aria-hidden`; the accessible name is the `<h2>`,
- * which is what `aria-labelledby` points at.
+ * One numbered step of the Data walkthrough: the tab is one argument in order,
+ * not seven independent things, so it is a column rather than an auto-fit grid.
+ * The slab inside is still a `Card` -- `.card` is the query container that
+ * `@container (max-width: 30rem)` measures and what the `Select` popup hangs off.
  */
 export function Step({ n, eyebrow, title, id, intro, children }: {
   n: number
