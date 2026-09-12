@@ -10,7 +10,7 @@ scikit-learn==1.7.2
 joblib==1.6.0
 paho-mqtt==2.1.0
 fastapi==0.121.2
-uvicorn==0.38.0
+uvicorn==0.52.4
 holidays==0.68
 # listen.py uses the SYNC client; an asyncio one would mean a second event loop
 # beside uvicorn's. Pure Python.
