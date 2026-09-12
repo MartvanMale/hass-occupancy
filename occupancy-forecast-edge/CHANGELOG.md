@@ -1,5 +1,15 @@
 ## Unreleased
 
+### Added
+
+- **The Data tab's first two cards now work when history comes from InfluxDB.**
+  "The archive" and "One entity, as the model reads it" used to say only that
+  there was no local archive to inspect; they now read the bucket. They list
+  the entities the add-on is configured to read rather than everything in the
+  bucket, so an entity you configured but that has never reported still shows
+  up as having no history. There is no "on disk" figure, because the bucket is
+  shared with the rest of Home Assistant.
+
 ## 0.3.1 - 2026-09-12
 
 ### Changed

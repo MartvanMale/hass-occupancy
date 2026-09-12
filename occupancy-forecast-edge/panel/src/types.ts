@@ -269,7 +269,9 @@ export interface ArchiveSpan {
   last: string | null
   rows: number
   days: number
-  bytes: number
+  /** Null when the history is not a file of ours -- an InfluxDB bucket is
+   *  shared with the rest of the house, so no figure would be this add-on's. */
+  bytes: number | null
 }
 
 export interface ArchiveEntity {
