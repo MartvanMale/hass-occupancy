@@ -191,17 +191,14 @@ export function ConfigView({
           {status ? <StatusRows status={status} /> : <p className="empty">Loading…</p>}
         </Card>
 
-        <Card
-          title="What this installation has"
-          subtitle="A missing signal is not an error — the forecast is just less sharp."
-        >
+        <Card title="What this installation has">
           {status ? <FeatureRows groups={status.feature_groups} /> : <p className="empty">Loading…</p>}
         </Card>
       </div>
 
       <form onSubmit={onSubmit}>
         <div className="cards">
-          <Card title="People" subtitle="Occupancy is the one thing this cannot run without.">
+          <Card title="People" subtitle="Required.">
             {!candidates ? (
               <p className="empty">Loading…</p>
             ) : candidates.people.length === 0 ? (
@@ -230,8 +227,7 @@ export function ConfigView({
           <Card
             title="Zones"
             optional
-            subtitle="Anywhere worth knowing about — work, school, the supermarket.
-              Home is excluded."
+            subtitle="Work, school, the supermarket. Home is excluded."
           >
             {!candidates ? (
               <p className="empty">Loading…</p>
@@ -282,8 +278,7 @@ export function ConfigView({
           <Card
             title="Holiday calendar"
             optional
-            subtitle="Which public holidays this household keeps — not necessarily the
-              country you live in."
+            subtitle="Not necessarily the country you live in."
           >
             {candidates && candidates.countries.length === 0 ? (
               <p className="empty">
@@ -316,8 +311,7 @@ export function ConfigView({
           <Card
             title="Night shading"
             optional
-            subtitle="Greys out the hours outside a schedule you already keep.
-              Display only — no feature, no model, no entity."
+            subtitle="Display only. Greys out hours outside a schedule you keep."
           >
             {candidates && candidates.schedules.length === 0 ? (
               <p className="empty">
@@ -350,8 +344,7 @@ export function ConfigView({
 
           <Card
             title="When a crossing counts"
-            subtitle="How far the curve has to move, and for how long, before the
-              countdown changes. No retrain needed."
+            subtitle="How far the curve must move, and for how long. No retrain needed."
           >
             <Row
               icon="target"
@@ -379,7 +372,6 @@ export function ConfigView({
               control
               accent="blue"
               primary="and stays there for"
-              secondary="A single hour on the wrong side is a wobble, not a departure."
               trailing={
                 <Select label="Minimum run" value={minHours} onChange={setMinHours}
                         options={RUNS} />
@@ -389,16 +381,14 @@ export function ConfigView({
 
           <Card
             title="Forecast record"
-            subtitle="How long to keep what was published, for the “Was it right?”
-              chart. Nothing is trained on it and no entity reads it."
+            subtitle="For the “Was it right?” chart only."
           >
             <Row
               icon="database"
               control
               accent="blue"
               primary="Keep each forecast for"
-              secondary="0 keeps everything. Shortening this deletes the older
-                rows on the next cycle, and they cannot be rebuilt."
+              secondary="0 keeps everything. Shortening it deletes older rows permanently."
               trailing={
                 <span className="days">
                   <input

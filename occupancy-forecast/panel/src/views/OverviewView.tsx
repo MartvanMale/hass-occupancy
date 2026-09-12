@@ -45,28 +45,6 @@ function changeSentence(change: NextChange): string {
     : `Expected back around ${when}.`
 }
 
-/**
- * How well-supported that time is. Without it the card states a rare day as
- * confidently as a routine one, which is what made an hour the chart beside it
- * read as "home" look like a forecast.
- */
-function supportClause(change: NextChange): string {
-  const day = change.routine_day
-  if (day === null || change.at === null) return ''
-  const at = new Date(change.at)
-  if (Number.isNaN(at.getTime()) || day.n_weekday < 3) return ''
-
-  const weekday = at.toLocaleDateString(undefined, { weekday: 'long' })
-  const support = `Left on ${day.n_left_weekday} of ${day.n_weekday} ${weekday}s`
-  // The spread only where it describes the time actually shown: on a refused
-  // routine hour it is the spread around a moment the row does not name.
-  const sd = change.direction === 'leaving' ? day.departure_sd : day.return_sd
-  if (change.at_from !== 'routine' || sd === null || !(sd > 0)) return `${support}.`
-  const ms = sd * 3_600_000
-  return `${support}, usually ${clock(new Date(at.getTime() - ms))}`
-    + `–${clock(new Date(at.getTime() + ms))}.`
-}
-
 /** "tomorrow", or a weekday name past that. */
 function dayWord(at: Date): string {
   const days = Math.round(
@@ -135,7 +113,6 @@ function ChangeRows({ subjects, house }: { subjects: SubjectForecast[]; house: s
         // sentence needs no "if already on the way" hedge.
         const secondary = [
           changeSentence(change),
-          supportClause(change),
           arriving && s.eta_minutes !== null
             ? `On the way, ${Math.round(s.eta_minutes)} min out.` : '',
         ].filter(Boolean).join(' ')

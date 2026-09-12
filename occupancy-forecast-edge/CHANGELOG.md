@@ -1,5 +1,15 @@
 ## Unreleased
 
+## 0.3.1 - 2026-09-12
+
+### Changed
+
+- **"Next expected change" is one sentence again.** It no longer appends how
+  many of that weekday you went out on, or the spread around the hour, so the
+  row reads "Expected to leave around 07:15 Monday." and stops there.
+- The Setup tab says less. Several cards carried a second sentence explaining
+  themselves; those are shortened or gone. Nothing you can set has changed.
+
 ## 0.3.0 - 2026-09-12
 
 ### Added
