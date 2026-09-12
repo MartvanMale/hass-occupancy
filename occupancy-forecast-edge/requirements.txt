@@ -14,4 +14,4 @@ uvicorn==0.38.0
 holidays==0.68
 # listen.py uses the SYNC client; an asyncio one would mean a second event loop
 # beside uvicorn's. Pure Python.
-websockets==15.0.1
+websockets==17.1
