@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.4.1 - 2026-09-13
+
 ### Changed
 
 - The description of the **Admin users** option on the Configuration tab is
