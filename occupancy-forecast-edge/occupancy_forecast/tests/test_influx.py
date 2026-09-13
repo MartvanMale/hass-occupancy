@@ -1,16 +1,18 @@
 """The InfluxDB source, pinned against real response shapes.
 
-Every CSV below was copied from a live InfluxDB 2 rather than invented, because
-all three of the things that bite here are invisible in the Flux: an aggregate
-returns no `_time` column, a `union` repeats its header mid-body, and HA writes
-BOTH a `state` and a `value` field for the same entity.
+Every CSV below was copied from a live server rather than invented, because all
+four of the things that bite here are invisible in the Flux: an aggregate
+returns no `_time` column, a `union` repeats its header mid-body, HA writes BOTH
+a `state` and a `value` field for the same entity, and 1.8 prefixes every
+response with annotation lines that 2.x omits.
 """
 
+import urllib.error
 import urllib.request
 
 import pytest
 
-from occupancy_forecast.sources.influx import InfluxSource
+from occupancy_forecast.sources.influx import InfluxSource, check_connection
 
 # `count()` drops `_time` entirely -- the reason `_query` takes `timed`.
 COUNTS = """,result,table,_start,_stop,_value,domain,entity_id,_field
@@ -124,3 +126,196 @@ def test_entities_are_selected_by_tag_not_by_measurement(influx):
 def test_nothing_asked_for_is_nothing_queried(influx):
     assert influx.archive([])["entities"] == []
     assert influx.sent == []
+
+
+# --- InfluxDB 1.8 --------------------------------------------------------
+#
+# Captured from a live 1.8.10 in compatibility mode, CRLF and all. 1.8 ALWAYS
+# prefixes the annotation lines; 2.x sends them only when the dialect asks, and
+# we never ask -- so the filter that drops them is unconditional.
+
+STATES_18 = (
+    "#datatype,string,long,dateTime:RFC3339,string\r\n"
+    "#group,false,false,false,false\r\n"
+    "#default,_result,,,\r\n"
+    ",result,table,_time,_value\r\n"
+    ",,0,2026-09-11T15:51:51.747468032Z,home\r\n"
+    ",,0,2026-09-11T16:21:51.747468032Z,not_home\r\n"
+)
+
+# The same union as BOUNDS above, but 1.8 restarts the annotations per table --
+# so the header repeats too, and a blank line sits between the blocks.
+BOUNDS_18 = (
+    "#datatype,string,long,dateTime:RFC3339,string,string,string,string\r\n"
+    "#group,false,false,false,false,true,true,true\r\n"
+    "#default,_result,,,,,,\r\n"
+    ",result,table,_time,_value,_field,domain,entity_id\r\n"
+    ",,0,2026-09-11T15:51:51Z,home,state,person,alice\r\n"
+    ",,0,2026-09-12T15:21:51Z,not_home,state,person,alice\r\n"
+    "\r\n"
+    "#datatype,string,long,dateTime:RFC3339,long,string,string,string\r\n"
+    "#group,false,false,false,false,true,true,true\r\n"
+    "#default,_result,,,,,,\r\n"
+    ",result,table,_time,_value,_field,domain,entity_id\r\n"
+    ",,1,2026-09-11T15:51:51Z,1,value,person,alice\r\n"
+    ",,1,2026-09-12T15:21:51Z,0,value,person,alice\r\n"
+)
+
+COUNTS_18 = (
+    "#datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,string,string,string,long\r\n"
+    "#group,false,false,true,true,true,true,true,false\r\n"
+    "#default,_result,,,,,,,\r\n"
+    ",result,table,_start,_stop,domain,entity_id,_field,_value\r\n"
+    ",,0,1970-01-01T00:00:00Z,2026-09-12T15:22:19Z,person,alice,state,48\r\n"
+)
+
+
+def _answering(monkeypatch, body: str) -> InfluxSource:
+    def fake_urlopen(request, timeout=None):
+        return _Response(body)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return InfluxSource(url="http://influx:8086", token="t", org="o",
+                        bucket="homeassistant/autogen")
+
+
+def test_a_1_8_response_is_read_rather_than_answering_zero_rows(monkeypatch):
+    """Unfiltered, `#datatype` becomes the header, no row carries `_time`, and
+    every query answers nothing against a database that is full."""
+    source = _answering(monkeypatch, STATES_18)
+
+    assert source.states("person.alice", "-24h") == [
+        ("2026-09-11T15:51:51.747468032Z", "home"),
+        ("2026-09-11T16:21:51.747468032Z", "not_home"),
+    ]
+
+
+def test_a_1_8_union_restarts_its_annotations_and_is_still_read(monkeypatch):
+    """1.8 repeats the whole annotation block per table, not just the header."""
+    rows = _answering(monkeypatch, BOUNDS_18)._query("union(...)")
+
+    assert len(rows) == 4
+    assert {r["_field"] for r in rows} == {"state", "value"}
+    assert all(r["entity_id"] == "alice" for r in rows)
+
+
+def test_the_annotation_lines_are_not_counted_as_rows_by_an_aggregate(monkeypatch):
+    """`timed=False` skips the `_time` filter that would otherwise have hidden
+    them, so an unfiltered count answers three junk rows plus the real one."""
+    rows = _answering(monkeypatch, COUNTS_18)._query("count()", timed=False)
+
+    assert len(rows) == 1
+    assert rows[0]["_value"] == "48"
+
+
+# --- the connection check ------------------------------------------------
+
+class _Ping:
+    """`/ping` answers 204 with the version in a header, on both 1.x and 2.x."""
+
+    def __init__(self, version: str | None):
+        self.headers = {"X-Influxdb-Version": version} if version else {}
+
+    def read(self):
+        return b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _checking(monkeypatch, version, bodies):
+    """`/ping` then one body per Flux query, in order."""
+    remaining = list(bodies)
+
+    def fake_urlopen(request, timeout=None):
+        if request.full_url.endswith("/ping"):
+            if isinstance(version, Exception):
+                raise version
+            return _Ping(version)
+        answer = remaining.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return _Response(answer)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+
+BUCKETS_18 = (
+    "#datatype,string,long,string,string,string,string,long\r\n"
+    "#group,false,false,false,false,true,false,false\r\n"
+    "#default,_result,,,,,,\r\n"
+    ",result,table,name,id,organizationID,retentionPolicy,retentionPeriod\r\n"
+    ",,0,homeassistant/autogen,,,autogen,0\r\n"
+)
+
+
+def _stages(result) -> dict:
+    return {s["name"]: s["ok"] for s in result["stages"]}
+
+
+def test_the_check_reports_a_1_x_server_and_what_its_token_and_bucket_mean(monkeypatch):
+    """The version is what makes the 1.x-only advice sayable at all."""
+    _checking(monkeypatch, "1.8.10", [BUCKETS_18, COUNTS_18])
+
+    result = check_connection("http://influx:8086", "u:p", "o",
+                              "homeassistant/autogen", ["person.alice"])
+
+    assert result["ok"] and result["version"] == "1.8.10"
+    assert "compatibility mode" in result["stages"][0]["detail"]
+    assert "48 rows" in result["stages"][-1]["detail"]
+    assert any("username:password" in h for h in result["hints"])
+
+
+def test_a_2_x_server_is_given_none_of_the_1_x_advice(monkeypatch):
+    _checking(monkeypatch, "v2.7.12", [BUCKETS_18.replace(
+        "homeassistant/autogen", "homeassistant"), COUNTS_18])
+
+    result = check_connection("http://influx:8086", "t", "o", "homeassistant",
+                              ["person.alice"])
+
+    assert result["hints"] == []
+    assert "compatibility" not in result["stages"][0]["detail"]
+
+
+def test_something_that_is_not_influxdb_is_not_a_credentials_problem(monkeypatch):
+    """A reverse proxy or a typo'd port must not read as a bad token."""
+    _checking(monkeypatch, None, [])
+
+    result = check_connection("http://nas:8086", "t", "o", "b", ["person.alice"])
+
+    assert _stages(result) == {"reachable": False}
+    assert "did not identify itself" in result["stages"][0]["detail"]
+
+
+def test_a_refused_token_stops_before_the_bucket_stage(monkeypatch):
+    _checking(monkeypatch, "1.8.10", [urllib.error.HTTPError(
+        "u", 401, "Unauthorized", {}, None)])
+
+    result = check_connection("http://influx:8086", "bad", "o", "b",
+                              ["person.alice"])
+
+    assert _stages(result) == {"reachable": True, "credentials": False}
+
+
+def test_a_missing_bucket_lists_the_ones_the_token_can_see(monkeypatch):
+    """Which is what untangles 1.x's `database/retention-policy` form."""
+    _checking(monkeypatch, "1.8.10", [BUCKETS_18])
+
+    result = check_connection("http://influx:8086", "u:p", "o",
+                              "homeassistant", ["person.alice"])
+
+    assert _stages(result) == {"reachable": True, "credentials": True,
+                               "bucket": False}
+    assert "homeassistant/autogen" in result["stages"][-1]["detail"]
+
+
+def test_the_check_never_echoes_the_token_back(monkeypatch):
+    """It answers over Ingress, and a token in a response is a token in a log."""
+    _checking(monkeypatch, "1.8.10", [BUCKETS_18, COUNTS_18])
+
+    result = check_connection("http://influx:8086", "supersecrettoken", "o",
+                              "homeassistant/autogen", ["person.alice"])
+
+    assert "supersecrettoken" not in str(result)
