@@ -15,9 +15,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import sklearn
 from sklearn.ensemble import HistGradientBoostingRegressor
 
-from . import config, evaluate, log
+from . import config, evaluate, features, log
 
 _log = log.get(__name__)
 
@@ -132,7 +133,7 @@ def feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
     # Epoch nanoseconds: mixing a tz-aware index with the tz-naive datetime64
     # that .values and .rolling() hand back is a TypeError waiting to happen.
-    stamp = frame.index.asi8.astype("float64")
+    stamp = features.epoch_ns(frame.index).astype("float64")
 
     # Closing speed: km lost per hour over the trailing window. Positive means
     # getting closer, which a raw distance column cannot express.
@@ -166,7 +167,7 @@ def build_samples(frame: pd.DataFrame) -> pd.DataFrame:
         return out
 
     home = (frame["distance_km"] * 1000 < ARRIVED_M).to_numpy()
-    stamp = frame.index.asi8.astype("float64")
+    stamp = features.epoch_ns(frame.index).astype("float64")
     # Nanosecond stamp of the next arrival at or after each row.
     next_arrival = pd.Series(np.where(home, stamp, np.nan)).bfill().to_numpy()
     out["minutes_to_home"] = (next_arrival - stamp) / 1e9 / 60
@@ -283,7 +284,8 @@ def save(model, metrics: EtaMetrics, models_dir: Path = MODELS_DIR) -> Path:
     tmp = path.with_suffix(".pkl.tmp")
     with tmp.open("wb") as fh:
         pickle.dump({"model": model, "subject": metrics.subject,
-                     "features": FEATURES, "metrics": asdict(metrics)}, fh)
+                     "features": FEATURES, "sklearn": sklearn.__version__,
+                     "metrics": asdict(metrics)}, fh)
     tmp.replace(path)
     return path
 
@@ -293,13 +295,21 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[str, dict]:
     contract: a mismatch is refused here with a line, not failed every cycle.
     """
     out = {}
-    stale = []
+    stale, foreign = [], []
     for subject in eta_subjects():
         path = models_dir / f"eta_{subject}.pkl"
         if not path.exists():
             continue
-        with path.open("rb") as fh:
-            artifact = pickle.load(fh)
+        # Another scikit-learn can fail inside the unpickle itself.
+        try:
+            with path.open("rb") as fh:
+                artifact = pickle.load(fh)
+        except Exception:  # noqa: BLE001
+            foreign.append(path.name)
+            continue
+        if artifact.get("sklearn") != sklearn.__version__:
+            foreign.append(path.name)
+            continue
         if list(artifact.get("features") or ()) != FEATURES:
             stale.append(path.name)
             continue
@@ -308,6 +318,10 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[str, dict]:
         _log.warning("ignoring %d ETA artifact(s) fitted on a different feature "
                      "list (%s); retrain to serve an arrival ETA again",
                      len(stale), ", ".join(stale))
+    if foreign:
+        _log.warning("ignoring %d ETA artifact(s) not written by scikit-learn %s "
+                     "(%s); retrain to serve an arrival ETA again",
+                     len(foreign), sklearn.__version__, ", ".join(foreign))
     return out
 
 

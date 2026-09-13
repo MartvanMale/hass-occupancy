@@ -22,6 +22,22 @@ def _slots(n: int, start="2026-05-01T00:00:00Z") -> pd.DatetimeIndex:
                          tz="UTC", name="time")
 
 
+@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+def test_the_slot_arithmetic_does_not_care_which_unit_pandas_picked(unit):
+    """pandas 3 parses ISO strings to microseconds whatever the grid holds; raw
+    `.asi8` mixed the two units and blanked every slot."""
+    slots = _slots(4).as_unit(unit)
+    events = [("2026-04-30T23:00:00+00:00", "home"),
+              ("2026-05-01T00:45:00+00:00", "not_home")]
+    frac = features.slot_fraction(events, slots, config.HOME_STATE)["frac"]
+    np.testing.assert_allclose(frac.to_numpy(), [1.0, 0.5, 0.0, 0.0])
+    np.testing.assert_allclose(features.minutes_in_state(events, slots),
+                               [60.0, 90.0, 15.0, 45.0])
+    np.testing.assert_allclose(
+        features.numeric_on_grid([("2026-05-01T00:40:00+00:00", 7.0)], slots, 30.0),
+        [np.nan, np.nan, 7.0, np.nan])
+
+
 def _wide_table(days: int = 40) -> pd.DataFrame:
     """A real `features.build()` output, for the tests that melt it. Built, not
     hand-written: a hand-written frame would only prove the melt's mapping

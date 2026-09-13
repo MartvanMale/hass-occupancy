@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import paho.mqtt.client as mqtt
+import sklearn
 
 from . import config, departure as departure_mod, eta as eta_mod, evaluate
 from . import features, log, nowcast, outing as outing_mod, train
@@ -56,11 +57,20 @@ def _load_artifact(path: Path) -> dict | None:
     """
     if not path.exists():
         return None
-    with path.open("rb") as fh:
-        artifact = pickle.load(fh)
+    try:
+        with path.open("rb") as fh:
+            artifact = pickle.load(fh)
+    except Exception:  # noqa: BLE001
+        # Another scikit-learn can fail inside the unpickle itself.
+        _stale.append((path.name, None))
+        return None
     if artifact.get("version") != train.MODEL_VERSION:
         # Counted, not announced: a version bump stales all 48 at once.
         _stale.append((path.name, artifact.get("version")))
+        return None
+    if artifact.get("sklearn") != sklearn.__version__:
+        # An estimator is only promised to work under the scikit-learn that pickled it.
+        _stale.append((path.name, f"scikit-learn {artifact.get('sklearn') or 'unknown'}"))
         return None
     return artifact
 
@@ -132,7 +142,8 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
         built = sorted({v or "unknown" for _, v in _stale})
         _log.warning("ignoring %d model file(s) built by %s -- this build is "
                      "%s. Retrain to use them; nothing is published until then.",
-                     len(_stale), "/".join(built), train.MODEL_VERSION)
+                     len(_stale), "/".join(built),
+                     f"{train.MODEL_VERSION} on scikit-learn {sklearn.__version__}")
     if mismatched:
         _log.warning("ignoring %d model file(s) fitted for a different set of "
                      "people or zones (%s%s). Retrain to serve those horizons "

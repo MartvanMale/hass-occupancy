@@ -17,7 +17,7 @@ guard_run tsc \
   -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
   -v "$PWD/occupancy-forecast-edge/panel":/w -w /w \
   -v occupancy-panel-npm:/tmp/.npm \
-  node:22-alpine \
+  node:24-alpine \
   timeout -k 30 600 \
   sh -c '[ -d node_modules ] || npm ci --no-audit --no-fund; npx tsc --noEmit'
 

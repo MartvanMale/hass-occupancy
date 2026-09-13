@@ -24,6 +24,10 @@ from pathlib import Path
 # The wheel tag to resolve against. aarch64 because that is the Pi; cp313
 # because build.yaml pins the Debian trixie base, whose python3 is 3.13.
 PLATFORM = "manylinux_2_28_aarch64"
+# pip matches --platform exactly, so the older glibc tags go in too: 2_28 alone
+# skipped pydantic-core's 2_17 wheel and resolved pure-Python pydantic 1 instead.
+PLATFORMS = [PLATFORM, *(f"manylinux_2_{minor}_aarch64" for minor in range(27, 16, -1)),
+             "manylinux2014_aarch64"]
 PYTHON_VERSION = "313"
 ABI = "cp313"
 
@@ -68,7 +72,7 @@ def resolve(requirements: Path, workdir: Path) -> list[dict]:
             "--dry-run", "--ignore-installed", "--quiet",
             "--report", str(report),
             "--only-binary=:all:",
-            "--platform", PLATFORM,
+            *(arg for tag in PLATFORMS for arg in ("--platform", tag)),
             "--python-version", PYTHON_VERSION,
             "--abi", ABI,
             "--implementation", "cp",
