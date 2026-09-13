@@ -122,15 +122,121 @@ def test_every_kind_reported_is_one_the_panel_types(stocked):
         assert entity["kind"] in {"presence", "numeric", "heartbeat", "other"}
 
 
-def test_a_missing_archive_is_an_answer_not_an_error():
-    """An Influx installation keeps no local archive. That is a sentence to
-    render, not a 404 for the console."""
-    class Influx:
+class RemoteSource:
+    """A source whose history is somewhere else -- InfluxDB is the one that
+    exists. It answers `archive` by id instead of owning a file."""
+
+    def __init__(self, rows: dict[str, dict], series=(), seed=()):
+        self.rows = rows
+        self.series = list(series)
+        self.seed = list(seed)
+        self.asked: list[list[str]] = []
+
+    def archive(self, entity_ids):
+        self.asked.append(list(entity_ids))
+        entities = [{"entity_id": e, "rows": 0, "first": None, "last": None,
+                     "field": None, "sample": [], **self.rows.get(e, {})}
+                    for e in entity_ids]
+        return {"span": {"first": None, "last": None, "bytes": None,
+                         "rows": sum(e["rows"] for e in entities), "days": 1.0},
+                "entities": entities}
+
+    def numeric(self, entity_id, start, stop=None):
+        return self.series
+
+    def seeded_numeric(self, entity_id, start, stop=None, seed_days=14):
+        # The seed is the point: a reading from before the window, restamped
+        # at its start. `self.seed` stands in for whatever preceded it.
+        seeded = [(start, v) for v in self.seed] + self.series
+        return seeded
+
+    def seeded_states(self, entity_id, start, stop=None, seed_days=14):
+        return [(when, str(value)) for when, value in self.series]
+
+
+def test_the_archive_card_answers_when_the_history_is_in_influx():
+    """The card used to say only that there was nothing to inspect. The data
+    was never missing -- it was in a bucket rather than in a file."""
+    source = RemoteSource({
+        "person.alice": {"rows": 44819, "field": "state",
+                         "sample": ["home", "not_home"],
+                         "first": "2026-03-12T21:22:29Z",
+                         "last": "2026-09-12T14:35:55Z"},
+    })
+    result = explore.archive_inventory(source, make_settings())
+    assert result["available"] is True
+
+    by_id = {e["entity_id"]: e for e in result["entities"]}
+    assert by_id["person.alice"]["rows"] == 44819
+    assert by_id["person.alice"]["kind"] == "presence"
+    assert by_id["person.alice"]["role"] == "person"
+    # Configured but never seen is still the most useful row on the card.
+    assert by_id["person.bob"]["rows"] == 0
+
+
+def test_only_configured_entities_are_asked_for():
+    """The bucket holds every entity in the house. Enumerating it would be
+    hundreds of rows about entities this add-on was never asked to read."""
+    source = RemoteSource({})
+    explore.archive_inventory(source, make_settings())
+
+    assert source.asked, "the source was never consulted"
+    assert set(source.asked[0]) == {
+        "person.alice", "person.bob", "group.household", "zone.alice_office",
+        "sensor.home_alice_distance", "sensor.home_alice_direction_of_travel"}
+
+
+def test_a_number_only_entity_is_read_as_a_number_not_as_a_state():
+    """A sensor stored under its unit has no string state. Asking for one drew
+    an empty chart instead of saying anything."""
+    now = pd.Timestamp.now(tz="UTC")
+    source = RemoteSource(
+        {"sensor.home_alice_distance": {"rows": 1200, "field": "value",
+                                        "sample": ["1500", "250"]}},
+        series=[((now - pd.Timedelta(hours=3)).isoformat(), 1500.0),
+                ((now - pd.Timedelta(hours=1)).isoformat(), 250.0)])
+
+    result = explore.entity_series(source, make_settings(),
+                                   "sensor.home_alice_distance", days=1)
+    assert result["available"] is True
+    assert result["kind"] == "numeric"
+    assert result["raw_rows"] == 2
+    # Metres to kilometres, the same as the local path does.
+    assert result["unit"] == "km"
+    assert max(g["v"] for g in result["gridded"] if g["v"] is not None) == 1.5
+
+
+def test_a_number_that_has_not_changed_inside_the_window_still_draws():
+    """A zone changes a couple of times a week, and DISTANCE_STALE_MIN is None,
+    so the carry-forward is the whole line. Reading the window alone drew an
+    empty chart for an entity that had held one value the entire time."""
+    source = RemoteSource(
+        {"zone.alice_office": {"rows": 224, "field": "value", "sample": ["0"]}},
+        series=[], seed=[0.0])
+
+    result = explore.entity_series(source, make_settings(), "zone.alice_office", days=1)
+    assert result["available"] is True
+    drawn = [g["v"] for g in result["gridded"] if g["v"] is not None]
+    assert drawn, "the seed from before the window is what draws this at all"
+    assert set(drawn) == {0.0}
+
+
+def test_an_entity_with_no_rows_in_influx_says_so():
+    source = RemoteSource({})
+    result = explore.entity_series(source, make_settings(), "person.alice", days=1)
+    assert result["available"] is False
+    assert "person.alice" in result["reason"]
+
+
+def test_a_source_that_can_report_nothing_is_an_answer_not_an_error():
+    """A source with neither a store nor an archive cannot be asked. That is a
+    sentence to render, not a 404 for the console."""
+    class Mute:
         pass
 
-    result = explore.archive_inventory(Influx(), make_settings())
+    result = explore.archive_inventory(Mute(), make_settings())
     assert result["available"] is False
-    assert "InfluxDB" in result["reason"]
+    assert result["reason"]
 
 
 # --- one entity -----------------------------------------------------------

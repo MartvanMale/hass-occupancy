@@ -8,6 +8,7 @@ client id, so the id and topic prefix derive from `config.topic_prefix`.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import pickle
@@ -16,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import paho.mqtt.client as mqtt
+import sklearn
 
 from . import config, departure as departure_mod, eta as eta_mod, evaluate
 from . import features, log, nowcast, outing as outing_mod, train
@@ -55,11 +57,20 @@ def _load_artifact(path: Path) -> dict | None:
     """
     if not path.exists():
         return None
-    with path.open("rb") as fh:
-        artifact = pickle.load(fh)
+    try:
+        with path.open("rb") as fh:
+            artifact = pickle.load(fh)
+    except Exception:  # noqa: BLE001
+        # Another scikit-learn can fail inside the unpickle itself.
+        _stale.append((path.name, None))
+        return None
     if artifact.get("version") != train.MODEL_VERSION:
         # Counted, not announced: a version bump stales all 48 at once.
         _stale.append((path.name, artifact.get("version")))
+        return None
+    if artifact.get("sklearn") != sklearn.__version__:
+        # An estimator is only promised to work under the scikit-learn that pickled it.
+        _stale.append((path.name, f"scikit-learn {artifact.get('sklearn') or 'unknown'}"))
         return None
     return artifact
 
@@ -131,7 +142,8 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
         built = sorted({v or "unknown" for _, v in _stale})
         _log.warning("ignoring %d model file(s) built by %s -- this build is "
                      "%s. Retrain to use them; nothing is published until then.",
-                     len(_stale), "/".join(built), train.MODEL_VERSION)
+                     len(_stale), "/".join(built),
+                     f"{train.MODEL_VERSION} on scikit-learn {sklearn.__version__}")
     if mismatched:
         _log.warning("ignoring %d model file(s) fitted for a different set of "
                      "people or zones (%s%s). Retrain to serve those horizons "
@@ -368,6 +380,40 @@ def connect(client: str | None = None, availability: bool = True) -> mqtt.Client
     if availability:
         client.publish(f"{state_prefix()}/availability", "online", retain=True, qos=1)
     return client
+
+
+def check_connection(settings=None) -> dict:
+    """Can the add-on reach this broker? Never raises, publishes nothing.
+
+    Its own client id and `availability=False`: the live session's id would kick
+    the add-on's own publisher off the broker on every press, and its will would
+    retract the entities on the way out.
+    """
+    try:
+        chosen = config.mqtt_settings(settings)
+    except RuntimeError as err:
+        return {"ok": False, "detail": str(err), "host": None}
+    where = f'{chosen["host"]}:{chosen["port"]}'
+    probe = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                        client_id=f"{client_id()}-check")
+    if chosen["username"]:
+        probe.username_pw_set(chosen["username"], chosen["password"])
+    if chosen.get("ssl"):
+        probe.tls_set()
+    try:
+        probe.connect(chosen["host"], chosen["port"], keepalive=10)
+    except Exception as err:  # noqa: BLE001
+        # Named, not the exception: "Connection refused" and "Name or service not
+        # known" are different fixes, and this endpoint is admin-only.
+        return {"ok": False, "host": where,
+                "detail": f"Could not connect to {where}: {type(err).__name__}. "
+                          f"Check the host, the port and whether TLS is right."}
+    finally:
+        with contextlib.suppress(Exception):
+            probe.disconnect()
+    return {"ok": True, "host": where,
+            "detail": f"Connected to {where}"
+                      f'{" as " + chosen["username"] if chosen["username"] else " anonymously"}.'}
 
 
 class Broker:

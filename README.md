@@ -36,8 +36,8 @@ Assistant, which is most of the point.
 ## What you need
 
 **One thing is required: at least one `person` entity.** Everything else the
-add-on will work without, and it tells you on its own status page what turning
-each one on would buy you.
+add-on will work without, and the panel's Setup tab says what turning each one
+on would buy you.
 
 The things that help most, roughly in order: a GPS tracker behind each person
 (the Companion app), the **Proximity** integration against `zone.home`, and any
@@ -46,10 +46,11 @@ guide](occupancy-forecast/DOCS.md#setting-up) walks through each one.
 
 ### If you already archive to InfluxDB
 
-Set `source: influx` and the add-on trains from that bucket on its first run,
-months of history rather than days. It needs a read-only token scoped to that
-bucket, InfluxDB v2, and a bucket retention longer than the history you want to
-train on — see [Where the history should
+Pick **InfluxDB** as the history source on the panel's Connections tab and the
+add-on trains from that bucket on its first run, months of history rather than
+days. It needs a read-only token scoped to that bucket, InfluxDB 2.x or 1.8 with
+Flux enabled, and a bucket retention longer than the history you want to train
+on — see [Where the history should
 live](occupancy-forecast/DOCS.md#where-the-history-should-live).
 
 ### What it does not read

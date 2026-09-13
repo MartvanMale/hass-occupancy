@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from joblib import Parallel, delayed
+import sklearn
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.pipeline import Pipeline
@@ -684,6 +685,7 @@ def save(estimator: Pipeline, metrics, models_dir: Path = MODELS_DIR,
         # The feature list travels WITH the model, so a feature added here
         # cannot silently desynchronise from what is served.
         pickle.dump({"model": estimator, "version": MODEL_VERSION, "kind": kind,
+                     "sklearn": sklearn.__version__,
                      "metrics": payload, "features": feature_names}, fh)
     tmp.replace(path)
     return path

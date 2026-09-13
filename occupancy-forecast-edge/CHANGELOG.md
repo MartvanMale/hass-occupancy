@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.4.0 - 2026-09-13
+
 ### Added
 
 - **A Connections tab.** Where history comes from, the MQTT broker and the Home

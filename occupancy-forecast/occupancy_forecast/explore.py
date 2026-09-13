@@ -7,6 +7,8 @@ page. Nothing reads a whole parquet; missing data is `unavailable(reason)`.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 
@@ -76,20 +78,64 @@ def _role(entity_id: str, settings) -> str:
     return "untracked"
 
 
+# A remote archive is a bucket scan and the Data tab polls; thirty seconds of
+# staleness is invisible. The same bargain `server._span` strikes over `span()`.
+ARCHIVE_TTL_S = 30
+_archive_cache: dict = {"source": None, "key": None, "at": 0.0, "value": None}
+
+
+def _remote_archive(source, tracked: list[str]) -> dict:
+    now = time.monotonic()
+    key = tuple(tracked)
+    if (_archive_cache["source"] is source and _archive_cache["key"] == key
+            and _archive_cache["value"] is not None
+            and now - _archive_cache["at"] < ARCHIVE_TTL_S):
+        return _archive_cache["value"]
+    archive = source.archive(tracked)
+    _archive_cache.update(source=source, key=key, at=now, value=archive)
+    return archive
+
+
+def _remote_inventory(source, settings, tracked: list[str]) -> dict:
+    """The archive card for a source that is not a local file.
+
+    Only the CONFIGURED entities: the bucket holds every entity in the house,
+    so enumerating it would be hundreds of rows about entities this add-on was
+    never asked to read.
+    """
+    archive = _remote_archive(source, tracked)
+    entities = []
+    for row in archive["entities"]:
+        entity_id = row["entity_id"]
+        entities.append({
+            "entity_id": entity_id,
+            "rows": row["rows"],
+            "first": row["first"],
+            "last": row["last"],
+            "kind": (_classify(entity_id, [(v, 1) for v in row["sample"]])
+                     if row["rows"] else "other"),
+            "role": _role(entity_id, settings),
+            # Everything here was asked for by id, so nothing here is untracked.
+            "tracked": True,
+        })
+    return {"available": True, "span": archive["span"], "entities": entities}
+
+
 def archive_inventory(source, settings) -> dict:
     """What is in `/data/history.db`, entity by entity, bar our own heartbeat.
 
     `tracked` is the point: archived but unread, or configured but never seen.
     """
     store = getattr(source, "store", None)
-    if store is None:
-        return unavailable("this installation reads its history from InfluxDB, "
-                           "so there is no local archive to inspect")
+    if store is None and not hasattr(source, "archive"):
+        return unavailable("this source keeps no history that can be inspected")
     if settings is None:
         return unavailable("nothing is configured yet — pick at least one person "
                            "on the Setup tab")
 
     tracked = set(runtime.tracked_entities(settings))
+    if store is None:
+        return _remote_inventory(source, settings, sorted(tracked))
     rows = store.inventory()
     entities = []
     for row in rows:
@@ -119,21 +165,38 @@ def entity_series(source, settings, entity_id: str, days: int | None = None) -> 
     Together, a gap in the raw transitions shows as the blank slot it causes.
     """
     store = getattr(source, "store", None)
-    if store is None:
-        return unavailable("this installation reads its history from InfluxDB, "
-                           "so there is no local archive to inspect")
-    if entity_id not in store.entities():
-        return unavailable(f"{entity_id} has never produced a row in the archive")
+    if store is None and not hasattr(source, "archive"):
+        return unavailable("this source keeps no history that can be inspected")
+
+    field = "state"
+    if store is not None:
+        if entity_id not in store.entities():
+            return unavailable(f"{entity_id} has never produced a row in the archive")
+        kind = _classify(entity_id, store.value_counts(entity_id, limit=4))
+    else:
+        found = next((e for e in source.archive([entity_id])["entities"]
+                      if e["entity_id"] == entity_id), None)
+        if not found or not found["rows"]:
+            return unavailable(f"{entity_id} has never produced a row in the archive")
+        kind = _classify(entity_id, [(v, 1) for v in found["sample"]])
+        field = found["field"]
 
     days = _clamp_days(days)
     stop = pd.Timestamp.now(tz="UTC")
     start = stop - pd.Timedelta(days=days)
     slots = features.grid(start, stop)
-    kind = _classify(entity_id, store.value_counts(entity_id, limit=4))
 
     # Seeded, so a slot at the start of the window is not blank merely because
     # the last change happened before it.
-    events = store.seeded_states(entity_id, start.isoformat(), stop.isoformat())
+    if field == "value":
+        # Stored only as a number: there is no string state to read, and asking
+        # for one draws an empty chart rather than saying anything.
+        events = [(when, str(value)) for when, value
+                  in source.seeded_numeric(entity_id, start.isoformat(),
+                                           stop.isoformat())]
+    else:
+        reader = store if store is not None else source
+        events = reader.seeded_states(entity_id, start.isoformat(), stop.isoformat())
     raw_rows = len(events)
     truncated = raw_rows > MAX_EVENTS
 

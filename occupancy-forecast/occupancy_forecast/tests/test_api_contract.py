@@ -17,7 +17,7 @@ STATUS_KEYS = {
     "display_name", "history", "days_until_training", "usable_presence_days",
     "people", "feature_groups",
     "served_by", "model_kind", "best_baseline", "worker",
-    "mqtt", "listener", "last_train", "last_train_seconds",
+    "mqtt", "influx_version", "listener", "last_train", "last_train_seconds",
     "next_train", "train_cadence", "training_in_progress",
     "training_started_at", "last_collect", "last_predict", "last_error",
 }
@@ -46,7 +46,13 @@ CANDIDATE_KEYS = {"people", "zones", "groups", "countries", "has_proximity",
 SETTINGS_KEYS = {"people", "zones", "house_entity", "holiday_country",
                  "day_schedule",
                  "departure_threshold", "arrival_threshold", "crossing_min_hours",
-                 "forecast_retention_days"}
+                 "forecast_retention_days",
+                 "source", "influx_url", "influx_org", "influx_bucket",
+                 "mqtt_host", "mqtt_port", "mqtt_user", "mqtt_ssl",
+                 # Flags, not values: `Settings.public` never serves a secret.
+                 "influx_token_set", "mqtt_password_set"}
+# Write-only, so they are on `ConfigPatch` but never on `Settings`.
+SECRET_KEYS = {"influx_token", "mqtt_password"}
 
 # The Data tab. Each is a discriminated union on the panel side (`available`
 # false-with-reason or true), so tsc refuses a view that forgets the empty state.
@@ -255,9 +261,26 @@ def test_candidates_carries_every_field_the_pickers_read():
 
 
 def test_the_saved_settings_round_trip_through_the_form():
-    """GET /api/config seeds the form; POST sends back these same keys."""
-    from dataclasses import asdict
-    assert SETTINGS_KEYS <= set(asdict(make_settings()))
+    """GET /api/config seeds the form; POST sends back these same keys.
+
+    Against `public()`, not `asdict`: that is what the endpoint serves, and the
+    difference between the two is exactly the secrets it must not serve.
+    """
+    assert SETTINGS_KEYS <= set(make_settings().public())
+
+
+def test_the_open_config_endpoint_never_serves_a_secret():
+    """`GET /api/config` is unauthenticated so the panel can load, so a secret
+    on it would be readable by anyone who can open the panel."""
+    from occupancy_forecast import config
+
+    # Values that cannot collide with a key name: "tok" is inside
+    # `influx_token_set`, which would pass this by accident.
+    served = make_settings(influx_token="QQtokenQQ", mqtt_password="QQpwQQ").public()
+    assert SECRET_KEYS.isdisjoint(served)
+    assert set(config.SECRETS) == SECRET_KEYS
+    assert served["influx_token_set"] and served["mqtt_password_set"]
+    assert "QQ" not in str(served)
 
 
 def test_every_settable_field_the_form_sends_is_on_a_validator_allowlist():
@@ -265,13 +288,19 @@ def test_every_settable_field_the_form_sends_is_on_a_validator_allowlist():
     to the form and forgotten here never saves and never errors."""
     from occupancy_forecast import server
 
-    settable = SETTINGS_KEYS - {"holiday_country"}          # optional in the patch
+    # `_set` flags are read-only, and holiday_country is optional in the patch.
+    settable = ((SETTINGS_KEYS | SECRET_KEYS)
+                - {"holiday_country", "influx_token_set", "mqtt_password_set"})
     payload = {"people": [], "zones": [], "house_entity": None,
                "day_schedule": None, "departure_threshold": 0.5,
                "arrival_threshold": 0.5, "crossing_min_hours": 2,
-               "forecast_retention_days": 30}
+               "forecast_retention_days": 30, "source": "store",
+               "influx_url": "", "influx_org": "", "influx_bucket": "b",
+               "influx_token": "tok", "mqtt_host": "", "mqtt_port": 1883,
+               "mqtt_user": "", "mqtt_password": "pw", "mqtt_ssl": False}
     applied = {**server.typed_patch(payload),
-               **server.crossing_patch(payload, make_settings())}
+               **server.crossing_patch(payload, make_settings()),
+               **server.secret_patch(payload, make_settings())}
     assert settable <= set(applied), settable - set(applied)
 
 

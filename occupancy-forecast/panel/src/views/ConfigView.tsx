@@ -1,10 +1,10 @@
-import type { FormEvent } from 'react'
 import type { Candidates, FeatureDetail, Status } from '../types'
 import { Card } from '../components/Card'
 import { Chip } from '../components/Chip'
 import { Row } from '../components/Row'
 import { Icon } from '../components/Icon'
 import { relativeTime } from '../format'
+import { Field } from '../components/Field'
 import { Select } from '../components/Select'
 
 /**
@@ -13,7 +13,6 @@ import { Select } from '../components/Select'
  */
 
 const round = (n: number) => Math.round(n).toString()
-const count = (n: number) => n.toLocaleString()
 
 /** `feature_groups[*].detail` is polymorphic -- a list, a sentence, or the
  *  person->zone mapping an older config.json can still be showing. */
@@ -25,87 +24,74 @@ function formatDetail(detail: FeatureDetail): string {
     .join(', ')
 }
 
-function StatusRows({ status }: { status: Status }) {
-  const { history, mqtt, listener } = status
-  const days = history.days ?? 0
+/**
+ * The exceptional states only, each as a banner and each only while it is true.
+ * A green tick nobody needs to read cost a whole card; these interrupt instead.
+ * Their steady-state twins live beside the thing they report on, on Connections.
+ */
+function Notices({ status }: { status: Status }) {
   const remaining = status.days_until_training ?? 0
   return (
     <>
-      {remaining > 0 ? (
-        <Row
-          icon="collecting"
-          accent="orange"
-          primary={`Collecting history — ${round(days)} days so far`}
-          secondary={`A model can first be validated in about ${round(remaining)} more days.
-            Nothing is published until then.`}
-        />
-      ) : (
-        <Row
-          icon="collected"
-          accent="aqua"
-          primary={`${round(days)} days of history`}
-          secondary={`${count(history.rows ?? 0)} state changes.`}
-        />
+      {remaining > 0 && (
+        <div className="banner warn">
+          <Icon name="collecting" />
+          <div className="info">
+            <div className="primary">
+              Collecting history — {round(status.history.days ?? 0)} days so far
+            </div>
+            <div className="secondary">
+              A model can first be validated in about {round(remaining)} more days.
+              Nothing is published until then.
+            </div>
+          </div>
+        </div>
       )}
 
-      {mqtt.connected ? (
-        <Row
-          icon="mqtt-on"
-          accent="aqua"
-          primary="MQTT connected"
-          secondary="Forecasts are being published as entities."
-        />
-      ) : (
-        <Row
-          icon="mqtt-off"
-          accent="red"
-          primary="MQTT is not connected"
-          secondary={`Entities will not appear until it is. ${mqtt.error ?? ''}`}
-        />
-      )}
-
-      {/* Red, and shown only when true: a stalled worker hides behind every other
-          green light on this page, because a blocked thread is not a raising one. */}
+      {/* A blocked thread never raises, so this hides behind every other green
+          light on the page unless it is said out loud. */}
       {status.worker?.stalled && (
-        <Row
-          icon="alert"
-          accent="red"
-          primary={`The worker has been stuck in "${status.worker.stalled_in}" since ${
-            relativeTime(status.worker.stalled_since)}`}
-          secondary={`Forecasts are not being updated. Thread stacks are in the add-on
-            log; restarting the add-on clears it. Stalls since start: ${
-            status.worker.stalls}.`}
-        />
+        <div className="banner">
+          <Icon name="alert" />
+          <div className="info">
+            <div className="primary">
+              The worker has been stuck in “{status.worker.stalled_in}” since{' '}
+              {relativeTime(status.worker.stalled_since)}
+            </div>
+            <div className="secondary">
+              Forecasts are not being updated. Thread stacks are in the add-on log;
+              restarting the add-on clears it. Stalls since start: {status.worker.stalls}.
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Orange, not red: with the trigger subscription dead the five-minute poll
-          carries on, so this is slower rather than broken. */}
-      {listener.connected ? (
-        <Row
-          icon="listening"
-          accent="aqua"
-          primary={`Listening to ${listener.entities ?? 0} entities`}
-          secondary={`${count(listener.fired ?? 0)} of ${count(listener.events ?? 0)} events were
-            worth re-predicting. Last: ${listener.last_event ?? 'none yet'}.`}
-        />
-      ) : (
-        <Row
-          icon="deaf"
-          accent="orange"
-          primary="Not subscribed to Home Assistant triggers"
-          secondary={`Forecasts will still publish every five minutes, just not the moment
-            somebody comes or goes. ${listener.last_error ?? ''}`}
-        />
+      {/* The one case where a connection changes what ANOTHER tab means: what you
+          set here is stored but is not reaching Home Assistant. */}
+      {!status.mqtt.connected && (
+        <div className="banner">
+          <Icon name="mqtt-off" />
+          <div className="info">
+            <div className="primary">Not publishing — the MQTT broker is not connected.</div>
+            <div className="secondary">
+              Anything you save here is stored, but no entities are being updated.
+              Fix it on the Connections tab.
+            </div>
+          </div>
+        </div>
       )}
     </>
   )
 }
 
+
 function FeatureRows({ groups }: { groups: Status['feature_groups'] }) {
   const names = Object.keys(groups)
   if (names.length === 0) return <p className="empty">Nothing configured yet.</p>
   return (
-    <>
+    // Two columns on a card wide enough for them, one on a phone. Keyed off the
+    // CARD's width, so the same rule works here and in the Data walkthrough.
+    <div className="cols">
       {names.map((name) => {
         const active = groups[name]!.active
         return (
@@ -126,8 +112,26 @@ function FeatureRows({ groups }: { groups: Status['feature_groups'] }) {
           />
         )
       })}
-    </>
+    </div>
   )
+}
+
+/** The form's connection half. One object rather than ten props and ten
+ *  setters, which is also what keeps `App`'s wiring readable. */
+export interface Connection {
+  source: 'store' | 'influx'
+  influx_url: string
+  influx_org: string
+  influx_bucket: string
+  /** Typed now, never loaded: the server does not serve a stored secret back. */
+  influx_token: string
+  influx_token_set: boolean
+  mqtt_host: string
+  mqtt_port: string
+  mqtt_user: string
+  mqtt_password: string
+  mqtt_password_set: boolean
+  mqtt_ssl: boolean
 }
 
 export interface ConfigViewProps {
@@ -143,11 +147,6 @@ export interface ConfigViewProps {
   arrival: string
   minHours: string
   retention: string
-  loaded: boolean
-  saving: boolean
-  saved: boolean
-  error: string | null
-  onSubmit: (e: FormEvent) => void
   togglePerson: (entity: string, on: boolean) => void
   toggleZone: (entity: string, on: boolean) => void
   setHouse: (value: string) => void
@@ -174,31 +173,30 @@ const RUNS = [1, 2, 3, 4, 6].map((h) => ({
 export function ConfigView({
   status, candidates,
   people, zones, house, holiday, daySchedule, departure, arrival, minHours,
-  retention, loaded, saving, saved, error,
-  onSubmit, togglePerson, toggleZone, setHouse, setHoliday, setDaySchedule,
+  retention,
+  togglePerson, toggleZone, setHouse, setHoliday, setDaySchedule,
   setDeparture, setArrival, setMinHours, setRetention,
 }: ConfigViewProps) {
-  // Typed, so it can be mid-edit. An empty field must not reach the server as
-  // Number('') === 0, which is the one value that means something else.
-  const retentionOk = /^\d+$/.test(retention.trim())
-  const complaint = error ?? (retentionOk
-    ? null
-    : 'Days to keep must be a whole number of days, 0 or more.')
   return (
     <>
-      <div className="cards">
-        <Card title="Status">
-          {status ? <StatusRows status={status} /> : <p className="empty">Loading…</p>}
-        </Card>
+      {status && <Notices status={status} />}
 
-        <Card title="What this installation has">
-          {status ? <FeatureRows groups={status.feature_groups} /> : <p className="empty">Loading…</p>}
-        </Card>
-      </div>
+      {/* Read-only, and quiet ground so it does not read as a peer of the form
+          below it -- it is what the form ADDS UP TO. */}
+      <Card
+        quiet
+        title="What the model will train on"
+        subtitle="A consequence of the choices below. Read-only."
+      >
+        {status ? <FeatureRows groups={status.feature_groups} />
+                : <p className="empty">Loading…</p>}
+      </Card>
 
-      <form onSubmit={onSubmit}>
-        <div className="cards">
-          <Card title="People" subtitle="Required.">
+      <div className="cards wide">
+        {/* One column: two lists of the same kind of thing, read down rather than
+            across, so the three grid items are lists / signals / numbers. */}
+        <div className="stack">
+          <Card title="People" subtitle="Required. At least one.">
             {!candidates ? (
               <p className="empty">Loading…</p>
             ) : candidates.people.length === 0 ? (
@@ -253,169 +251,140 @@ export function ConfigView({
               ))
             )}
           </Card>
+        </div>
 
-          <Card title="The house" optional subtitle="A person group, if you have one.">
-            <Row
-              icon="house"
-              control
-              accent="blue"
-              primary="Person group"
-              secondary="Left unset, the house counts as occupied whenever anyone is home."
-              trailing={
+        {/* Three cards wrapping one select each was 150px of card per 42px of
+            control, and they are all the same kind of thing: an optional Home
+            Assistant entity the model may borrow. */}
+        <Card
+          title="Optional signals"
+          optional
+          subtitle="Entities the model may borrow. Skip any you do not have."
+        >
+          <Field
+            icon="house"
+            label="Person group"
+            hint="Unset: occupied whenever anyone is home."
+            control={
+              <Select
+                label="Person group"
+                value={house}
+                onChange={setHouse}
+                options={[
+                  { value: '', label: '— derive it from the people —' },
+                  ...(candidates?.groups ?? []).map((g) => ({ value: g.entity_id, label: g.name })),
+                ]}
+              />
+            }
+          />
+          {candidates && candidates.countries.length === 0 ? (
+            <p className="empty">
+              The holidays package is unavailable, so no calendar can be picked.
+              is_holiday will be 0 everywhere.
+            </p>
+          ) : (
+            <Field
+              icon="calendar"
+              label="Holiday calendar"
+              hint="Applies at the next training run."
+              control={
                 <Select
-                  label="Person group"
-                  value={house}
-                  onChange={setHouse}
+                  label="Holiday calendar"
+                  searchable
+                  value={holiday}
+                  onChange={setHoliday}
                   options={[
-                    { value: '', label: '— derive it from the people —' },
-                    ...(candidates?.groups ?? []).map((g) => ({ value: g.entity_id, label: g.name })),
+                    { value: '', label: '— none —' },
+                    ...(candidates?.countries ?? []).map((c) => ({ value: c.code, label: c.name })),
                   ]}
                 />
               }
             />
-          </Card>
-
-          <Card
-            title="Holiday calendar"
-            optional
-            subtitle="Not necessarily the country you live in."
-          >
-            {candidates && candidates.countries.length === 0 ? (
-              <p className="empty">
-                The holidays package is unavailable, so no calendar can be picked.
-                is_holiday will be 0 everywhere.
-              </p>
-            ) : (
-              <Row
-                icon="calendar"
-                control
-                accent="blue"
-                primary="Public holidays"
-                secondary="Takes effect at the next training run."
-                trailing={
-                  <Select
-                    label="Holiday calendar"
-                    searchable
-                    value={holiday}
-                    onChange={setHoliday}
-                    options={[
-                      { value: '', label: '— none —' },
-                      ...(candidates?.countries ?? []).map((c) => ({ value: c.code, label: c.name })),
-                    ]}
-                  />
-                }
-              />
-            )}
-          </Card>
-
-          <Card
-            title="Night shading"
-            optional
-            subtitle="Display only. Greys out hours outside a schedule you keep."
-          >
-            {candidates && candidates.schedules.length === 0 ? (
-              <p className="empty">
-                No schedule entities exist here, so there is nothing to shade by. The
-                chart works without it.
-              </p>
-            ) : (
-              <Row
-                icon="clock"
-                control
-                accent="blue"
-                primary="Waking hours"
-                secondary="Read from the schedule's own last week."
-                trailing={
-                  <Select
-                    label="Day schedule"
-                    searchable
-                    value={daySchedule}
-                    onChange={setDaySchedule}
-                    options={[
-                      { value: '', label: '— none —' },
-                      ...(candidates?.schedules ?? []).map(
-                        (e) => ({ value: e.entity_id, label: e.name })),
-                    ]}
-                  />
-                }
-              />
-            )}
-          </Card>
-
-          <Card
-            title="When a crossing counts"
-            subtitle="How far the curve must move, and for how long. No retrain needed."
-          >
-            <Row
-              icon="target"
-              control
-              accent="blue"
-              primary="Away when the chance of being home falls below"
-              trailing={
-                <Select label="Away cut" value={departure} onChange={setDeparture}
-                        options={CUTS} />
-              }
-            />
-            <Row
-              icon="target"
-              control
-              accent="blue"
-              primary="Home when it reaches"
-              secondary="Keep this at or above the away cut."
-              trailing={
-                <Select label="Home cut" value={arrival} onChange={setArrival}
-                        options={CUTS} />
-              }
-            />
-            <Row
+          )}
+          {candidates && candidates.schedules.length === 0 ? (
+            <p className="empty">
+              No schedule entities exist here, so there is nothing to shade by. The
+              chart works without it.
+            </p>
+          ) : (
+            <Field
               icon="clock"
-              control
-              accent="blue"
-              primary="and stays there for"
-              trailing={
-                <Select label="Minimum run" value={minHours} onChange={setMinHours}
-                        options={RUNS} />
+              label="Night shading"
+              hint="Display only. Greys out hours outside it."
+              control={
+                <Select
+                  label="Day schedule"
+                  searchable
+                  value={daySchedule}
+                  onChange={setDaySchedule}
+                  options={[
+                    { value: '', label: '— none —' },
+                    ...(candidates?.schedules ?? []).map(
+                      (e) => ({ value: e.entity_id, label: e.name })),
+                  ]}
+                />
               }
             />
-          </Card>
+          )}
+        </Card>
 
-          <Card
-            title="Forecast record"
-            subtitle="For the “Was it right?” chart only."
-          >
-            <Row
-              icon="database"
-              control
-              accent="blue"
-              primary="Keep each forecast for"
-              secondary="0 keeps everything. Shortening it deletes older rows permanently."
-              trailing={
-                <span className="days">
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    inputMode="numeric"
-                    aria-label="Days of forecasts to keep"
-                    value={retention}
-                    onChange={(e) => setRetention(e.target.value)}
-                  />
-                  days
-                </span>
-              }
-            />
-          </Card>
-        </div>
+        {/* Numbers you tune after the fact, and none of them needs a retrain --
+            which is what separates them from the two cards above. */}
+        <Card
+          title="Tuning"
+          subtitle="Takes effect immediately. Nothing here needs a retrain."
+        >
+          <p className="subhead">When a crossing counts</p>
+          <Field
+            icon="target"
+            label="Away below"
+            hint="Chance of being home."
+            control={
+              <Select label="Away cut" value={departure} onChange={setDeparture}
+                      options={CUTS} />
+            }
+          />
+          <Field
+            icon="target"
+            label="Home at or above"
+            hint="Keep at or above the away cut."
+            control={
+              <Select label="Home cut" value={arrival} onChange={setArrival}
+                      options={CUTS} />
+            }
+          />
+          <Field
+            icon="clock"
+            label="and stays there for"
+            control={
+              <Select label="Minimum run" value={minHours} onChange={setMinHours}
+                      options={RUNS} />
+            }
+          />
 
-        <div className="actions">
-          <button type="submit" disabled={!loaded || saving || !retentionOk}>
-            <Icon name="save" />
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-          <span className={saved ? 'saved on' : 'saved'}>Saved</span>
-          {complaint && <span className="error">{complaint}</span>}
-        </div>
-      </form>
+          <p className="subhead">Forecast record</p>
+          <Field
+            icon="database"
+            label="Keep each forecast for"
+            hint="0 keeps everything. Shortening it deletes older rows permanently."
+            control={
+              <span className="days">
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  aria-label="Days of forecasts to keep"
+                  value={retention}
+                  onChange={(e) => setRetention(e.target.value)}
+                />
+                days
+              </span>
+            }
+          />
+        </Card>
+      </div>
+
     </>
   )
 }
