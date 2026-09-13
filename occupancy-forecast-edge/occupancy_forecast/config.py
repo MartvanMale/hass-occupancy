@@ -426,6 +426,35 @@ def _supervisor_slug(token: str, timeout: float) -> str:
         return json.load(response)["data"]["slug"]
 
 
+def supervisor_options(token: str, timeout: float = 10.0) -> dict:
+    """This add-on's options as Supervisor stores them. Secrets included."""
+    import json
+    import urllib.request
+    request = urllib.request.Request(
+        "http://supervisor/addons/self/info",
+        headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return dict(json.load(response)["data"].get("options") or {})
+
+
+def set_supervisor_options(options: dict, token: str, timeout: float = 10.0) -> None:
+    """Replace this add-on's stored options WHOLESALE: send every key to keep.
+
+    An add-on's own token may write `/addons/self/*` without `hassio_api`, and
+    the endpoint only saves -- nothing restarts.
+    """
+    import json
+    import urllib.request
+    request = urllib.request.Request(
+        "http://supervisor/addons/self/options",
+        data=json.dumps({"options": options}).encode(),
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
+        method="POST")
+    with urllib.request.urlopen(request, timeout=timeout):
+        pass
+
+
 def resolve_topic_prefix(attempts: int = 1, delay: float = 0.0,
                          timeout: float = 5.0) -> bool:
     """Ask Supervisor for this add-on's slug; True once the prefix is known.

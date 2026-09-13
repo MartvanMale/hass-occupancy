@@ -9,9 +9,10 @@ configuration:
   source:
     name: History source (moved)
     description: >-
-      MOVED to the Setup tab of the add-on's own panel in 0.4.0. This option is
-      read once, on the first start after the update, to carry your existing
-      value across; after that it is ignored and editing it here does nothing.
+      MOVED to the Connections tab of the add-on's own panel in 0.4.0. Copied
+      there on the first start after the update, then removed from here once the
+      panel holds the same value. If it is still here after a restart, it differs
+      from the panel's and does nothing — set it on the Connections tab.
   admin_users:
     name: Admin users
     description: >-
@@ -22,39 +23,49 @@ configuration:
   influx_url:
     name: InfluxDB URL (moved)
     description: >-
-      MOVED to the Setup tab in 0.4.0, where a Check connection button can test
-      it. Read once on the first start after the update, then ignored.
+      MOVED to the Connections tab in 0.4.0, where a Check connection button can
+      test it. Copied on the first start, then removed from here once the panel
+      holds the same value.
   influx_org:
     name: InfluxDB organisation (moved)
     description: >-
-      MOVED to the Setup tab in 0.4.0. Read once on the first start after the
-      update, then ignored.
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value.
   influx_bucket:
     name: InfluxDB bucket (moved)
     description: >-
-      MOVED to the Setup tab in 0.4.0. Read once on the first start after the
-      update, then ignored.
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value.
   influx_token:
     name: InfluxDB token (moved)
     description: >-
-      MOVED to the Setup tab in 0.4.0. Read once on the first start after the
-      update, then ignored. The add-on only ever queries InfluxDB; a read-only
-      token scoped to the bucket is enough.
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value. The add-on only ever
+      queries InfluxDB; a read-only token scoped to the bucket is enough.
   mqtt_host:
     name: MQTT broker host (moved)
     description: >-
-      MOVED to the Setup tab in 0.4.0, and only ever needed for a broker that is
-      not a Supervisor add-on. Read once on the first start after the update,
-      then ignored. Supervisor's own broker is still found automatically.
+      MOVED to the Connections tab in 0.4.0, and only ever needed for a broker
+      that is not a Supervisor add-on. Copied on the first start, then removed
+      from here once the panel holds the same value. Supervisor's own broker is
+      still found automatically.
   mqtt_port:
     name: MQTT broker port (moved)
-    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
+    description: >-
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value.
   mqtt_user:
     name: MQTT username (moved)
-    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
+    description: >-
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value.
   mqtt_password:
     name: MQTT password (moved)
-    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
+    description: >-
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value.
   mqtt_ssl:
     name: MQTT over TLS (moved)
-    description: MOVED to the Setup tab in 0.4.0. Read once, then ignored.
+    description: >-
+      MOVED to the Connections tab in 0.4.0. Copied on the first start, then
+      removed from here once the panel holds the same value.

@@ -16,10 +16,12 @@
   not using InfluxDB, or the broker fields when Home Assistant's own broker was
   fine, so all twelve options were always on screen. Those ten now live on the
   add-on's own panel, where they only appear when they apply. **You do not
-  need to do anything**: your existing values are copied across the first time
-  the add-on starts after this update, and the old options stay in place for a
-  release or two. Editing them in the Configuration tab after that first start
-  has no effect — change them on the Connections tab instead.
+  need to do anything, and nothing you entered is lost**: your existing values
+  are copied across the first time the add-on starts after this update, and
+  each is then removed from the Configuration tab once the panel holds the same
+  value. One that differs is left where it is and does nothing — set it on the
+  Connections tab. If you go back to 0.3.x, enter the InfluxDB and broker
+  settings again.
 - **The Setup tab is shorter.** The person group, holiday calendar and night
   shading each had a card to themselves and now share one, "Optional signals";
   the crossing cuts and the forecast record share another, "Tuning". "What the

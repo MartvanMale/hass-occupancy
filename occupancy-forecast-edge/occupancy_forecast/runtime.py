@@ -35,9 +35,9 @@ def load_settings(ha: HomeAssistant | None = None,
     return settings
 
 
-# The add-on options these settings used to be read from. Kept in config.yaml for
-# a release or two so an existing install carries its values across; removing a
-# key makes Supervisor drop the stored value before any of our code runs.
+# The add-on options these settings used to be read from. Their keys stay in
+# config.yaml's schema: removing one makes Supervisor drop the stored value
+# before any of our code runs, so a value is only ever removed by the retirement below.
 _LEGACY_OPTIONS = {
     "source": ("OCCUPANCY_SOURCE", str),
     "influx_url": ("INFLUX_URL", str),
@@ -89,6 +89,55 @@ def import_legacy_options(settings: config.Settings) -> bool:
                   "settings; change them on the Connections tab from now on",
                   ", ".join(sorted(taken)))
     return bool(taken)
+
+
+def _held(kind, stored, held) -> bool:
+    """Whether Supervisor's copy of an option is empty or matches config.json."""
+    if stored is None or stored == "":
+        return True
+    try:
+        if kind is bool:
+            flag = stored if isinstance(stored, bool) else str(stored).strip().lower() == "true"
+            return flag == bool(held)
+        if kind is int:
+            return int(stored) == int(held)
+    except (TypeError, ValueError):
+        return False
+    return str(stored).strip() == str(held or "").strip()
+
+
+def retire_legacy_options(settings: config.Settings) -> list[str]:
+    """Remove moved options from Supervisor's copy, which hides them in its form.
+
+    Only a value config.json already holds is removed, so nothing typed there is
+    lost; one that differs stays and is named in the log, never its value.
+    """
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token or not settings.migrated_from_options:
+        return []
+    try:
+        stored = config.supervisor_options(token)
+        safe, kept = [], []
+        for name, (_variable, kind) in _LEGACY_OPTIONS.items():
+            if name in stored:
+                (safe if _held(kind, stored[name], getattr(settings, name))
+                 else kept).append(name)
+        if kept:
+            _log.warning("the %s add-on option(s) differ from the panel's settings "
+                         "and do nothing; set them on the Connections tab, then "
+                         "clear them in the Configuration tab", ", ".join(sorted(kept)))
+        if not safe:
+            return []
+        config.set_supervisor_options(
+            {key: value for key, value in stored.items() if key not in safe}, token)
+    except Exception as err:  # noqa: BLE001
+        # The type only: a failure here must not stop start-up, nor echo a request.
+        _log.warning("could not tidy the moved add-on options (%s); they stay in "
+                     "the Configuration tab for now", type(err).__name__)
+        return []
+    _log.info("removed %s from the Configuration tab: the panel holds the same "
+              "values", ", ".join(sorted(safe)))
+    return sorted(safe)
 
 
 def refresh_environment(settings: config.Settings, ha: HomeAssistant) -> config.Settings:
@@ -208,6 +257,8 @@ def bootstrap(path: Path = config.CONFIG_PATH):
     import_legacy_options(settings)
     settings = refresh_environment(settings, ha)
     settings.save(path)
+    # After the save, never before: Supervisor's copy goes only once ours is on disk.
+    retire_legacy_options(settings)
     config.configure(settings)
     log = forecast_log()
     return settings, ha, build_source(settings, ha, log), log

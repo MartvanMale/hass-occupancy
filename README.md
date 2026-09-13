@@ -13,6 +13,8 @@ automation. There is no custom integration to install.
 **Nothing here changes anything in your house.** It publishes sensors and, at
 most, a persistent notification. Acting on a forecast is your automations' job.
 
+![Landing page](/docs/images/Overview%20page.png)
+
 ## Install
 
 1. Settings → Add-ons → Add-on Store → ⋮ → Repositories, and add:

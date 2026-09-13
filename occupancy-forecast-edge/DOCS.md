@@ -46,21 +46,23 @@ in training history.
 
 ## Where the settings are, which differs from stable right now
 
-**In this build the history source and the MQTT broker are set on the Setup
-tab**, not in the Configuration tab. Stable still has them as add-on options, so
-stable's documentation describes them there; that is the one place the two
-pages disagree until this is promoted.
+**In this build the history source and the MQTT broker are set on the
+Connections tab**, not in the Configuration tab. Stable still has them as add-on
+options, so stable's documentation describes them there; that is the one place
+the two pages disagree until this is promoted.
 
 The Configuration tab keeps `log_level` and `admin_users` only. Everything else
 moved because Supervisor's options form cannot hide a field that does not apply:
 the four InfluxDB fields were on screen whether or not you used InfluxDB, and
 the five broker fields whether or not your broker was Home Assistant's own.
 
-Your existing option values are copied over the first time this build starts,
-and the old options stay in place for a release or two. **After that first
-start, editing them in the Configuration tab does nothing** — use the Setup tab.
+Your existing option values are copied over the first time this build starts.
+**Nothing you entered is lost**: each one is removed from the Configuration tab
+only once the panel holds the same value. One that is still there after a
+restart differs from the panel's and does nothing — set it on the Connections
+tab. Going back to 0.3.x means entering the InfluxDB and broker settings again.
 
-The Setup tab also has a **Check connection** button for InfluxDB, which reports
+The Connections tab also has a **Check connection** button for InfluxDB, which reports
 whether the server answers and which version it is, whether the token was
 accepted, whether the bucket exists, and how many rows it can actually see for
 your people. On InfluxDB 1.x it also explains that the token is

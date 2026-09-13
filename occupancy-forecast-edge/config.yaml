@@ -35,27 +35,18 @@ services:
 # service, persistent_notification create/dismiss, for its own progress notice.
 homeassistant_api: true
 
-# DEPRECATED since 0.4.0, everything below except `log_level` and `admin_users`:
-# the panel's Setup tab owns them, because Supervisor's schema cannot branch and
-# most of these only matter given an earlier answer. Kept so an existing install
-# carries its values across on its first start -- removing a key makes Supervisor
-# drop the stored value before any of this add-on's code runs.
+# The ten options that moved to the panel in 0.4.0 have no defaults, so the form
+# hides them. They stay in the schema: removing a key makes Supervisor drop the
+# stored value before `runtime.import_legacy_options` can copy it, and
+# `runtime.retire_legacy_options` removes a stored value only once the panel
+# holds the same one.
 options:
   log_level: info
-  source: store
   admin_users: []
-  mqtt_host: ""
-  mqtt_port: 1883
-  mqtt_user: ""
-  mqtt_password: ""
-  mqtt_ssl: false
-  influx_url: ""
-  influx_org: ""
-  influx_bucket: homeassistant
-  influx_token: ""
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
-  source: list(store|influx)
+  # Optional so the form can hide it: a key without `?` renders regardless.
+  source: list(store|influx)?
   # EMPTY MEANS EVERYONE: ingress proves who the caller is, not whether they may retrain the house.
   admin_users:
     - str

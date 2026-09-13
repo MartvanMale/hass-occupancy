@@ -81,7 +81,6 @@ export function ConnectionsView({
     <div className="cards wide">
       <Card
         title="Where history comes from"
-        subtitle="Moved here from the add-on options in 0.4.0."
         badge={archived}
       >
         <Field
