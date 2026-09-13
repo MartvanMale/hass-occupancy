@@ -17,9 +17,7 @@ configuration:
     name: Admin users
     description: >-
       Home Assistant user ids allowed to save the configuration, retrain and
-      reload. Empty means every user who can open the panel. Stays here on
-      purpose: it is what gates the panel form, so it must not be settable from
-      inside that form.
+      reload. Empty means every user who can open the panel.
   influx_url:
     name: InfluxDB URL (moved)
     description: >-

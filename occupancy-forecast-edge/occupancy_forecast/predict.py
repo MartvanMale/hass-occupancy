@@ -391,8 +391,9 @@ def check_connection(settings=None) -> dict:
     """
     try:
         chosen = config.mqtt_settings(settings)
-    except RuntimeError as err:
-        return {"ok": False, "detail": str(err), "host": None}
+    except RuntimeError:
+        # Our own sentence, never the exception's text: this goes to the panel.
+        return {"ok": False, "detail": config.NO_BROKER, "host": None}
     where = f'{chosen["host"]}:{chosen["port"]}'
     probe = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                         client_id=f"{client_id()}-check")

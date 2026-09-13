@@ -229,6 +229,9 @@ retelling.
 
 This applies to prose in docs too, agents included. Prefer cutting to adding.
 
+Text the user reads — `translations/*.yaml`, `DOCS.md`, `CHANGELOG.md` — says
+what a thing does and what to do with it, never why it was designed that way.
+
 ## Never
 
 - **Never hardcode an identity string.** Anything that names an entity, topic,
