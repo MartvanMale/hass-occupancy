@@ -364,6 +364,10 @@ def zone_name_map() -> dict[str, str]:
 
 # Deliberately NO host default: an unset variable must fail, not silently dial
 # somebody else's broker.
+NO_BROKER = ("no MQTT broker: nothing in the panel's broker card and no mqtt "
+             "service from Supervisor. Fill in the broker on the add-on's "
+             "Connections tab, or install the Mosquitto add-on.")
+
 
 def mqtt_settings(settings: "Settings | None" = None) -> dict:
     """A broker set in the panel wins; otherwise Supervisor's own mqtt service.
@@ -383,10 +387,7 @@ def mqtt_settings(settings: "Settings | None" = None) -> dict:
         }
     host = os.environ.get("MQTT_HOST")
     if not host:
-        raise RuntimeError(
-            "no MQTT broker: nothing in the panel's broker card and no mqtt "
-            "service from Supervisor. Fill in the broker on the add-on's "
-            "Connections tab, or install the Mosquitto add-on.")
+        raise RuntimeError(NO_BROKER)
     return {
         "host": host,
         "port": int(os.environ.get("MQTT_PORT", "1883")),

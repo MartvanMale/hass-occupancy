@@ -1063,6 +1063,17 @@ def test_the_broker_check_falls_back_to_supervisors_service(fake_mqtt, monkeypat
     assert result["ok"] and result["host"] == "core-mosquitto:1883"
 
 
+def test_no_broker_at_all_says_where_to_set_one(fake_mqtt, monkeypatch):
+    """Neither a broker card nor Supervisor's service: the answer is a fixed
+    sentence, not an exception's text, and no client is ever made."""
+    monkeypatch.delenv("MQTT_HOST", raising=False)
+
+    result = predict_mod.check_connection(make_settings(mqtt_host=""))
+
+    assert result == {"ok": False, "detail": config_mod.NO_BROKER, "host": None}
+    assert fake_mqtt.made == []
+
+
 # --- hiding the moved options from Supervisor's form --------------------------
 
 class _FakeSupervisor:
