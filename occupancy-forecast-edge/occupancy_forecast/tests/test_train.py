@@ -370,6 +370,7 @@ def test_a_dedicated_artifact_from_an_earlier_train_does_not_survive_a_failed_ho
     tmp_path.mkdir(parents=True, exist_ok=True)
     with stale.open("wb") as fh:
         pickle.dump({"model": object(), "version": train.MODEL_VERSION, "kind": "dedicated",
+                     "sklearn": train.sklearn.__version__,
                      "metrics": {failing: {"ships": True, "kind": "dedicated"}},
                      "features": []}, fh)
 
@@ -453,6 +454,25 @@ def test_a_stale_artifact_is_refused_rather_than_unpickled(tmp_path):
         pickle.dump({"model": object(), "version": "0.2.0",
                      "metrics": {1: {"ships": True}}}, fh)
     assert predict_mod.load_models(tmp_path) == {}
+
+
+def test_an_artifact_pickled_by_another_scikit_learn_is_stale(tmp_path):
+    """Counted stale, not just skipped: that is what makes the worker retrain
+    at once after an upgrade instead of at the next scheduled train."""
+    from occupancy_forecast import predict as predict_mod
+
+    def write(sklearn_version):
+        with (tmp_path / train.POOLED_NAME).open("wb") as fh:
+            pickle.dump({"model": object(), "version": train.MODEL_VERSION,
+                         "sklearn": sklearn_version, "kind": "pooled",
+                         "metrics": {1: {"ships": True, "kind": "pooled"}}}, fh)
+
+    write("1.7.2")
+    assert predict_mod.load_models(tmp_path) == {}
+    assert predict_mod.stale_artifacts() == [(train.POOLED_NAME, "scikit-learn 1.7.2")]
+    write(train.sklearn.__version__)
+    assert 1 in predict_mod.load_models(tmp_path)
+    assert predict_mod.stale_artifacts() == []
 
 
 # ---------------------------------------------------------------------------

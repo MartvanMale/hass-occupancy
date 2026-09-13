@@ -42,6 +42,16 @@
   up as having no history. There is no "on disk" figure, because the bucket is
   shared with the rest of Home Assistant.
 
+### Changed
+
+- **The libraries the add-on is built on are updated**, among them pandas 3 and
+  scikit-learn 1.9. Models saved by the previous version are set aside rather
+  than loaded, so the first start after this update retrains straight away,
+  and no forecast is published until that training finishes.
+- **The Indian holiday calendar no longer flags regional festivals** such as
+  Makar Sankranti and Pongal. The holidays library now lists them as optional.
+  Republic Day and the other national holidays are unchanged.
+
 ### Fixed
 
 - **InfluxDB 1.8 archives are readable.** Against a 1.8 server every query
@@ -49,6 +59,9 @@
   while looking straight at a database full of it. 1.8 prefixes its responses
   with three lines that InfluxDB 2 leaves out, and those were being read as the
   column headings. Reported by Charles Kalko, who also wrote the fix.
+- **The arrival ETA is never answered by a model saved under an older library
+  version.** Such a model is ignored until training replaces it, instead of
+  being loaded and trusted.
 
 ## 0.3.1 - 2026-09-12
 

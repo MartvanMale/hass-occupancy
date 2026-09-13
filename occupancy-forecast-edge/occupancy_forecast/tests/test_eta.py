@@ -69,14 +69,18 @@ def test_an_artifact_fitted_on_another_feature_list_is_refused_at_load(tmp_path,
     scikit-learn on every cycle, swallowed."""
     import pickle
 
+    import sklearn
+
     caplog.set_level("WARNING")
     with (tmp_path / "eta_alice.pkl").open("wb") as fh:
         pickle.dump({"model": object(), "subject": "alice",
                      "features": ["distance_km", "hour"],
+                     "sklearn": sklearn.__version__,
                      "metrics": {"ships": True}}, fh)
     with (tmp_path / "eta_bob.pkl").open("wb") as fh:
         pickle.dump({"model": object(), "subject": "bob",
                      "features": list(eta.FEATURES),
+                     "sklearn": sklearn.__version__,
                      "metrics": {"ships": True}}, fh)
 
     loaded = eta.load_models(tmp_path)
@@ -86,3 +90,25 @@ def test_an_artifact_fitted_on_another_feature_list_is_refused_at_load(tmp_path,
     # Only alice has a distance entity in the fixture; bob's file is simply not
     # a subject, and that must not be confused with a refusal.
     assert set(loaded) <= set(eta.eta_subjects())
+
+
+def test_an_artifact_pickled_by_another_scikit_learn_is_refused_at_load(tmp_path, caplog):
+    """An estimator is only promised to work under the scikit-learn that pickled
+    it; after an upgrade the retrain replaces it."""
+    import pickle
+
+    import sklearn
+
+    def write(sklearn_version):
+        with (tmp_path / "eta_alice.pkl").open("wb") as fh:
+            pickle.dump({"model": object(), "subject": "alice",
+                         "features": list(eta.FEATURES), "sklearn": sklearn_version,
+                         "metrics": {"ships": True}}, fh)
+
+    caplog.set_level("WARNING")
+    write("1.7.2")
+    assert "alice" not in eta.load_models(tmp_path)
+    assert any("eta_alice.pkl" in r.getMessage() and "scikit-learn" in r.getMessage()
+               for r in caplog.records)
+    write(sklearn.__version__)
+    assert "alice" in eta.load_models(tmp_path)
