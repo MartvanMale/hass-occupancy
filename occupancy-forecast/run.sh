@@ -6,34 +6,37 @@
 
 set -e
 
-# The ADD-ON OPTION is authoritative and overrides /data/config.json: the option
-# was otherwise accepted, shown in the UI and ignored.
-export OCCUPANCY_SOURCE="$(bashio::config 'source')"
+# DEPRECATED since 0.4.0: the panel owns these; `runtime.import_legacy_options`
+# reads them once. One guard per key, so a value is carried across whether or
+# not the others are set, and an absent key is never exported as `null`.
+export_option() {
+    if bashio::config.has_value "$2"; then
+        export "$1=$(bashio::config "$2")"
+    fi
+}
+export_option OCCUPANCY_SOURCE source
+export_option INFLUX_URL influx_url
+export_option INFLUX_ORG influx_org
+export_option INFLUX_BUCKET influx_bucket
+export_option INFLUX_TOKEN influx_token
+# LEGACY_ names, not MQTT_*: those carry Supervisor's discovered broker below.
+export_option OCCUPANCY_LEGACY_MQTT_HOST mqtt_host
+export_option OCCUPANCY_LEGACY_MQTT_PORT mqtt_port
+export_option OCCUPANCY_LEGACY_MQTT_USER mqtt_user
+export_option OCCUPANCY_LEGACY_MQTT_PASSWORD mqtt_password
+export_option OCCUPANCY_LEGACY_MQTT_SSL mqtt_ssl
 
 # log.py maps bashio's seven level names onto Python's five.
 export LOG_LEVEL="$(bashio::config 'log_level')"
-
-if bashio::config.equals 'source' 'influx'; then
-    export INFLUX_URL="$(bashio::config 'influx_url')"
-    export INFLUX_ORG="$(bashio::config 'influx_org')"
-    export INFLUX_BUCKET="$(bashio::config 'influx_bucket')"
-    export INFLUX_TOKEN="$(bashio::config 'influx_token')"
-fi
 
 # Empty means everyone, which is what every existing install has. `admin_users // []`
 # because jq's `join` on an absent key is a hard error, and under `set -e` that
 # is a container that will not start.
 export OCCUPANCY_ADMIN_USERS="$(bashio::config 'admin_users // [] | join(",")')"
 
-# An explicit broker wins over the Supervisor service: a broker outside Supervisor registers no service.
-if bashio::config.has_value 'mqtt_host'; then
-    export MQTT_HOST="$(bashio::config 'mqtt_host')"
-    export MQTT_PORT="$(bashio::config 'mqtt_port')"
-    export MQTT_USER="$(bashio::config 'mqtt_user')"
-    export MQTT_PASSWORD="$(bashio::config 'mqtt_password')"
-    export MQTT_SSL="$(bashio::config 'mqtt_ssl')"
-    bashio::log.info "MQTT broker from the add-on options: ${MQTT_HOST}:${MQTT_PORT}"
-elif bashio::services.available 'mqtt'; then
+# Supervisor's own broker, which is DISCOVERY and stays here: the panel's card
+# left empty means "use whatever Supervisor currently says".
+if bashio::services.available 'mqtt'; then
     export MQTT_HOST="$(bashio::services 'mqtt' 'host')"
     export MQTT_PORT="$(bashio::services 'mqtt' 'port')"
     export MQTT_USER="$(bashio::services 'mqtt' 'username')"
@@ -42,14 +45,16 @@ elif bashio::services.available 'mqtt'; then
     # got a plaintext CONNECT and the add-on reported it unavailable.
     export MQTT_SSL="$(bashio::services 'mqtt' 'ssl' 2>/dev/null || echo false)"
 else
-    # Not fatal -- see `mqtt:want` in config.yaml.
-    bashio::log.warning "No MQTT broker: no mqtt_host option and no Supervisor mqtt service. Entities will not be published."
+    # Not fatal -- see `mqtt:want` in config.yaml. Not an error either: the panel
+    # may hold a broker of its own, which this script cannot see.
+    bashio::log.info "No Supervisor mqtt service; using whatever broker the panel has, if any."
 fi
 
 # The add-on's own name, not a literal: this file is shared, so a hardcoded one
 # makes edge's log claim to be stable's. `|| true`: a log line is not worth a failed start.
 addon_name="$(bashio::addon.name 2>/dev/null || true)"
-bashio::log.info "Starting ${addon_name:-Occupancy Forecast} (source: $(bashio::config 'source'))"
+# No source here: the panel owns it, and the server's "ready" line reports it.
+bashio::log.info "Starting ${addon_name:-Occupancy Forecast}"
 
 # Everything above needs root (bashio reads /data/options.json and Supervisor's
 # credentials); everything below is a forecaster with no business writing the

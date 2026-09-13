@@ -23,22 +23,25 @@ nothing, and `mqtt` in `/health` says which it is.
 **A broker that is not an add-on.** Supervisor hands over the host, port and
 credentials of a broker it runs itself, so a Mosquitto add-on needs nothing
 configured. A broker outside Supervisor — EMQX, or Mosquitto on another machine
-— registers no such service, so set `mqtt_host` (and `mqtt_port`, `mqtt_user`,
-`mqtt_password`, `mqtt_ssl`) in the Configuration tab instead. Those five win
-over the Supervisor service; leave `mqtt_host` empty and nothing changes.
+— registers no such service, so fill in the **MQTT broker** card on the panel's
+**Connections** tab instead: give a host and the port, credentials and TLS
+appear. Those win over the Supervisor service; leave the host empty and nothing
+changes. **Check broker** on the same card connects under its own name, so
+testing never disturbs the live connection.
 
 ### Where the history should live
 
-`source` is the one decision that is awkward to revisit later, because it
-decides where a year of presence history accumulates.
+The **history source**, on the panel's Connections tab, is the one decision
+that is awkward to revisit later, because it decides where a year of presence
+history accumulates.
 
-**`store` is right if this add-on is the only thing that will ever read that
-history.** It is a table of `(entity_id, ts, value)` in SQLite at
+**Own archive is right if this add-on is the only thing that will ever read
+that history.** It is a table of `(entity_id, ts, value)` in SQLite at
 `/data/history.db`, appended from the moment you install, about 2.3 MB a year,
 and it is **never purged**. Nothing to install, and nothing that can be
 configured wrong.
 
-**`influx` is right if that history is going to feed anything else** — a second
+**InfluxDB is right if that history is going to feed anything else** — a second
 forecaster, a notebook, Grafana, a heating model. Presence, zone membership and
 distance-to-home are useful well beyond this add-on, and in a bucket they are
 queryable by anything that speaks Flux rather than sitting inside one add-on's
@@ -53,26 +56,28 @@ Three things to get right before choosing it:
   integration, set up separately and first; this add-on then reads what that
   integration has been writing. "Use Influx" is two pieces of plumbing and the
   add-on is the second one.
-- **InfluxDB v2.** The source speaks Flux and needs the URL, org, bucket and
-  token together. `source: influx` with any of the URL, org or token missing
-  refuses to start rather than falling back quietly to the store.
+- **InfluxDB 2.x, or 1.8 with Flux enabled.** The source speaks Flux and needs
+  the URL, org, bucket and token together; on 1.8 the token is
+  `username:password` and the bucket is `database/retention-policy`. Choosing
+  InfluxDB with any of the URL, org or token missing is refused rather than
+  falling back quietly to the own archive, and **Check connection** says which
+  part is wrong: whether the server answers, the token is accepted, the bucket
+  exists, and how many rows it can see for your people.
 - **Check the bucket's retention policy.** The local store never purges; a
   bucket very often does, and a 30-day retention silently caps the training
   history at 30 days — the opposite of the reason to switch. This is the one
   that bites.
 
-Two consequences worth expecting rather than reporting. An `influx` install
-keeps **no local archive**, so the first two cards on the Data tab say so
-instead of drawing an empty table. And **`source` in the Configuration tab wins**
-over whatever is stored in `/data/config.json`, so the Configuration tab is
-where to change it.
+One consequence worth expecting rather than reporting: an InfluxDB install
+keeps **no local archive**, so the Data tab's first two cards read the bucket
+instead, listing only the entities the add-on is configured to read.
 
-**On `influx`, install the Proximity integration too.** Distance-to-home is
-otherwise synthesised from GPS and written to the local store — and an `influx`
+**On InfluxDB, install the Proximity integration too.** Distance-to-home is
+otherwise synthesised from GPS and written to the local store — and an InfluxDB
 install has no local store, so that fallback never runs and the distance column
-stays empty. On `store` the fallback works and Proximity is merely better; on
-`influx` it is the only source of the single most valuable feature the add-on
-has.
+stays empty. On the own archive the fallback works and Proximity is merely
+better; on InfluxDB it is the only source of the single most valuable feature
+the add-on has.
 
 ### Confirm the people
 
@@ -85,9 +90,9 @@ thing the add-on refuses to start without.
 
 Everything below is optional, and a missing signal is never an error: the column
 is left empty, the model reads it as *unknown* rather than as zero, and the ship
-gate prices what remains. The Setup tab's "What this installation has" card
-lists the same signals as the table below, with `active` or `not available`
-beside each, so the two can be read side by side.
+gate prices what remains. The Setup tab opens with "What the model will train
+on", which lists the same signals as the table below with `active` or `not
+available` beside each, so the two can be read side by side.
 
 ### What to turn on, and what each buys
 
@@ -147,15 +152,20 @@ a list on this page it cannot quietly go stale.
 | option | meaning |
 |---|---|
 | `log_level` | standard add-on log level; see `## The log` below |
-| `source` | `store` (default) accumulates history from Home Assistant. `influx` reads an existing InfluxDB v2 archive instead. Which to pick is `### Where the history should live` above |
 | `admin_users` | Home Assistant user ids allowed to save the configuration, retrain or reload. **Empty, the default, means everyone who can open the panel** — Ingress proves who the caller is, not whether they may retrain the house |
-| `mqtt_host` / `mqtt_port` / `mqtt_user` / `mqtt_password` / `mqtt_ssl` | only for a broker that is not a Supervisor add-on; see `### A broker, first` above |
-| `influx_url` / `influx_org` / `influx_bucket` / `influx_token` | required when `source` is `influx` |
 
-Everything else — which people, which zones, which group — is configured on the
-add-on's own panel, because Supervisor's options form has no entity picker and
-typing `person.alice` into YAML is not a user interface. `## Setting up` above
-is what to pick there and what each one is worth.
+Everything else is set on the add-on's own panel: which people, zones and group
+on **Setup**, because Supervisor's options form has no entity picker; the history
+source and the MQTT broker on **Connections**, because that form cannot hide a
+field that does not apply. `## Setting up` above is what to pick and what each
+one is worth.
+
+**Upgrading from 0.3.x.** The history source and the broker used to be add-on
+options. Their values are copied to the panel on the first start, and each is
+then removed from the Configuration tab once the panel holds the same value, so
+nothing entered is lost; one that differs stays, does nothing, and is named in
+the log. Going back to 0.3.x means entering the InfluxDB and broker settings
+again.
 
 ## The three timestamps on a forecast
 
@@ -385,8 +395,8 @@ scored. It is read-only and nothing on it is polled.
 
 Each answers `{"available": false, "reason": "…"}` rather than a 404 when the
 layer it reads does not exist yet, which on a fresh install is the normal state
-for most of them. An installation whose `source` is `influx` keeps no local
-archive, so the first two say so.
+for most of them. On an InfluxDB install the first two read the bucket instead
+of a local archive.
 
 An entity listed as **unused** is harmless — left over from an earlier
 configuration, and ignored by the feature build. An entity listed as
@@ -415,7 +425,8 @@ feature value is read by the model as *unknown*, never as zero.
 
 ### Forecasts only update every five minutes
 
-Expected, unless the status page says **Live updates: connected**. The add-on
+Expected, unless the Connections tab's **Home Assistant events** card says
+**Subscribed**. The add-on
 subscribes to Home Assistant over the WebSocket API so that an arrival is
 noticed rather than waited for; if that subscription is down it falls back to
 the five-minute poll, which still works and is not an outage. `listener` in
@@ -454,8 +465,10 @@ The panel is the intended way in; these exist for debugging.
 | `GET /api/status` | what the panel renders |
 | `GET /api/forecast` | the forecast as last published to MQTT, rather than recomputed |
 | `GET /api/candidates` | entities discovered as trackable people, zones and groups |
-| `GET /api/config` | the current selection |
+| `GET /api/config` | the current selection. A stored InfluxDB token or broker password is never served, only whether one is set |
 | `POST /api/config` | change the selection. This is what the panel writes |
+| `POST /api/config/check` | test an InfluxDB connection without saving it |
+| `POST /api/config/check-broker` | test the MQTT broker without saving it |
 | `POST /collect` | pull new history now |
 | `POST /predict` | recompute and republish |
 | `POST /train` | rebuild the feature table and refit. Refuses with 409 below 10 days of history |
@@ -463,8 +476,10 @@ The panel is the intended way in; these exist for debugging.
 
 ## Troubleshooting
 
-**No entities appear.** Check `mqtt` in `/health`. The add-on runs fine without a
-broker — it still collects and trains — but it cannot publish. Install Mosquitto.
+**No entities appear.** The Connections tab's MQTT broker card says whether it is
+connected, and **Check broker** says why not. The add-on runs fine without a
+broker — it still collects and trains — but it cannot publish. Install Mosquitto,
+or fill in a broker of your own on that card.
 
 **Most horizons read `unknown`.** Expected for the first 10 days, when there is
 not yet enough history to train at all, and normal for a while after that: a

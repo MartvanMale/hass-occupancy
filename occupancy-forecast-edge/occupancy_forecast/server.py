@@ -30,6 +30,7 @@ from . import (config, departure, discover, eta as eta_mod, evaluate, explore,
 from . import outing as outing_mod, predict as predict_mod, runtime
 from . import train as train_mod
 from . import web
+from .sources import influx as influx_mod
 
 _log = log.get(__name__)
 
@@ -105,6 +106,10 @@ _state: dict = {
     # (computed_at, {state: count}). The scan is a full-history read of every
     # person, and the status page polls every few seconds -- see _unmatched.
     "unmatched_zones": (None, {}),
+    # Discovered from /ping by the connection check, never persisted and never
+    # branched on: a wrong guess of 2.x would silently stop stripping 1.8's
+    # annotation lines, which is the bug that filter exists for.
+    "influx_version": None,
 }
 _broker = predict_mod.Broker()
 _train_lock = threading.Lock()
@@ -784,6 +789,7 @@ def _status() -> dict:
         "model_version": train_mod.MODEL_VERSION,
         "source": settings.source if settings else None,
         "history": _span(store) if store else {"note": "influx"},
+        "influx_version": _state.get("influx_version"),
         "days_until_training": max(0, round(MIN_DAYS_TO_TRAIN - days, 1)),
         # Not the same as `history.days`, which is the age of the oldest row.
         "usable_presence_days": round(days, 3) if store else None,
@@ -1028,8 +1034,9 @@ def api_candidates() -> dict:
 
 @app.get("/api/config")
 def api_config() -> dict:
-    from dataclasses import asdict
-    return asdict(_state["settings"])
+    # `public()`, not `asdict`: this GET is open so the panel can load, and the
+    # settings now hold a token and a broker password.
+    return _state["settings"].public()
 
 
 def _number(payload: dict, key: str, what: str) -> float:
@@ -1114,6 +1121,39 @@ def _optional_str(value, key: str) -> str | None:
     return value or None
 
 
+def _plain_str(value, key: str) -> str:
+    """A settable text field that is stored as "" rather than None."""
+    if not isinstance(value, str):
+        raise HTTPException(
+            status_code=400, detail=f"{key} must be text, not {value!r}.")
+    return value.strip()
+
+
+def secret_patch(payload: dict, current: config.Settings) -> dict:
+    """The write-only fields in `payload`, or a 400.
+
+    The one deliberate exception to "every field the form sends is required":
+    the form cannot send back what it was never given, so ABSENT means keep,
+    a string means set, and null means forget.
+    """
+    out: dict = {}
+    for key in config.SECRETS:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if value is None:
+            out[key] = ""
+            continue
+        if not isinstance(value, str):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} must be text, or null to forget it.")
+        # A blank box is "leave it alone"; clearing is the explicit null above.
+        if value:
+            out[key] = value
+    return out
+
+
 def typed_patch(payload: dict) -> dict:
     """The self-contained fields of a config patch, type-checked. Or a 400.
 
@@ -1147,6 +1187,31 @@ def typed_patch(payload: dict) -> dict:
                 status_code=400,
                 detail=f"source must be 'store' or 'influx', not {payload['source']!r}.")
         out["source"] = payload["source"]
+    for key in ("influx_url", "influx_org", "influx_bucket",
+                "mqtt_host", "mqtt_user"):
+        if key in payload:
+            out[key] = _plain_str(payload[key], key)
+    # Caught here rather than at connect time, where it would only surface as a
+    # broker that never comes up.
+    if out.get("influx_url") and not out["influx_url"].startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"influx_url must start with http:// or https://, not "
+                   f"{out['influx_url']!r}.")
+    if "mqtt_port" in payload:
+        value = _number(payload, "mqtt_port", "a port number")
+        if value != int(value) or not 1 <= value <= 65535:
+            raise HTTPException(
+                status_code=400,
+                detail=f"mqtt_port must be a whole number between 1 and 65535, "
+                       f"not {payload['mqtt_port']!r}.")
+        out["mqtt_port"] = int(value)
+    if "mqtt_ssl" in payload:
+        if not isinstance(payload["mqtt_ssl"], bool):
+            raise HTTPException(
+                status_code=400,
+                detail=f"mqtt_ssl must be true or false, not {payload['mqtt_ssl']!r}.")
+        out["mqtt_ssl"] = payload["mqtt_ssl"]
     for key in ("proximity", "next_alarm"):
         if key in payload:
             value = payload[key]
@@ -1180,9 +1245,10 @@ def api_save_config(payload: dict) -> dict:
     # Both validators run before anything is touched, and neither needs HA.
     crossing = crossing_patch(payload, live_settings)
     typed = typed_patch(payload)
+    secrets = secret_patch(payload, live_settings)
 
     candidate = copy.deepcopy(live_settings)
-    for key, value in {**typed, **crossing}.items():
+    for key, value in {**typed, **crossing, **secrets}.items():
         setattr(candidate, key, value)
 
     # Rejected rather than absorbed: nothing downstream distinguishes "zone
@@ -1215,6 +1281,16 @@ def api_save_config(payload: dict) -> dict:
             status_code=400,
             detail=f"no holiday calendar for {chosen!r}. Pick one of the "
                    f"countries offered, or none at all.")
+
+    # Checked, not built: building opens a store, and validation must not do
+    # I/O. Refused rather than absorbed -- falling back to the local archive
+    # would start a fresh empty one and look healthy for ten days.
+    if candidate.source == "influx" and not (
+            candidate.influx_url and candidate.influx_token and candidate.influx_org):
+        raise HTTPException(
+            status_code=400,
+            detail="the history source is 'influx' but the URL, token and org "
+                   "are not all set. Fill them in before switching over.")
 
     settings = runtime.refresh_environment(candidate, _state["ha"])
     try:
@@ -1260,6 +1336,48 @@ def api_save_config(payload: dict) -> dict:
         except HTTPException as err:
             _log.info("not retraining yet after the configuration change: %s", err.detail)
     return {"saved": True, "people": sorted(slugs_after)}
+
+
+@app.post("/api/config/check", dependencies=admin_only)
+def api_check_influx(payload: dict) -> dict:
+    """Test an InfluxDB connection without saving it. Never echoes the token.
+
+    Admin-gated because it takes credentials and dials a URL the caller chose;
+    open, it would be a way to probe the host network from the panel.
+    """
+    live = _state["settings"]
+    url = _plain_str(payload.get("influx_url", live.influx_url), "influx_url")
+    org = _plain_str(payload.get("influx_org", live.influx_org), "influx_org")
+    bucket = _plain_str(payload.get("influx_bucket", live.influx_bucket), "influx_bucket")
+    # Blank means "the one already stored", so a saved token can be retested
+    # without the panel ever having been given it.
+    token = payload.get("influx_token") or live.influx_token
+    result = influx_mod.check_connection(url, token, org, bucket,
+                                         list(live.people))
+    # Discovered, not chosen: re-derived on every check and never persisted.
+    _state["influx_version"] = result.get("version")
+    return result
+
+
+@app.post("/api/config/check-broker", dependencies=admin_only)
+def api_check_broker(payload: dict) -> dict:
+    """Test the MQTT broker without saving it. Admin-gated like the Influx check.
+
+    The host and port are named in the RESULT, never on `/api/status`: that GET
+    is open, and an address there is readable by every Home Assistant user.
+    """
+    live = _state["settings"]
+    candidate = copy.deepcopy(live)
+    for key in ("mqtt_host", "mqtt_user"):
+        if key in payload:
+            setattr(candidate, key, _plain_str(payload[key], key))
+    if payload.get("mqtt_password"):
+        candidate.mqtt_password = payload["mqtt_password"]
+    if "mqtt_port" in payload:
+        candidate.mqtt_port = int(_number(payload, "mqtt_port", "a port number"))
+    if "mqtt_ssl" in payload:
+        candidate.mqtt_ssl = bool(payload["mqtt_ssl"])
+    return predict_mod.check_connection(candidate)
 
 
 # --- the Data tab ---------------------------------------------------------

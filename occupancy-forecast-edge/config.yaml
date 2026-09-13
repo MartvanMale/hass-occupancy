@@ -3,7 +3,7 @@
 # `-dev` string: deploy-edge.sh stamps the DEPLOYED copy with the commit sha.
 # A slug that cannot be read falls back to stable's prefix -- a silent MQTT collision.
 name: Occupancy Forecast Edge
-version: "0.3.2-dev"
+version: "0.4.1-dev"
 slug: occupancy_forecast_edge
 description: >-
   Development build of the Occupancy Forecast app. Runs alongside the stable one with
@@ -35,22 +35,18 @@ services:
 # service, persistent_notification create/dismiss, for its own progress notice.
 homeassistant_api: true
 
+# The ten options that moved to the panel in 0.4.0 have no defaults, so the form
+# hides them. They stay in the schema: removing a key makes Supervisor drop the
+# stored value before `runtime.import_legacy_options` can copy it, and
+# `runtime.retire_legacy_options` removes a stored value only once the panel
+# holds the same one.
 options:
   log_level: info
-  source: store
   admin_users: []
-  mqtt_host: ""
-  mqtt_port: 1883
-  mqtt_user: ""
-  mqtt_password: ""
-  mqtt_ssl: false
-  influx_url: ""
-  influx_org: ""
-  influx_bucket: homeassistant
-  influx_token: ""
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
-  source: list(store|influx)
+  # Optional so the form can hide it: a key without `?` renders regardless.
+  source: list(store|influx)?
   # EMPTY MEANS EVERYONE: ingress proves who the caller is, not whether they may retrain the house.
   admin_users:
     - str

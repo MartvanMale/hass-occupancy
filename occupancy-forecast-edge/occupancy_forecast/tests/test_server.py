@@ -12,7 +12,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from occupancy_forecast import server
+from occupancy_forecast import runtime as runtime_mod, server
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +186,7 @@ def test_a_failing_retrain_reports_itself_and_still_frees_the_lock(monkeypatch):
 # settings object it would assign to is the live one the predict cycle reads.
 
 from occupancy_forecast import config as config_mod                      # noqa: E402
+from occupancy_forecast import predict as predict_mod                    # noqa: E402
 from occupancy_forecast.tests.conftest import settings as make_settings  # noqa: E402
 
 
@@ -875,5 +876,334 @@ def test_every_mutating_route_is_gated():
     }
     # Named, not just counted: `posts == gated` is satisfied by two empty sets.
     assert {path for path, _ in posts} == {
-        "/api/config", "/collect", "/predict", "/train", "/reload"}
+        "/api/config", "/api/config/check", "/api/config/check-broker",
+        "/collect", "/predict", "/train", "/reload"}
     assert posts == gated, f"ungated POST routes: {sorted(posts - gated)}"
+
+
+# ---------------------------------------------------------------------------
+# Settings that used to be add-on options. The panel owns them since 0.4.0, and
+# two of them are secrets on an endpoint that is deliberately open.
+
+def test_a_blank_secret_box_keeps_the_stored_one(monkeypatch):
+    """The form is never given the stored value, so an empty box is "unchanged"
+    -- treating it as "" would blank a token the user cannot see to retype."""
+    live, _saved, _retrains, _client = _accepted_save_setup(monkeypatch)
+    live.influx_token = "stored"
+    live.mqtt_password = "secret"
+
+    server.api_save_config({"people": ["person.alice"], "influx_token": "",
+                            "mqtt_password": ""})
+
+    assert server._state["settings"].influx_token == "stored"
+    assert server._state["settings"].mqtt_password == "secret"
+
+
+def test_a_typed_secret_replaces_it_and_null_forgets_it(monkeypatch):
+    live, _saved, _retrains, _client = _accepted_save_setup(monkeypatch)
+    live.influx_token = "stored"
+
+    server.api_save_config({"people": ["person.alice"], "influx_token": "fresh"})
+    assert server._state["settings"].influx_token == "fresh"
+
+    server._state["settings"].influx_token = "fresh"
+    monkeypatch.setitem(server._state, "settings", server._state["settings"])
+    server.api_save_config({"people": ["person.alice"], "influx_token": None})
+    assert server._state["settings"].influx_token == ""
+
+
+def test_influx_without_credentials_is_a_400_not_a_quiet_fall_back(monkeypatch):
+    """Falling back to the local archive would start a fresh empty one and look
+    perfectly healthy for the ten days it takes to notice."""
+    _accepted_save_setup(monkeypatch)
+
+    with pytest.raises(HTTPException) as raised:
+        server.api_save_config({"people": ["person.alice"], "source": "influx",
+                                "influx_url": "", "influx_token": ""})
+    assert raised.value.status_code == 400
+    assert "not all set" in raised.value.detail
+
+
+@pytest.mark.parametrize("payload", [
+    {"influx_url": "192.0.2.10:8086"},        # no scheme
+    {"mqtt_port": 0},
+    {"mqtt_port": 70000},
+    {"mqtt_port": 1883.5},
+    {"mqtt_ssl": "true"},                      # the string, not the boolean
+    {"influx_url": 42},
+])
+def test_a_connection_field_of_the_wrong_shape_is_refused(payload):
+    with pytest.raises(HTTPException) as raised:
+        server.typed_patch(payload)
+    assert raised.value.status_code == 400
+
+
+def test_the_source_option_no_longer_overrides_a_panel_choice(monkeypatch):
+    """The bug this move exists to fix: `refresh_environment` runs on every save
+    as well as every boot, so the old override reverted the edit being saved."""
+    monkeypatch.setenv("OCCUPANCY_SOURCE", "influx")
+    settings = make_settings(source="store")
+
+    refreshed = runtime_mod.refresh_environment(settings, _FakeHA("person.alice"))
+
+    assert refreshed.source == "store"
+
+
+def test_the_add_on_options_are_imported_once_and_then_left_alone(monkeypatch):
+    """Guarded on the marker, not on each field being empty: "every boot" would
+    re-apply the option over a panel edit, and "only the first version" would
+    miss anyone who updates straight past it."""
+    monkeypatch.setenv("OCCUPANCY_SOURCE", "influx")
+    monkeypatch.setenv("INFLUX_URL", "http://influx:8086")
+    monkeypatch.setenv("INFLUX_TOKEN", "from-options")
+    monkeypatch.setenv("OCCUPANCY_LEGACY_MQTT_HOST", "broker.example")
+    monkeypatch.setenv("OCCUPANCY_LEGACY_MQTT_PORT", "8883")
+    monkeypatch.setenv("OCCUPANCY_LEGACY_MQTT_SSL", "true")
+    settings = make_settings()
+
+    assert runtime_mod.import_legacy_options(settings) is True
+    assert settings.source == "influx"
+    assert settings.influx_token == "from-options"
+    assert (settings.mqtt_host, settings.mqtt_port, settings.mqtt_ssl) == (
+        "broker.example", 8883, True)
+    assert settings.migrated_from_options
+
+    settings.source = "store"
+    assert runtime_mod.import_legacy_options(settings) is False
+    assert settings.source == "store", "a panel edit must survive the next boot"
+
+
+def test_supervisors_discovered_broker_is_never_frozen_into_the_settings(monkeypatch):
+    """`MQTT_HOST` also carries Supervisor's own service. Importing that would
+    pin today's address into config.json, where it would then win over the
+    discovery that is meant to track it."""
+    monkeypatch.setenv("MQTT_HOST", "core-mosquitto")
+    monkeypatch.delenv("OCCUPANCY_LEGACY_MQTT_HOST", raising=False)
+    settings = make_settings()
+
+    runtime_mod.import_legacy_options(settings)
+
+    assert settings.mqtt_host == ""
+    assert config_mod.mqtt_settings(settings)["host"] == "core-mosquitto"
+
+
+# --- the broker check ------------------------------------------------------
+
+class _FakeMqttClient:
+    """Records what `predict.check_connection` does to a client."""
+
+    made: list = []
+    # On the CLASS, so a test can flip it before the client is constructed.
+    refuse = False
+
+    def __init__(self, _api, client_id=None):
+        self.client_id = client_id
+        self.connected_to = None
+        self.will = None
+        self.tls = False
+        self.auth = None
+        _FakeMqttClient.made.append(self)
+
+    def username_pw_set(self, user, password): self.auth = (user, password)
+    def tls_set(self, *a, **k): self.tls = True
+    def will_set(self, *a, **k): self.will = a
+    def disconnect(self): pass
+
+    def connect(self, host, port, keepalive=60):
+        if self.refuse:
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+        self.connected_to = (host, port)
+
+
+@pytest.fixture
+def fake_mqtt(monkeypatch):
+    _FakeMqttClient.made = []
+    monkeypatch.setattr(predict_mod.mqtt, "Client", _FakeMqttClient)
+    return _FakeMqttClient
+
+
+def test_the_broker_check_never_reuses_the_live_client_id(fake_mqtt):
+    """MQTT kicks the existing session on an id collision, silently and
+    permanently -- so a check on the live id would disconnect the add-on's own
+    publisher on every press. It must not set a will either: that would retract
+    the entities on the way out."""
+    settings = make_settings(mqtt_host="broker.example", mqtt_port=1883)
+
+    result = predict_mod.check_connection(settings)
+
+    probe = fake_mqtt.made[-1]
+    assert result["ok"]
+    assert probe.client_id != predict_mod.client_id()
+    assert probe.client_id.startswith(predict_mod.client_id())
+    assert probe.will is None, "a will would retract the live entities"
+    assert probe.connected_to == ("broker.example", 1883)
+
+
+def test_a_refused_broker_names_the_address_but_not_the_exception(fake_mqtt, monkeypatch):
+    """The address is fine HERE -- this endpoint is admin-gated. What must not
+    travel is the library's own text, which is what `/api/status` redacts."""
+    monkeypatch.setattr(_FakeMqttClient, "refuse", True)
+    settings = make_settings(mqtt_host="broker.example", mqtt_port=1883)
+
+    result = predict_mod.check_connection(settings)
+
+    assert result["ok"] is False
+    assert "broker.example:1883" in result["detail"]
+    assert "Errno 111" not in result["detail"]
+
+
+def test_the_broker_check_falls_back_to_supervisors_service(fake_mqtt, monkeypatch):
+    """An empty broker card means Supervisor's own broker, which is the usual
+    install -- the check has to test that rather than refuse."""
+    monkeypatch.setenv("MQTT_HOST", "core-mosquitto")
+    monkeypatch.setenv("MQTT_PORT", "1883")
+
+    result = predict_mod.check_connection(make_settings(mqtt_host=""))
+
+    assert result["ok"] and result["host"] == "core-mosquitto:1883"
+
+
+# --- hiding the moved options from Supervisor's form --------------------------
+
+class _FakeSupervisor:
+    """This add-on's options as Supervisor stores them, and what was sent back."""
+
+    def __init__(self, stored: dict, fail: bool = False):
+        self.stored, self.fail, self.posted = dict(stored), fail, None
+
+    def read(self, token, timeout=10.0):
+        if self.fail:
+            raise OSError("supervisor unreachable")
+        return dict(self.stored)
+
+    def write(self, options, token, timeout=10.0):
+        self.posted = dict(options)
+
+
+@pytest.fixture
+def supervisor(monkeypatch):
+    def install(stored: dict, fail: bool = False) -> _FakeSupervisor:
+        fake = _FakeSupervisor(stored, fail)
+        monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+        monkeypatch.setattr(config_mod, "supervisor_options", fake.read)
+        monkeypatch.setattr(config_mod, "set_supervisor_options", fake.write)
+        return fake
+    return install
+
+
+def _migrated(**fields):
+    return make_settings(migrated_from_options="2026-09-13T00:00:00+00:00", **fields)
+
+
+def test_a_moved_option_is_cleared_once_the_panel_holds_the_same_value(supervisor):
+    """POST replaces the stored options wholesale, so what stays must be sent."""
+    fake = supervisor({"log_level": "info", "admin_users": ["u1"],
+                       "source": "influx", "influx_url": "http://influx:8086",
+                       "mqtt_port": 1883, "mqtt_ssl": False})
+    settings = _migrated(source="influx", influx_url="http://influx:8086")
+
+    cleared = runtime_mod.retire_legacy_options(settings)
+
+    assert cleared == ["influx_url", "mqtt_port", "mqtt_ssl", "source"]
+    assert fake.posted == {"log_level": "info", "admin_users": ["u1"]}
+
+
+def test_a_value_the_panel_does_not_hold_is_never_cleared(supervisor, caplog):
+    """The no-loss rule: a stored value is removed only when config.json has it.
+    One that differs stays, named in the log -- never with its value."""
+    fake = supervisor({"log_level": "info", "influx_org": "home",
+                       "influx_url": "http://elsewhere:8086",
+                       "influx_token": "QQstoredQQ"})
+    settings = _migrated(influx_org="home", influx_url="http://influx:8086",
+                         influx_token="QQheldQQ")
+    caplog.set_level("INFO")
+
+    assert runtime_mod.retire_legacy_options(settings) == ["influx_org"]
+    assert fake.posted == {"log_level": "info",
+                           "influx_url": "http://elsewhere:8086",
+                           "influx_token": "QQstoredQQ"}
+    assert "influx_url" in caplog.text and "influx_token" in caplog.text
+    assert "QQ" not in caplog.text and "elsewhere" not in caplog.text
+
+
+def test_a_broker_user_stored_without_a_host_is_imported_then_cleared(supervisor, monkeypatch):
+    """run.sh once exported the broker's user only alongside a host, so this
+    value was never copied -- and clearing it would have lost it."""
+    for name in ("OCCUPANCY_SOURCE", "INFLUX_URL", "INFLUX_ORG", "INFLUX_BUCKET",
+                 "INFLUX_TOKEN", "OCCUPANCY_LEGACY_MQTT_HOST",
+                 "OCCUPANCY_LEGACY_MQTT_PORT", "OCCUPANCY_LEGACY_MQTT_PASSWORD",
+                 "OCCUPANCY_LEGACY_MQTT_SSL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OCCUPANCY_LEGACY_MQTT_USER", "broker-user")
+    settings = make_settings()
+    runtime_mod.import_legacy_options(settings)
+    fake = supervisor({"log_level": "info", "mqtt_user": "broker-user"})
+
+    assert settings.mqtt_user == "broker-user"
+    assert runtime_mod.retire_legacy_options(settings) == ["mqtt_user"]
+    assert fake.posted == {"log_level": "info"}
+
+
+def test_run_sh_exports_every_moved_option_on_its_own_guard():
+    """The half of that gap pytest cannot run: each option must be exported on
+    its own line, under the variable the import reads, whatever else is set."""
+    from pathlib import Path
+
+    run_sh = (Path(runtime_mod.__file__).resolve().parents[1] / "run.sh").read_text()
+    exported = set(re.findall(r"^export_option (\w+) (\w+)$", run_sh, re.MULTILINE))
+
+    assert exported == {(variable, name) for name, (variable, _kind)
+                        in runtime_mod._LEGACY_OPTIONS.items()}
+
+
+def test_an_empty_stored_value_is_cleared(supervisor):
+    fake = supervisor({"log_level": "info", "influx_url": "", "mqtt_user": None})
+
+    assert runtime_mod.retire_legacy_options(_migrated()) == ["influx_url", "mqtt_user"]
+    assert fake.posted == {"log_level": "info"}
+
+
+def test_nothing_is_touched_outside_an_add_on(monkeypatch):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("called Supervisor with no Supervisor to call")
+
+    monkeypatch.setattr(config_mod, "supervisor_options", refuse)
+    assert runtime_mod.retire_legacy_options(_migrated()) == []
+
+
+def test_nothing_is_cleared_before_the_import_has_run(supervisor):
+    """Before the marker, config.json may not hold the values yet."""
+    fake = supervisor({"log_level": "info", "source": "store"})
+
+    assert runtime_mod.retire_legacy_options(make_settings()) == []
+    assert fake.posted is None
+
+
+def test_a_supervisor_error_is_logged_and_start_up_continues(supervisor, caplog):
+    supervisor({}, fail=True)
+    caplog.set_level("WARNING")
+
+    assert runtime_mod.retire_legacy_options(_migrated()) == []
+    assert "moved add-on options" in caplog.text
+    assert "unreachable" not in caplog.text, "the type only, never the message"
+
+
+def test_bootstrap_saves_config_json_before_it_touches_supervisor(monkeypatch, tmp_path):
+    """That order is half of why clearing cannot lose a value."""
+    calls: list[str] = []
+    monkeypatch.setattr(runtime_mod, "home_assistant",
+                        lambda: _FakeHA("person.alice", "person.bob"))
+    monkeypatch.setattr(runtime_mod, "load_settings", lambda ha, path: _migrated())
+    monkeypatch.setattr(runtime_mod, "refresh_environment", lambda settings, ha: settings)
+    monkeypatch.setattr(config_mod.Settings, "save",
+                        lambda self, path=None: calls.append("save"))
+    monkeypatch.setattr(runtime_mod, "retire_legacy_options",
+                        lambda settings: calls.append("retire"))
+    monkeypatch.setattr(runtime_mod, "forecast_log", lambda: object())
+    monkeypatch.setattr(runtime_mod, "build_source", lambda settings, ha, log: object())
+
+    runtime_mod.bootstrap(tmp_path / "config.json")
+
+    assert calls == ["save", "retire"]

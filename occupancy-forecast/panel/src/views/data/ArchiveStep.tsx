@@ -92,7 +92,7 @@ export function ArchiveCard({ archive, picked, onPick }: {
         icon="database"
         accent="aqua"
         primary={`${count(span.rows)} state changes over ${span.days} days`}
-        secondary={`${bytes(span.bytes)} on disk. ${
+        secondary={`${span.bytes === null ? 'Read from InfluxDB' : `${bytes(span.bytes)} on disk`}. ${
           span.first ? `From ${absoluteTime(span.first)} to ${absoluteTime(span.last)}.` : ''
         }`}
       />

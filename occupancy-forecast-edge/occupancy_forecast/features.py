@@ -390,6 +390,12 @@ def grid(start: pd.Timestamp, stop: pd.Timestamp) -> pd.DatetimeIndex:
                          tz="UTC", name="time")
 
 
+def epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
+    """Epoch nanoseconds whatever the index's unit: pandas 3 infers one, so a
+    parsed index and `grid` need not agree, and raw `.asi8` would mix them."""
+    return index.as_unit("ns").asi8
+
+
 def slot_fraction(events: list[tuple[str, str]], slots: pd.DatetimeIndex,
                   match: str, minutes: int | None = None) -> pd.DataFrame:
     """Time-weighted fraction of each slot whose state equals `match`, with
@@ -410,20 +416,20 @@ def slot_fraction(events: list[tuple[str, str]], slots: pd.DatetimeIndex,
     values = np.array([np.nan if config.is_empty(v)
                        else 1.0 if str(v).strip() == match else 0.0
                        for _, v in events])
-    order = np.argsort(times.asi8, kind="stable")
+    order = np.argsort(epoch_ns(times), kind="stable")
     times, values = times[order], values[order]
 
     boundaries = slots.append(
         pd.DatetimeIndex([slots[-1] + pd.Timedelta(minutes=minutes)], tz="UTC"))
 
     # Every boundary is in the timeline, so each segment lies inside one slot.
-    marks = times.union(boundaries)
-    idx = np.searchsorted(times.asi8, marks.asi8, side="right") - 1
+    marks = epoch_ns(times.union(boundaries))
+    idx = np.searchsorted(epoch_ns(times), marks, side="right") - 1
     held = np.where(idx >= 0, values[np.clip(idx, 0, None)], np.nan)
 
-    seconds = np.diff(marks.asi8) / 1e9
+    seconds = np.diff(marks) / 1e9
     seg_value = held[:-1]
-    seg_slot = np.searchsorted(boundaries.asi8, marks.asi8[:-1], side="right") - 1
+    seg_slot = np.searchsorted(epoch_ns(boundaries), marks[:-1], side="right") - 1
 
     keep = (seg_slot >= 0) & (seg_slot < n) & ~np.isnan(seg_value)
     if not keep.any():
@@ -456,15 +462,15 @@ def observability(event_times: pd.DatetimeIndex, slots: pd.DatetimeIndex,
     if len(event_times) == 0 or len(slots) == 0:
         return observable
 
-    times = event_times.sort_values()
+    times = epoch_ns(event_times.sort_values())
     limit = np.int64(max_silence_h * 3600 * 1e9)
 
     # A slot is observable when its surrounding pair of observations is no
     # further apart than the limit, and it lies inside the observed span at all.
-    after = np.searchsorted(times.asi8, slots.asi8, side="right")
+    after = np.searchsorted(times, epoch_ns(slots), side="right")
     inside = (after > 0) & (after < len(times))
     idx = np.clip(after, 1, len(times) - 1)
-    span = times.asi8[idx] - times.asi8[idx - 1]
+    span = times[idx] - times[idx - 1]
     return inside & (span <= limit)
 
 
@@ -479,15 +485,16 @@ def numeric_on_grid(pairs: list[tuple[str, float]], slots: pd.DatetimeIndex,
 
     times = pd.to_datetime([t for t, _ in pairs], utc=True, format="ISO8601")
     values = np.asarray([v for _, v in pairs], dtype=float)
-    order = np.argsort(times.asi8, kind="stable")
-    times, values = times[order], values[order]
+    order = np.argsort(epoch_ns(times), kind="stable")
+    times, values = epoch_ns(times[order]), values[order]
 
-    idx = np.searchsorted(times.asi8, slots.asi8, side="right") - 1
+    at = epoch_ns(slots)
+    idx = np.searchsorted(times, at, side="right") - 1
     seen = idx >= 0
     safe = np.clip(idx, 0, None)
     fresh = seen
     if stale_after_min is not None:
-        age_min = (slots.asi8 - times.asi8[safe]) / 1e9 / 60
+        age_min = (at - times[safe]) / 1e9 / 60
         fresh = seen & (age_min <= stale_after_min)
     out[fresh] = values[safe][fresh]
     return out
@@ -503,22 +510,23 @@ def minutes_in_state(events: list[tuple[str, str]], slots: pd.DatetimeIndex) -> 
 
     times = pd.to_datetime([t for t, _ in events], utc=True, format="ISO8601")
     values = [str(v).strip() for _, v in events]
-    order = np.argsort(times.asi8, kind="stable")
-    times = times[order]
+    order = np.argsort(epoch_ns(times), kind="stable")
+    times = epoch_ns(times[order])
     values = [values[i] for i in order]
 
     changed_at = np.empty(len(values), dtype="int64")
-    last = times.asi8[0]
+    last = times[0]
     previous = None
     for i, value in enumerate(values):
         if value != previous:
-            last = times.asi8[i]
+            last = times[i]
             previous = value
         changed_at[i] = last
 
-    idx = np.searchsorted(times.asi8, slots.asi8, side="right") - 1
+    at = epoch_ns(slots)
+    idx = np.searchsorted(times, at, side="right") - 1
     out = np.where(idx >= 0,
-                   (slots.asi8 - changed_at[np.clip(idx, 0, None)]) / 1e9 / 60,
+                   (at - changed_at[np.clip(idx, 0, None)]) / 1e9 / 60,
                    np.nan)
     return out
 

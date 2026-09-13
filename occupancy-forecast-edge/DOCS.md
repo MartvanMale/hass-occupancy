@@ -37,11 +37,12 @@ first 10 days even if stable has been running for months**, which makes it
 useless for comparison exactly when you most want to compare. The entities exist
 from the first minute and read `unknown` until a model earns a horizon.
 
-The fix is `source: influx`. If you archive Home Assistant to InfluxDB, edge
-trains from that history on its first run instead of accumulating its own — and
-the two are comparable immediately. Set both add-ons to the same source if the
-comparison is meant to be about the code: with stable on `store` and edge on
-`influx`, a difference between them is partly a difference in training history.
+The fix is an InfluxDB history source. If you archive Home Assistant to
+InfluxDB, edge trains from that history on its first run instead of accumulating
+its own — and the two are comparable immediately. Set both add-ons to the same
+source if the comparison is meant to be about the code: with stable on its own
+archive and edge on InfluxDB, a difference between them is partly a difference
+in training history.
 
 ## Options, endpoints, everything else
 

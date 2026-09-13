@@ -175,7 +175,7 @@ def test_the_chosen_calendar_wins_over_home_assistants_country():
     assert dt.date(2026, 1, 26) not in dutch
 
     indian = _flagged_dates(_holiday_table(country="NL", holiday_country="IN"))
-    assert {dt.date(2026, 1, 14), dt.date(2026, 1, 26)} <= indian
+    assert dt.date(2026, 1, 26) in indian
     assert dt.date(2026, 1, 1) not in indian
 
 

@@ -5,7 +5,7 @@
 #
 # `version` is bumped only by a promotion, and a promotion is Mart's decision.
 name: Occupancy Forecast
-version: "0.3.1"
+version: "0.4.0"
 slug: occupancy_forecast
 description: >-
   Forecasts who will be home, hour by hour, for the next two days -- and how
@@ -47,40 +47,24 @@ homeassistant_api: true
 
 options:
   log_level: info
-  source: store
   admin_users: []
-  mqtt_host: ""
-  mqtt_port: 1883
-  mqtt_user: ""
-  mqtt_password: ""
-  mqtt_ssl: false
-  influx_url: ""
-  influx_org: ""
-  influx_bucket: homeassistant
-  influx_token: ""
 schema:
   log_level: list(trace|debug|info|notice|warning|error|fatal)
-  # `store` accumulates its own history from Home Assistant and works anywhere.
-  # `influx` is for installs that already archive HA and would otherwise throw
-  # months of history away and start again from ten days.
-  source: list(store|influx)
   # HA user ids allowed to POST (save config, train, reload). EMPTY MEANS
   # EVERYONE: ingress proves who the caller is, not whether they may retrain
   # the house.
   admin_users:
     - str
-  # `str?`, not `url?`: the default is "" (the option is only read when source
-  # is influx) and Supervisor's `url` validator rejects an empty string, which
-  # made every install with the default options fail validation at start.
+  # The ten below moved to the panel in 0.4.0. They keep their keys with no
+  # defaults: removing a key makes Supervisor drop the stored value before the
+  # add-on can copy it across, and an optional key with no default and no stored
+  # value is hidden from the form. Each stored value is removed once the panel
+  # holds the same one.
+  source: list(store|influx)?
   influx_url: str?
   influx_org: str?
   influx_bucket: str?
   influx_token: password?
-  # An MQTT broker that is not a Supervisor add-on. When mqtt_host is set these
-  # five win over the Supervisor mqtt service; when it is empty the service is
-  # used as before. A broker outside Supervisor (EMQX or Mosquitto on another
-  # host) registers no service, so without these the add-on could only ever
-  # publish through the Mosquitto add-on.
   mqtt_host: str?
   mqtt_port: port?
   mqtt_user: str?

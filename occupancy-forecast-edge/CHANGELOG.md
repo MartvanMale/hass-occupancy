@@ -1,5 +1,72 @@
 ## Unreleased
 
+## 0.4.0 - 2026-09-13
+
+### Added
+
+- **A Connections tab.** Where history comes from, the MQTT broker and the Home
+  Assistant event subscription each get a card, and each card now carries its own
+  status: the broker card says whether it is connected, the history card how many
+  days are archived. The Status card that used to collect all of that in one box
+  on the Setup tab is gone — what is left of it appears only when something is
+  wrong, as a notice at the top of Setup.
+- **A "Check broker" button**, beside the broker settings. It connects under its
+  own name so that testing cannot disturb the live connection, and reports what
+  it found — including the host and port it tried.
+- **The history source and the MQTT broker are now set on the Connections tab.**
+  The add-on's Configuration tab could not hide the InfluxDB fields when you were
+  not using InfluxDB, or the broker fields when Home Assistant's own broker was
+  fine, so all twelve options were always on screen. Those ten now live on the
+  add-on's own panel, where they only appear when they apply. **You do not
+  need to do anything, and nothing you entered is lost**: your existing values
+  are copied across the first time the add-on starts after this update, and
+  each is then removed from the Configuration tab once the panel holds the same
+  value. One that differs is left where it is and does nothing — set it on the
+  Connections tab. If you go back to 0.3.x, enter the InfluxDB and broker
+  settings again.
+- **The Setup tab is shorter.** The person group, holiday calendar and night
+  shading each had a card to themselves and now share one, "Optional signals";
+  the crossing cuts and the forecast record share another, "Tuning". "What the
+  model will train on" now opens the tab rather than closing it, in two columns.
+  Save stays in view at the bottom of the page rather than below everything, and
+  says when there is something unsaved.
+- **A "Check connection" button for InfluxDB.** It reports, in order, whether
+  the server answers and which version it is, whether the token was accepted,
+  whether the bucket exists — listing the ones it can see if it does not — and
+  how many rows it found for your people in the last 24 hours. That last one is
+  the useful one: it tells "wrong address" apart from "right address, no data".
+  On InfluxDB 1.x it also spells out that the token is `username:password` and
+  that the bucket is written `database/retention-policy`, such as
+  `homeassistant/autogen`.
+- **The Data tab's first two cards now work when history comes from InfluxDB.**
+  "The archive" and "One entity, as the model reads it" used to say only that
+  there was no local archive to inspect; they now read the bucket. They list
+  the entities the add-on is configured to read rather than everything in the
+  bucket, so an entity you configured but that has never reported still shows
+  up as having no history. There is no "on disk" figure, because the bucket is
+  shared with the rest of Home Assistant.
+
+### Changed
+
+- **The libraries the add-on is built on are updated**, among them pandas 3 and
+  scikit-learn 1.9. Models saved by the previous version are set aside rather
+  than loaded, so the first start after this update retrains straight away,
+  and no forecast is published until that training finishes.
+- **The Indian holiday calendar no longer flags regional festivals** such as
+  Makar Sankranti and Pongal. The holidays library now lists them as optional.
+  Republic Day and the other national holidays are unchanged.
+
+### Fixed
+
+- **InfluxDB 1.8 archives are readable.** Against a 1.8 server every query
+  answered zero rows, so the add-on reported having no usable history at all
+  while looking straight at a database full of it. 1.8 prefixes its responses
+  with three lines that InfluxDB 2 leaves out, and those were being read as the
+  column headings. Reported by Charles Kalko, who also wrote the fix.
+- **The arrival ETA is never answered by a model saved under an older library
+  version.** Such a model is ignored until training replaces it, instead of
+  being loaded and trusted.
+
 ## 0.3.1 - 2026-09-12
 
 ### Changed

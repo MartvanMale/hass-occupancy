@@ -1,7 +1,7 @@
 import type {
-  Archive, Candidates, ConfigPatch, EntitySeries, FeatureInventory, Forecast,
-  FeatureSeries, HorizonRecipe, MetricsDetail, MetricsSummary, Settings, Status,
-  Verification,
+  Archive, BrokerCheck, Candidates, ConfigPatch, EntitySeries, FeatureInventory,
+  Forecast, FeatureSeries, HorizonRecipe, InfluxCheck, MetricsDetail,
+  MetricsSummary, Settings, Status, Verification,
 } from './types'
 
 /**
@@ -67,6 +67,42 @@ export async function saveConfig(patch: ConfigPatch): Promise<void> {
     const body = (await res.json().catch(() => ({}))) as { detail?: string }
     throw new Error(body.detail || `Save failed: ${res.status}`)
   }
+}
+
+/** Test an InfluxDB connection without saving it. A blank token means "the one
+ *  already stored", which is how a saved token is retested without the panel
+ *  ever holding it. */
+export async function checkInflux(
+  probe: Pick<ConfigPatch, 'influx_url' | 'influx_org' | 'influx_bucket'> &
+    { influx_token?: string },
+): Promise<InfluxCheck> {
+  const res = await fetch('api/config/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(probe),
+  })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(body.detail || `Check failed: ${res.status}`)
+  }
+  return (await res.json()) as InfluxCheck
+}
+
+/** Test the broker without saving it. Blank password means the stored one. */
+export async function checkBroker(
+  probe: { mqtt_host: string; mqtt_port: number; mqtt_user: string
+           mqtt_ssl: boolean; mqtt_password?: string },
+): Promise<BrokerCheck> {
+  const res = await fetch('api/config/check-broker', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(probe),
+  })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(body.detail || `Check failed: ${res.status}`)
+  }
+  return (await res.json()) as BrokerCheck
 }
 
 /** The four things the Training card can set going. `train` takes minutes,
