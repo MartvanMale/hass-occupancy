@@ -17,8 +17,9 @@ import numpy as np
 import pandas as pd
 import sklearn
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.pipeline import Pipeline
 
-from . import config, evaluate, features, log
+from . import config, estimators, evaluate, features, log
 
 _log = log.get(__name__)
 
@@ -210,8 +211,9 @@ def _estimator() -> HistGradientBoostingRegressor:
     )
 
 
-def _fit(frame: pd.DataFrame) -> HistGradientBoostingRegressor:
-    model = _estimator()
+def _fit(frame: pd.DataFrame) -> Pipeline:
+    model = Pipeline([("unobserved", estimators.UnobservedToConstant()),
+                      ("model", _estimator())])
     model.fit(frame[FEATURES], np.log1p(frame["minutes_to_home"]))
     return model
 

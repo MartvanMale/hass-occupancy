@@ -14,10 +14,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 # A venv, because Debian marks its system Python externally-managed (PEP 668).
 # libgomp1 is what scikit-learn's threaded estimators link against -- without it
-# the failure is an obscure import error.
+# the failure is an obscure import error. procps: joblib's worker shutdown calls pgrep.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        python3 python3-venv libgomp1 \
+        python3 python3-venv libgomp1 procps \
  && python3 -m venv "$VIRTUAL_ENV" \
  && rm -rf /var/lib/apt/lists/*
 

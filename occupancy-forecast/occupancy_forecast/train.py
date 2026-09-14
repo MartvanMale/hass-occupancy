@@ -16,6 +16,7 @@ import json
 import os
 import pickle
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
-from . import baseline, config, evaluate, features, log
+from . import baseline, config, estimators, evaluate, features, log
 
 _log = log.get(__name__)
 
@@ -273,6 +274,7 @@ def _dedicated_estimator() -> Pipeline:
     """
     return Pipeline([
         ("encode", _encoder()),
+        ("unobserved", estimators.UnobservedToConstant()),
         ("model", HistGradientBoostingRegressor(
             max_iter=200, learning_rate=0.05, max_leaf_nodes=15,
             min_samples_leaf=50, l2_regularization=1.0, random_state=0,
@@ -286,6 +288,7 @@ def _pooled_estimator() -> Pipeline:
     building dominates the fit, not row count."""
     return Pipeline([
         ("encode", _encoder()),
+        ("unobserved", estimators.UnobservedToConstant()),
         ("model", HistGradientBoostingRegressor(
             max_iter=300, learning_rate=0.05, max_leaf_nodes=MAX_LEAF_NODES,
             min_samples_leaf=MIN_SAMPLES_LEAF, l2_regularization=1.0,
@@ -766,11 +769,12 @@ def _dedicated_and_save(path: Path, horizon: int, windows: list, models_dir: Pat
     try:
         estimator, scored, n_train = train_dedicated(path, horizon, windows)
     except Exception as err:  # noqa: BLE001
-        _log.warning("+%sh dedicated: skipped -- %s", horizon, err)
-        return horizon, None, None, str(err), time.perf_counter() - started
+        # Logged by `train_all`: a worker's own log line reaches no handler.
+        return (horizon, None, None, str(err), time.perf_counter() - started,
+                traceback.format_exc())
     save(estimator, {}, models_dir, DEDICATED_NAME.format(horizon=horizon),
          features_for(horizon), kind="dedicated")
-    return horizon, scored, n_train, None, time.perf_counter() - started
+    return horizon, scored, n_train, None, time.perf_counter() - started, None
 
 
 def _run_gate(horizons, dedicated: dict, pooled_scored, pooled_rows: int,
@@ -808,6 +812,11 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
     with phases("read"):
         wide = read_wide(path)
         windows, geometry = shared_windows(wide)
+    unobserved = [c for c in origin_features()
+                  if c in wide.columns and wide[c].isna().all()]
+    if unobserved:
+        _log.info("no values in the history for %s; training goes ahead without them",
+                  ", ".join(unobserved))
     settings = config.SETTINGS
     extras = features.SHIPPED_EXTRAS
 
@@ -827,14 +836,26 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
         ])
     results, ladders = answers[:len(horizons)], answers[len(horizons):]
     rungs = {h: r for h, r, _ in ladders}
-    dedicated = {h: (scored, n_train) for h, scored, n_train, err, _ in results
+    dedicated = {h: (scored, n_train) for h, scored, n_train, err, *_ in results
                  if err is None}
-    failed = {f"{h}h dedicated": err for h, _, _, err, _ in results
+    failed = {f"{h}h dedicated": err for h, _, _, err, *_ in results
               if err is not None}
+    # One line per distinct reason: the same one tends to repeat across all 48.
+    skipped: dict[str, list] = {}
+    for h, _, _, err, _, trace in results:
+        if err is not None:
+            skipped.setdefault(err, []).append((h, trace))
+    for err, hits in skipped.items():
+        hours = sorted(h for h, _ in hits)
+        span = (f"+{hours[0]}h to +{hours[-1]}h"
+                if len(hours) > 2 and hours == list(range(hours[0], hours[-1] + 1))
+                else ", ".join(f"+{h}h" for h in hours))
+        _log.warning("%d dedicated horizon(s) skipped (%s) -- %s", len(hours), span, err)
+        _log.debug("%s", hits[0][1])
     # Worker-seconds, not wall clock: the two share a fan-out, so wall time
     # cannot say which to attack.
     phases.seconds["ladder(worker)"] = sum(secs for _, _, secs in ladders)
-    phases.seconds["dedicated(worker)"] = sum(secs for *_, secs in results)
+    phases.seconds["dedicated(worker)"] = sum(r[4] for r in results)
 
     pooled_scored, pooled_rows = None, 0
     try:
@@ -842,6 +863,7 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
             wide, windows, horizons=horizons, n_jobs=n_jobs, phases=phases)
     except Exception as err:  # noqa: BLE001
         _log.warning("pooled fit: skipped -- %s", err)
+        _log.debug("pooled fit traceback", exc_info=True)
         failed["pooled"] = str(err)
 
     with phases("gate"):
