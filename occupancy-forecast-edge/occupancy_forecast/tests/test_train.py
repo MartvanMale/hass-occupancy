@@ -635,3 +635,41 @@ def test_the_switch_changes_what_the_model_is_fed_and_nothing_else():
         assert set(features.long_columns()) <= set(features.long_shipped_columns())
     finally:
         features.SHIPPED_EXTRAS = before
+
+
+@pytest.mark.parametrize("days, blank", [
+    (25, ()),
+    (80, ("other_bob",)),
+    (80, features.PROXIMITY_COLUMNS),
+], ids=["young archive", "person with no history", "no distance entity"])
+def test_a_feature_with_no_values_does_not_stop_training(days, blank):
+    """#23: scikit-learn 1.9 raised on a column blank across a fit's rows, and one
+    such fold stopped every horizon in both families."""
+    wide = train.read_wide(_feature_table(days=days))
+    for column in blank:
+        wide[column] = np.nan
+    path = Path(tempfile.mkdtemp()) / "features.parquet"
+    features.write(wide, path)
+    windows, _ = train.shared_windows(wide)
+
+    train.train_pooled(wide, windows, horizons=(1, HORIZON), n_jobs=1)
+    train.train_dedicated(path, HORIZON, windows)
+
+
+def test_a_failure_every_dedicated_horizon_shares_is_logged_once(monkeypatch, tmp_path,
+                                                                 caplog):
+    """A worker's own warning reached no handler, once per horizon."""
+    def broken(path, horizon, windows):
+        raise ValueError("the same reason")
+
+    monkeypatch.setattr(train, "train_dedicated", broken)
+    caplog.set_level("DEBUG")
+    train.train_all(_fitted()["path"], tmp_path, horizons=(1, HORIZON), n_jobs=1)
+
+    lines = [r.getMessage() for r in caplog.records
+             if "dedicated horizon" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "+1h" in lines[0] and f"+{HORIZON}h" in lines[0]
+    assert "the same reason" in lines[0]
+    assert any("Traceback" in r.getMessage() for r in caplog.records), \
+        "logged with its traceback"

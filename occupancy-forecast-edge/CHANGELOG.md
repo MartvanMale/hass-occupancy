@@ -1,5 +1,17 @@
 ## Unreleased
 
+## 0.4.2 - 2026-09-14
+
+### Fixed
+
+- Training no longer fails with "window shape cannot be larger than input
+  array shape". It failed with less than about seven weeks of history, after
+  adding a person on the **Setup** tab, or when nobody in the household
+  reports a distance to home.
+- The add-on log names any signal with no values in the history, shows a
+  failure that repeats across horizons once, and no longer ends a train with
+  `pgrep` errors.
+
 ## 0.4.1 - 2026-09-13
 
 ### Changed
