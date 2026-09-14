@@ -255,7 +255,9 @@ def do_train() -> dict:
         timespec="seconds")
     # Announced, because it is the one thing here that takes minutes and pins
     # the box.
-    _log.info("training started (%.0f days of history)", _history_days())
+    days = _history_days()
+    _log.info("training started (%s)", "history from InfluxDB" if days == float("inf")
+              else f"{days:.0f} days of history")
     # Timed per stretch as well as end to end: these four say whether the
     # answer is in the fits at all.
     phases = train_mod.Phases()

@@ -112,3 +112,15 @@ def test_an_artifact_pickled_by_another_scikit_learn_is_refused_at_load(tmp_path
                for r in caplog.records)
     write(sklearn.__version__)
     assert "alice" in eta.load_models(tmp_path)
+
+
+def test_a_feature_with_no_values_does_not_stop_the_fit():
+    """A feature blank across every sample trains without it rather than raising."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    samples = pd.DataFrame(rng.random((300, len(eta.FEATURES))), columns=eta.FEATURES)
+    samples["dir_towards"] = np.nan
+    samples["minutes_to_home"] = rng.uniform(5, 120, len(samples))
+    model = eta._fit(samples)
+    assert (eta.predict_minutes(model, samples) >= 0).all()
