@@ -1,5 +1,5 @@
 # Pinned so a rebuild months from now reproduces the model that is running.
-pandas==3.0.5
+pandas==3.0.6
 numpy==2.5.3
 # Never below 22.0.0: pyarrow 21.0.0's aarch64 wheel inlined ARMv8.1 LSE atomics
 # in bundled mimalloc and aborted on a Pi 4 (apache/arrow#47766). 23.0.1 for
