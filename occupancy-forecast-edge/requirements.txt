@@ -11,7 +11,7 @@ joblib==1.6.0
 paho-mqtt==2.1.0
 fastapi==0.141.1
 uvicorn==0.52.4
-holidays==0.104
+holidays==0.105
 # listen.py uses the SYNC client; an asyncio one would mean a second event loop
 # beside uvicorn's. Pure Python.
 websockets==17.1
