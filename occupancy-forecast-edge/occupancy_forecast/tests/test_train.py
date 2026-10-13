@@ -673,3 +673,125 @@ def test_a_failure_every_dedicated_horizon_shares_is_logged_once(monkeypatch, tm
     assert "the same reason" in lines[0]
     assert any("Traceback" in r.getMessage() for r in caplog.records), \
         "logged with its traceback"
+
+
+def _snapshot(models_dir: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted(models_dir.iterdir())}
+
+
+def _previous_train(tmp_path: Path) -> Path:
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    for artifact in _trained()[0].iterdir():
+        (models_dir / artifact.name).write_bytes(artifact.read_bytes())
+    return models_dir
+
+
+def test_a_train_that_fails_late_leaves_the_previous_models_untouched(tmp_path,
+                                                                      monkeypatch):
+    """The workers write as they finish, so a train killed or failing after them
+    used to leave half a new set beside the old metrics."""
+    models_dir = _previous_train(tmp_path)
+    before = _snapshot(models_dir)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("simulated: the gate fell over")
+    monkeypatch.setattr(train, "_run_gate", broken)
+
+    with pytest.raises(RuntimeError, match="the gate fell over"):
+        train.train_all(_fitted()["path"], models_dir, horizons=(1, HORIZON), n_jobs=1)
+    assert _snapshot(models_dir) == before
+    assert not train._staging(models_dir).exists()
+
+
+@pytest.mark.parametrize("dies_in", [0, 1], ids=["dedicated pool", "pooled pool"])
+def test_a_lost_worker_stops_the_train_and_says_why(tmp_path, monkeypatch, dies_in):
+    """An OOM-killed worker must not read as "pooled fit: skipped" and publish a
+    set with a family missing."""
+    models_dir = _previous_train(tmp_path)
+    before = _snapshot(models_dir)
+    real, calls = train.Parallel, []
+
+    def parallel(*args, **kwargs):
+        calls.append(None)
+        if len(calls) - 1 == dies_in:
+            def killed(tasks):
+                raise train.TerminatedWorkerError("simulated SIGKILL(-9)")
+            return killed
+        return real(*args, **kwargs)
+    monkeypatch.setattr(train, "Parallel", parallel)
+
+    with pytest.raises(train.OutOfMemory, match="ran out of memory"):
+        train.train_all(_fitted()["path"], models_dir, horizons=(1, HORIZON), n_jobs=1)
+    assert _snapshot(models_dir) == before
+
+
+def test_only_a_pool_worker_volunteers_to_the_oom_killer(tmp_path, monkeypatch):
+    adj = tmp_path / "oom_score_adj"
+    monkeypatch.setattr(train, "OOM_SCORE_ADJ", adj)
+
+    assert train._as_expendable(os.getpid(), int, "7") == 7
+    assert not adj.exists(), "the server itself must keep its score"
+    assert train._as_expendable(os.getpid() + 1, int, "7") == 7
+    assert adj.read_text() == "1000"
+
+    monkeypatch.setattr(train, "OOM_SCORE_ADJ", tmp_path / "missing" / "adj")
+    assert train._as_expendable(os.getpid() + 1, int, "7") == 7, "a denied write is ignored"
+
+
+def test_a_dedicated_verdict_without_its_file_is_not_served_by_the_pooled_model(
+        tmp_path, caplog):
+    """What the killed 0.4.2 train left behind: the pooled model aliased under a
+    dedicated verdict, failing on missing columns every cycle."""
+    from occupancy_forecast import predict as predict_mod
+
+    with (_trained()[0] / train.POOLED_NAME).open("rb") as fh:
+        pooled = pickle.load(fh)
+    horizon = TEST_HORIZONS[0]
+    pooled["metrics"][horizon] = {**pooled["metrics"][horizon],
+                                  "kind": "dedicated", "ships": True}
+    with (tmp_path / train.POOLED_NAME).open("wb") as fh:
+        pickle.dump(pooled, fh)
+
+    caplog.set_level("WARNING")
+    models = predict_mod.load_models(tmp_path)
+    assert horizon not in models
+    assert any(f"+{horizon}h" in r.getMessage() for r in caplog.records)
+
+
+@pytest.fixture
+def machine(tmp_path, monkeypatch):
+    """Six cores, and whatever memory the test writes."""
+    monkeypatch.setattr(train.os, "sched_getaffinity", lambda pid: set(range(6)),
+                        raising=False)
+    monkeypatch.setattr(train, "MEMINFO", tmp_path / "meminfo")
+    monkeypatch.setattr(train, "CGROUP", tmp_path / "cgroup")
+    (tmp_path / "cgroup").mkdir()
+
+    def write(available_gb: float, limit_gb: float | None = None, used_gb: float = 0):
+        (tmp_path / "meminfo").write_text(
+            f"MemTotal: 6000000 kB\nMemAvailable: {int(available_gb * 1e6)} kB\n")
+        (tmp_path / "cgroup" / "memory.max").write_text(
+            "max\n" if limit_gb is None else f"{int(limit_gb * 1e9)}\n")
+        (tmp_path / "cgroup" / "memory.current").write_text(f"{int(used_gb * 1e9)}\n")
+    return write
+
+
+def test_workers_are_capped_by_free_memory(machine):
+    machine(available_gb=3.0)
+    assert train.worker_count() == 5, "no estimate: cores less one"
+    assert train.worker_count(per_worker=0.1e9) == 5, "cores stay the ceiling"
+    assert train.worker_count(per_worker=0.75e9) == 2
+    with pytest.raises(train.OutOfMemory, match="needs about 10.0 GB"):
+        train.worker_count(per_worker=10e9)
+
+
+def test_a_cgroup_limit_counts_as_less_free_memory(machine):
+    machine(available_gb=5.0, limit_gb=2.0, used_gb=0.5)
+    assert train.worker_count(per_worker=0.5e9) == 2
+
+
+def test_unreadable_memory_falls_back_to_cores(machine, tmp_path):
+    machine(available_gb=3.0)
+    (tmp_path / "meminfo").unlink()
+    assert train.worker_count(per_worker=10e9) == 5
