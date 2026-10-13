@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.4.3 - 2026-10-13
+
 ### Fixed
 
 - Training uses fewer processes when memory is short, so it no longer runs the Home Assistant host out of memory and stops the add-on. If there is not enough memory to train at all, or a training run is still cut short, the add-on keeps forecasting with its previous models and the add-on log says so.

@@ -15,6 +15,8 @@ import datetime as dt
 import json
 import os
 import pickle
+import re
+import shutil
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -24,6 +26,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from joblib import Parallel, delayed
+from joblib.externals.loky.process_executor import TerminatedWorkerError
 import sklearn
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import HistGradientBoostingRegressor
@@ -652,11 +655,13 @@ def train_pooled(path: Path | pd.DataFrame, windows: list, horizons=None,
     settings = config.SETTINGS
     extras = features.SHIPPED_EXTRAS
     order = range(len(windows) - 1, -1, -1)
-    with phases("pooled fits"):
-        answers = Parallel(n_jobs=worker_count() if n_jobs is None else n_jobs,
+    with phases("pooled fits"), _worker_loss_is_fatal():
+        if n_jobs is None:
+            n_jobs = worker_count(POOLED_WORKER_FRAMES * frame_bytes(frame))
+        answers = Parallel(n_jobs=n_jobs,
                            backend="loky")([
-            delayed(_pooled_final)(frame, len(windows), settings, extras),
-            *(delayed(_pooled_fold)(frame, index, *windows[index], settings, extras)
+            expendable(_pooled_final)(frame, len(windows), settings, extras),
+            *(expendable(_pooled_fold)(frame, index, *windows[index], settings, extras)
               for index in order),
         ])
     estimator, parts = answers[0], answers[1:]
@@ -694,16 +699,116 @@ def save(estimator: Pipeline, metrics, models_dir: Path = MODELS_DIR,
     return path
 
 
-def worker_count() -> int:
+# Peak memory of one pool worker, as a multiple of the frame it is handed.
+POOLED_WORKER_FRAMES = 1.5
+DEDICATED_WORKER_FRAMES = 1.0
+# The share of free memory a train plans to use; the rest stays with Home Assistant.
+MEMORY_SHARE = 0.7
+MEMINFO = Path("/proc/meminfo")
+CGROUP = Path("/sys/fs/cgroup")
+
+
+def available_memory() -> int | None:
+    """Bytes free for a train: the host's MemAvailable, or less under a cgroup limit."""
+    try:
+        lines = MEMINFO.read_text().splitlines()
+        free = next(int(l.split()[1]) * 1024 for l in lines if l.startswith("MemAvailable:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+    try:
+        limit = (CGROUP / "memory.max").read_text().strip()
+        if limit != "max":
+            used = int((CGROUP / "memory.current").read_text())
+            free = min(free, max(0, int(limit) - used))
+    except (OSError, ValueError):
+        pass
+    return free
+
+
+def worker_count(per_worker: float = 0) -> int:
     """Cores less one, so Home Assistant keeps a core while a background job
-    runs. PROCESSES, not threads: the models are too small for scikit-learn's
-    own parallelism, and joblib pins each worker to one thread so the two
-    cannot multiply."""
+    runs, and fewer when `per_worker` bytes each would not fit in free memory;
+    none fitting raises rather than running the train inside the server.
+    PROCESSES, not threads: the models are too small for scikit-learn's own
+    parallelism, and joblib pins each worker to one thread."""
     try:
         cores = len(os.sched_getaffinity(0))
     except AttributeError:      # not Linux
         cores = os.cpu_count() or 1
-    return max(1, cores - 1)
+    ceiling = max(1, cores - 1)
+    free = available_memory() if per_worker > 0 else None
+    if free is None:
+        return ceiling
+    workers = min(ceiling, int(free * MEMORY_SHARE // per_worker))
+    if workers < 1:
+        raise OutOfMemory(
+            f"training skipped: it needs about {per_worker / 1e9:.1f} GB and "
+            f"{free / 1e9:.1f} GB is free. The previous models stay in use.")
+    _log.info("training with %d of %d worker(s): %.1f GB free, about %.1f GB each",
+              workers, ceiling, free / 1e9, per_worker / 1e9)
+    return workers
+
+
+def frame_bytes(frame: pd.DataFrame) -> int:
+    return int(frame.memory_usage(deep=True).sum())
+
+
+class OutOfMemory(RuntimeError):
+    """A train that stopped, or never started, for want of memory. The previous
+    models stay in place."""
+
+
+@contextlib.contextmanager
+def _worker_loss_is_fatal():
+    try:
+        yield
+    except TerminatedWorkerError as err:
+        raise OutOfMemory(
+            "training stopped: a training process was killed, most likely because "
+            "the system ran out of memory. The previous models stay in use.") from err
+
+
+OOM_SCORE_ADJ = Path("/proc/self/oom_score_adj")
+
+
+def _as_expendable(parent: int, task, *args, **kwargs):
+    # With n_jobs=1 joblib runs the task in the server itself, which must not volunteer.
+    if os.getpid() != parent:
+        try:
+            OOM_SCORE_ADJ.write_text("1000")
+        except OSError:
+            pass
+    return task(*args, **kwargs)
+
+
+def expendable(task):
+    """`delayed(task)` for a pool worker that the kernel's OOM killer takes
+    before the server: losing a worker fails one train, losing the server
+    stops the add-on."""
+    parent = os.getpid()
+    return lambda *args, **kwargs: delayed(_as_expendable)(parent, task, *args, **kwargs)
+
+
+def _staging(models_dir: Path) -> Path:
+    return models_dir.with_name(f".{models_dir.name}.next")
+
+
+_OCCUPANCY_ARTIFACT = re.compile(r"occupancy_(\d+h|pooled)\.pkl|metrics\.json")
+
+
+def _publish(staging: Path, models_dir: Path) -> None:
+    """Move one train's occupancy artifacts over the previous train's, and drop
+    any of those this train did not produce. Other models in the directory stay."""
+    models_dir.mkdir(parents=True, exist_ok=True)
+    fresh = {p.name for p in staging.iterdir()}
+    for name in sorted(fresh):
+        os.replace(staging / name, models_dir / name)
+    for old in list(models_dir.iterdir()):
+        if old.name not in fresh and _OCCUPANCY_ARTIFACT.fullmatch(old.name):
+            old.unlink()
+            _log.warning("%s: removed an artifact from an earlier train; this run "
+                         "produced none", old.name)
+    staging.rmdir()
 
 
 def summary_path(models_dir: Path = MODELS_DIR) -> Path:
@@ -807,7 +912,32 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
               horizons: tuple[int, ...] = config.HORIZONS_H,
               n_jobs: int | None = None) -> dict:
     """Train both families on the same windows and the same ladder, then let
-    `choose` pick a winner per horizon."""
+    `choose` pick a winner per horizon. Everything is written to a staging
+    directory and published only once the whole train succeeds."""
+    staging = _staging(models_dir)
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        summary = _train_all(path, staging, horizons, n_jobs)
+        _publish(staging, models_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        _close_pool()
+    return summary
+
+
+def _close_pool() -> None:
+    """Idle workers keep their memory, and parked ones leave loky printing a
+    wall of leaked-semlock warnings at every container stop."""
+    try:
+        from joblib.externals.loky import get_reusable_executor
+        get_reusable_executor().shutdown(wait=True)
+    except Exception as err:  # noqa: BLE001
+        _log.debug("could not close the worker pool: %s", err)
+
+
+def _train_all(path: Path, models_dir: Path, horizons: tuple[int, ...],
+               n_jobs: int | None) -> dict:
     phases = Phases()
     with phases("read"):
         wide = read_wide(path)
@@ -823,17 +953,19 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
     # The ladder runs once per horizon, shared by both candidates and fanned out
     # in the SAME pool as the dedicated fits -- two blocks meant two barriers.
     # Dedicated tasks go first because they are the longer ones.
-    workers = worker_count() if n_jobs is None else n_jobs
-    with phases("ladder+dedicated"):
+    workers = (worker_count(DEDICATED_WORKER_FRAMES * frame_bytes(wide))
+               if n_jobs is None else n_jobs)
+    with phases("ladder+dedicated"), _worker_loss_is_fatal():
         answers = Parallel(n_jobs=workers, backend="loky")([
-            *(delayed(_dedicated_and_save)(path, h, windows, models_dir,
-                                           settings, extras)
+            *(expendable(_dedicated_and_save)(path, h, windows, models_dir,
+                                              settings, extras)
               for h in horizons),
-            *(delayed(_one_ladder)(
+            *(expendable(_one_ladder)(
                 wide[sorted({*baseline.columns_for(h), *required_origin_columns()})],
                 h, geometry, windows, settings)
               for h in horizons),
         ])
+    _close_pool()
     results, ladders = answers[:len(horizons)], answers[len(horizons):]
     rungs = {h: r for h, r, _ in ladders}
     dedicated = {h: (scored, n_train) for h, scored, n_train, err, *_ in results
@@ -861,6 +993,8 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
     try:
         estimator, pooled_scored, pooled_rows = train_pooled(
             wide, windows, horizons=horizons, n_jobs=n_jobs, phases=phases)
+    except OutOfMemory:
+        raise
     except Exception as err:  # noqa: BLE001
         _log.warning("pooled fit: skipped -- %s", err)
         _log.debug("pooled fit traceback", exc_info=True)
@@ -876,9 +1010,9 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
             f"{next(iter(failed.values()), 'unknown')}")
 
     # EVERY horizon's verdict goes into every artifact that could serve it, or
-    # a horizon reads differently depending on which file loaded first.
-    # Dedicated files this run did not write are deleted: they would pass the
-    # version check and be served against a metrics.json that says otherwise.
+    # a horizon reads differently depending on which file loaded first. A
+    # dedicated file without a verdict is dropped; `_publish` then removes the
+    # previous train's copy, which metrics.json would contradict.
     with phases("write"):
         if pooled_scored is not None:
             save(estimator, chosen, models_dir, POOLED_NAME,
@@ -887,10 +1021,7 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
             name = DEDICATED_NAME.format(horizon=horizon)
             path_h = models_dir / name
             if horizon not in dedicated or horizon not in chosen:
-                if path_h.exists():
-                    path_h.unlink()
-                    _log.warning("+%sh dedicated: removed a stale artifact from an "
-                                 "earlier train; this run produced none", horizon)
+                path_h.unlink(missing_ok=True)
                 continue
             with path_h.open("rb") as fh:
                 artifact = pickle.load(fh)
@@ -899,14 +1030,6 @@ def train_all(path: Path = FEATURES_PATH, models_dir: Path = MODELS_DIR,
 
     _log.info("train_all: %s", phases.line())
     write_summary(summary, models_dir, failed, phases=phases.as_dict())
-
-    # Close the pool rather than parking it: loky prints a wall of
-    # leaked-semlock warnings at every container stop otherwise.
-    try:
-        from joblib.externals.loky import get_reusable_executor
-        get_reusable_executor().shutdown(wait=True)
-    except Exception as err:  # noqa: BLE001
-        _log.debug("could not close the worker pool: %s", err)
     return summary
 
 

@@ -52,6 +52,8 @@ profile occupancy_forecast flags=(attach_disconnected,mediate_deleted) {
   /dev/urandom rw,
   /dev/tty rw,
   /dev/shm/** rwkl,
+  # Training workers raise their own OOM score, so the kernel takes one before the server.
+  owner @{PROC}/@{pid}/oom_score_adj w,
 
   # And nowhere else: the image is the deployment artifact. PYTHONDONTWRITEBYTECODE=1
   # keeps CPython off the /app and /opt rules.
