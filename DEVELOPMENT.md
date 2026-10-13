@@ -102,6 +102,9 @@ has to change in both.**
    mechanism, the measurement and the alternative you rejected are worth
    recording, but they go in the **commit message**, where the reader is
    somebody reading the diff.
+
+   **One entry, one line.** Each entry is a single `- ` line however long it
+   runs; never hard-wrap it. The same goes for any paragraph in the changelog.
 4. `scripts/deploy-edge.sh` — rsyncs to the HA box and rebuilds the add-on,
    stamping the deployed copy with the commit sha so the add-on page says which
    build is running.

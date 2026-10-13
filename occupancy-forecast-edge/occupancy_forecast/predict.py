@@ -149,6 +149,15 @@ def load_models(models_dir: Path = MODELS_DIR) -> dict[int, dict]:
                      "people or zones (%s%s). Retrain to serve those horizons "
                      "again.", len(mismatched), ", ".join(mismatched[:3]),
                      " ..." if len(mismatched) > 3 else "")
+    # A dedicated verdict still pointing at the pooled model has no usable file behind it.
+    orphaned = sorted(h for h, a in models.items() if a.get("kind") == "dedicated"
+                      and pooled is not None and a["model"] is pooled["model"])
+    for horizon in orphaned:
+        del models[horizon]
+    if orphaned:
+        _log.warning("%d horizon(s) are served by a dedicated model that is missing or "
+                     "unreadable (%s). Retrain to serve them again.", len(orphaned),
+                     ", ".join(f"+{h}h" for h in orphaned))
     _log.info("loaded %d model(s): %d dedicated, %d pooled, %d not served",
               len(models),
               sum(1 for a in models.values() if a.get("kind") == "dedicated"),
