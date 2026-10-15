@@ -130,6 +130,7 @@ stable changes only when a change has earned its way in.
 | | |
 |---|---|
 | **Setting it up, every option, reading the panel, troubleshooting** | [`occupancy-forecast/DOCS.md`](occupancy-forecast/DOCS.md) — also the Documentation tab of the add-on itself |
+| **Home Assistant Container or Core, without the add-on store** | [`docs/standalone.md`](docs/standalone.md) |
 | **What edge is, and running both** | [`occupancy-forecast-edge/DOCS.md`](occupancy-forecast-edge/DOCS.md) |
 | **Working on the code** | [`DEVELOPMENT.md`](DEVELOPMENT.md) |
 | **Running the demo, screenshotting the panel** | [`docs/demo-instance.md`](docs/demo-instance.md) |

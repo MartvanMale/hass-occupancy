@@ -202,6 +202,20 @@ def test_no_credentials_records_a_reason_and_starts_nothing():
     assert listener.last_error and "SUPERVISOR_TOKEN" in listener.last_error
 
 
+# One HA_URL for both clients: the REST one needs `/api`, the socket its root.
+@pytest.mark.parametrize("ha_url", ["https://ha.example:8123", "https://ha.example:8123/",
+                                    "https://ha.example:8123/api", "https://ha.example:8123/api/"])
+def test_ha_url_works_with_or_without_api_for_both_clients(monkeypatch, ha_url):
+    from occupancy_forecast.sources.ha import HomeAssistant
+
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.setenv("HA_URL", ha_url)
+    monkeypatch.setenv("HA_TOKEN", "secret")
+    assert HomeAssistant().base_url == "https://ha.example:8123/api"
+    listener = listen.Listener(["person.alice"], lambda: None)
+    assert listener.url == "wss://ha.example:8123/api/websocket"
+
+
 def test_nothing_to_subscribe_to_is_not_an_error_worth_raising():
     listener = listen.Listener([], lambda: None, url="ws://test", token="secret")
     listener.start()

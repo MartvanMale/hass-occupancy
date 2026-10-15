@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Added
+
+- You can now run the add-on without Supervisor, on Home Assistant Container or Core, as a Docker image. It reads Home Assistant with a long-lived access token, publishes to your MQTT broker and serves its panel over HTTPS behind a password. [Running without Supervisor](https://github.com/MartvanMale/hass-occupancy/blob/main/docs/standalone.md) covers setup.
+
 ## 0.4.3 - 2026-10-13
 
 ### Fixed

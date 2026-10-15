@@ -31,12 +31,15 @@ jobs:
     outputs:
       trees: ${{ steps.pick.outputs.trees }}
       pins: ${{ steps.pick.outputs.pins }}
+      release: ${{ steps.pick.outputs.release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - id: pick
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           trees='["occupancy-forecast-edge","occupancy-forecast"]'
@@ -48,9 +51,19 @@ jobs:
               grep -qE '(requirements.*\.txt|Dockerfile|build\.yaml)$' <<<"$changed" \
                   || pins=false
           fi
+          # A push that moves stable's version: is a promotion, and publishes.
+          # Against the push's base, so later commits in the same push count too.
+          release=""
+          if [[ "${{ github.event_name }}" == "push" && ! "$BEFORE" =~ ^0+$ ]]; then
+              release=$(git diff "$BEFORE" HEAD -- occupancy-forecast/config.yaml \
+                  | sed -n 's/^+version: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p')
+              [[ -z "$release" || "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+                  || { echo "stable's version '$release' is not semver" >&2; exit 1; }
+          fi
           echo "trees=$trees" >> "$GITHUB_OUTPUT"
           echo "pins=$pins" >> "$GITHUB_OUTPUT"
-          echo "trees: $trees    pins: $pins"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "trees: $trees    pins: $pins    release: ${release:-none}"
 
   # scripts/test.sh without the container; the pins resolve to the same wheels.
   suite:
@@ -109,6 +122,62 @@ jobs:
           persist-credentials: false
       - run: scripts/build-image.sh ${{ matrix.tree }} ${{ matrix.arch }}
       - run: scripts/smoke-image.sh ${{ matrix.tree }} ${{ matrix.arch }}
+
+  # The standalone image for Home Assistant Container/Core, built from stable
+  # and pushed only once it has passed the same smoke as the add-on.
+  publish:
+    needs: [plan, suite, image]
+    if: needs.plan.outputs.release != ''
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        arch: [amd64, aarch64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE: ${{ needs.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/build-image.sh occupancy-forecast ${{ matrix.arch }}
+      - run: scripts/smoke-image.sh occupancy-forecast ${{ matrix.arch }}
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          local_tag="occupancy-forecast-image:occupancy-forecast-${{ matrix.arch }}-standalone"
+          docker image inspect "$local_tag" >/dev/null
+          remote="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/occupancy-forecast:$RELEASE-${{ matrix.arch }}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$local_tag" "$remote"
+          docker push "$remote"
+
+  publish-manifest:
+    needs: [plan, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE: ${{ needs.plan.outputs.release }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/occupancy-forecast"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$repo:$RELEASE" -t "$repo:latest" \
+              "$repo:$RELEASE-amd64" "$repo:$RELEASE-aarch64"
+          echo "published $repo:$RELEASE and :latest" >> "$GITHUB_STEP_SUMMARY"
 
   # The arm64 runners have LSE, so they cannot clear a Pi 4; this models its
   # Cortex-A72. Advisory, and a job rather than a step so the PR shows it.
