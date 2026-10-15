@@ -38,11 +38,13 @@ guard_start() {
 
 # Backgrounded on purpose: bash defers a trap until the foreground command
 # returns, so a six-minute `docker run` would swallow SIGTERM for six minutes.
+# GUARD_INIT=0 leaves PID 1 to the image's own /init, which refuses to be anything else.
 guard_run() {
     GUARD_NAME="hass-occupancy-$1-$$"
     shift
-    local status=0
-    docker run --rm --init --name "$GUARD_NAME" --label "$GUARD_LABEL=1" "$@" &
+    local status=0 init=--init
+    [[ "${GUARD_INIT:-1}" == 1 ]] || init=
+    docker run --rm $init --name "$GUARD_NAME" --label "$GUARD_LABEL=1" "$@" &
     wait $! || status=$?
     GUARD_NAME=""
     return "$status"

@@ -818,6 +818,12 @@ def _request(headers: dict | None = None, path: str = "/train"):
     })
 
 
+@pytest.fixture
+def supervised(monkeypatch):
+    """Inside an add-on, where Ingress sets the user header."""
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+
+
 def test_an_empty_allowlist_lets_everyone_through(monkeypatch):
     """The default, and what every install had before the option existed: an
     upgrade must not lock the owner out of their own panel."""
@@ -826,20 +832,20 @@ def test_an_empty_allowlist_lets_everyone_through(monkeypatch):
     assert server.require_admin(_request({"X-Remote-User-Id": "anyone"})) is None
 
 
-def test_a_listed_user_is_allowed(monkeypatch):
+def test_a_listed_user_is_allowed(monkeypatch, supervised):
     monkeypatch.setenv("OCCUPANCY_ADMIN_USERS", "abc123,def456")
     request = _request({"X-Remote-User-Id": "def456"})
     assert server.require_admin(request) == "def456"
 
 
-def test_an_unlisted_user_is_refused(monkeypatch):
+def test_an_unlisted_user_is_refused(monkeypatch, supervised):
     monkeypatch.setenv("OCCUPANCY_ADMIN_USERS", "abc123")
     with pytest.raises(HTTPException) as raised:
         server.require_admin(_request({"X-Remote-User-Id": "somebody_else"}))
     assert raised.value.status_code == 403
 
 
-def test_no_header_is_refused_once_the_allowlist_is_set(monkeypatch):
+def test_no_header_is_refused_once_the_allowlist_is_set(monkeypatch, supervised):
     """No header means Ingress was bypassed or a proxy never set it; "cannot be
     named" must not mean "allowed"."""
     monkeypatch.setenv("OCCUPANCY_ADMIN_USERS", "abc123")
@@ -848,7 +854,7 @@ def test_no_header_is_refused_once_the_allowlist_is_set(monkeypatch):
     assert raised.value.status_code == 403
 
 
-def test_the_allowlist_is_read_per_request(monkeypatch):
+def test_the_allowlist_is_read_per_request(monkeypatch, supervised):
     """The option can change while the add-on runs. A gate that cached the value
     it saw at import time would stop matching the Configuration tab."""
     monkeypatch.setenv("OCCUPANCY_ADMIN_USERS", "abc123")
@@ -879,6 +885,89 @@ def test_every_mutating_route_is_gated():
         "/api/config", "/api/config/check", "/api/config/check-broker",
         "/collect", "/predict", "/train", "/reload"}
     assert posts == gated, f"ungated POST routes: {sorted(posts - gated)}"
+
+
+# Outside Supervisor the user header is the client's own, and the port is
+# guarded by OCCUPANCY_PASSWORD instead.
+
+def _basic(password: str, user: str = "anyone") -> dict:
+    import base64
+    return {"Authorization": "Basic " + base64.b64encode(
+        f"{user}:{password}".encode()).decode()}
+
+
+@pytest.fixture
+def standalone(monkeypatch):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.setenv("OCCUPANCY_PASSWORD", "s3cret")
+
+
+def test_outside_supervisor_a_forged_user_header_carries_no_weight(monkeypatch):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.setenv("OCCUPANCY_ADMIN_USERS", "abc123")
+    assert server.require_admin(_request({"X-Remote-User-Id": "abc123"})) is None
+    assert server.require_admin(_request()) is None
+
+
+def test_without_a_password_the_port_stays_open(monkeypatch):
+    """What boot_smoke and the demo run as; the start-up log says so."""
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.delenv("OCCUPANCY_PASSWORD", raising=False)
+    assert server.password_refusal(_request(path="/api/status")) is None
+
+
+def test_the_password_is_ignored_inside_supervisor(monkeypatch, supervised):
+    monkeypatch.setenv("OCCUPANCY_PASSWORD", "s3cret")
+    assert server.password_refusal(_request(path="/api/status")) is None
+
+
+@pytest.mark.parametrize("path", ["/", "/api/status", "/api/candidates",
+                                  "/assets/index.js", "/openapi.json", "/train"])
+def test_every_path_but_health_wants_the_password(standalone, path):
+    refused = server.password_refusal(_request(path=path))
+    assert refused is not None and refused.status_code == 401
+    assert refused.headers["WWW-Authenticate"].startswith("Basic")
+    assert server.password_refusal(_request(_basic("s3cret"), path=path)) is None
+
+
+@pytest.mark.parametrize("headers", [
+    _basic("wrong"), _basic(""), {"Authorization": "Basic !!!not-base64"},
+    {"Authorization": "Bearer s3cret"}, {"X-Remote-User-Id": "abc123"}])
+def test_a_wrong_or_malformed_credential_is_refused(standalone, headers):
+    assert server.password_refusal(_request(headers, path="/api/status")).status_code == 401
+
+
+def test_https_needs_both_files_or_neither(standalone, monkeypatch, tmp_path):
+    from occupancy_forecast import config
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert.write_text("c")
+    key.write_text("k")
+    monkeypatch.delenv("OCCUPANCY_SSL_CERT", raising=False)
+    monkeypatch.delenv("OCCUPANCY_SSL_KEY", raising=False)
+    assert config.ssl_files() is None
+    monkeypatch.setenv("OCCUPANCY_SSL_CERT", str(cert))
+    with pytest.raises(ValueError, match="OCCUPANCY_SSL_KEY is not set"):
+        config.ssl_files()
+    monkeypatch.setenv("OCCUPANCY_SSL_KEY", str(tmp_path / "missing.pem"))
+    with pytest.raises(ValueError, match="cannot be read"):
+        config.ssl_files()
+    monkeypatch.setenv("OCCUPANCY_SSL_KEY", str(key))
+    assert config.ssl_files() == (str(cert), str(key))
+
+
+def test_https_is_left_to_ingress_inside_supervisor(supervised, monkeypatch, tmp_path):
+    from occupancy_forecast import config
+    monkeypatch.setenv("OCCUPANCY_SSL_CERT", str(tmp_path / "c"))
+    monkeypatch.setenv("OCCUPANCY_SSL_KEY", str(tmp_path / "k"))
+    assert config.ssl_files() is None
+
+
+def test_health_is_open_but_names_nobody_behind_a_password(standalone, monkeypatch):
+    assert server.password_refusal(_request(path="/health")) is None
+    monkeypatch.setattr(server, "_status", lambda: {
+        "status": "collecting", "people": ["alice"], "code": {"fingerprint": "f"}})
+    body = json.loads(server.health().body)
+    assert body == {"status": "collecting", "code": {"fingerprint": "f"}}
 
 
 # ---------------------------------------------------------------------------

@@ -91,6 +91,64 @@ if (( status )); then
     exit "$status"
 fi
 
+# /init stays PID 1 here, as for a user. It hands CMD a cleared environment;
+# with-contenv restores it, as the shebang in standalone.sh does.
+STANDALONE=0
+# Runs the standalone image to its refusal; $1 is the message it must print.
+expect_refusal() {
+    local want="$1" out
+    shift
+    out=$(GUARD_INIT=0 guard_run smoke-refusal "$@" "$TAG-standalone" \
+        /usr/bin/with-contenv /usr/bin/timeout -k 5 60 /standalone.sh 2>&1) \
+        && { echo "FAILED: it started, expected: $want" >&2; exit 1; }
+    if ! grep -qF "$want" <<<"$out"; then
+        echo "FAILED: expected '$want', got:" >&2
+        echo "$out" >&2
+        exit 1
+    fi
+    echo "refuses: $want"
+}
+
+if docker image inspect "$TAG-standalone" >/dev/null 2>&1; then
+    STANDALONE=1
+    SETTINGS=(-e HA_URL=http://127.0.0.1:9 -e HA_TOKEN=smoke -e OCCUPANCY_PASSWORD=smoke-password)
+    echo
+    echo "=== $TAG-standalone: booting without Supervisor ==="
+    expect_refusal "not starting: set HA_URL HA_TOKEN OCCUPANCY_PASSWORD"
+    expect_refusal "not starting: set OCCUPANCY_SSL_KEY too, or neither" \
+        "${SETTINGS[@]}" -e OCCUPANCY_SSL_CERT=/etc/hostname
+
+    echo "--- with the certificate it makes itself"
+    GUARD_INIT=0 guard_run smoke-standalone \
+        "${SETTINGS[@]}" -e EXPECT_FINGERPRINT="$FINGERPRINT" \
+        -v "$PWD/scripts/standalone_smoke.py":/standalone_smoke.py:ro \
+        "$TAG-standalone" \
+        /usr/bin/with-contenv /usr/bin/timeout -k 30 180 \
+        /opt/venv/bin/python3 /standalone_smoke.py || status=$?
+    if (( status )); then
+        exit "$status"
+    fi
+
+    echo "--- with a certificate of the user's own"
+    certs=$(mktemp -d)
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=smoke-supplied \
+        -addext "subjectAltName=IP:127.0.0.1" \
+        -keyout "$certs/key.pem" -out "$certs/cert.pem" 2>/dev/null
+    chmod 600 "$certs"/*.pem
+    GUARD_INIT=0 guard_run smoke-standalone \
+        "${SETTINGS[@]}" -e EXPECT_FINGERPRINT="$FINGERPRINT" \
+        -e OCCUPANCY_SSL_CERT=/certs/cert.pem -e OCCUPANCY_SSL_KEY=/certs/key.pem \
+        -e EXPECT_CERT=/certs/cert.pem -v "$certs":/certs:ro \
+        -v "$PWD/scripts/standalone_smoke.py":/standalone_smoke.py:ro \
+        "$TAG-standalone" \
+        /usr/bin/with-contenv /usr/bin/timeout -k 30 180 \
+        /opt/venv/bin/python3 /standalone_smoke.py || status=$?
+    rm -rf "$certs"
+    if (( status )); then
+        exit "$status"
+    fi
+fi
+
 if (( QEMU )); then
     echo
     echo "=== $TAG: the pinned stack on an emulated Cortex-A72 ==="
@@ -114,6 +172,9 @@ echo
 echo "=== $TREE ($ARCH) ==="
 echo "  the pinned stack ran inside the image"
 echo "  the server booted and served /health, code $FINGERPRINT"
+if (( STANDALONE )); then
+    echo "  the standalone image booted through /init, served HTTPS and guarded its port"
+fi
 if (( QEMU )); then
     echo "  and it ran on an emulated ARMv8.0 Cortex-A72"
 fi

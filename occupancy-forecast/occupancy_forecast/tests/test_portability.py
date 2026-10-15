@@ -578,6 +578,7 @@ def test_the_notification_title_says_which_build_wrote_it(monkeypatch):
 def _unresolved(monkeypatch):
     monkeypatch.setattr(config, "_topic_prefix", None)
     monkeypatch.setattr(config, "_topic_prefix_error", None)
+    monkeypatch.delenv(config.TOPIC_PREFIX_ENV, raising=False)
 
 
 def test_outside_an_add_on_the_default_is_the_answer(monkeypatch):
@@ -585,6 +586,45 @@ def test_outside_an_add_on_the_default_is_the_answer(monkeypatch):
     monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
     assert config.topic_prefix() == config.DEFAULT_TOPIC_PREFIX
     assert config.topic_prefix_resolved(), "no Supervisor, no second instance"
+
+
+def test_outside_an_add_on_the_prefix_can_be_set(monkeypatch):
+    """A standalone container next to a store install must not share its root."""
+    _unresolved(monkeypatch)
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.setenv(config.TOPIC_PREFIX_ENV, "occupancy_test")
+    assert config.topic_prefix() == "occupancy_test"
+    assert config.display_name() == "Occupancy Test"
+
+
+@pytest.mark.parametrize("bad", ["Occupancy", "occupancy-forecast", "a/b", "x y"])
+def test_a_bad_prefix_refuses_rather_than_falling_back_to_the_default(monkeypatch, bad):
+    _unresolved(monkeypatch)
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.setenv(config.TOPIC_PREFIX_ENV, bad)
+    with pytest.raises(ValueError, match=config.TOPIC_PREFIX_ENV):
+        config.resolve_topic_prefix()
+    assert config._topic_prefix is None
+
+
+def test_inside_an_add_on_the_prefix_override_is_ignored(monkeypatch):
+    import io
+    import urllib.request
+
+    _unresolved(monkeypatch)
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "t")
+    monkeypatch.setenv(config.TOPIC_PREFIX_ENV, "occupancy_test")
+
+    class Answer:
+        def __enter__(self):
+            return io.BytesIO(json.dumps(
+                {"data": {"slug": "local_occupancy_forecast_edge"}}).encode())
+
+        def __exit__(self, *_exc):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Answer())
+    assert config.resolve_topic_prefix() is True
+    assert config.topic_prefix() == "occupancy_forecast_edge"
 
 
 def test_a_failed_slug_lookup_is_not_remembered(monkeypatch):

@@ -1,3 +1,13 @@
+## 0.5.0 - 2026-10-15
+
+### Added
+
+- You can now run the add-on without Supervisor, on Home Assistant Container or Core, as a Docker image. It reads Home Assistant with a long-lived access token, publishes to your MQTT broker and serves its panel over HTTPS behind a password. [Running without Supervisor](https://github.com/MartvanMale/hass-occupancy/blob/main/docs/standalone.md) covers setup.
+
+### Changed
+
+- Updated pandas to 3.0.6, holidays to 0.105 and uvicorn to 0.54.0.
+
 ## 0.4.3 - 2026-10-13
 
 ### Fixed

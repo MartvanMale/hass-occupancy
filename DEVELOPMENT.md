@@ -184,7 +184,18 @@ pinned stack inside it, and boot the server until `/health` answers with the
 `code.fingerprint` of the tree it was built from. `check-pins.sh` tests the
 pins; this tests the Dockerfile — the 0.2.0 class, which would not start.
 
+When the Dockerfile has a `standalone` stage, `build-image.sh` also tags
+`<tag>-standalone`, the image for installs without Supervisor, and
+`smoke-image.sh` boots it through s6's `/init` (`GUARD_INIT=0`: `/init` must be
+PID 1) checks that it serves HTTPS with the expected certificate, and that every path
+but `/health` wants `OCCUPANCY_PASSWORD`.
+
 `.github/workflows/ci.yml` runs the suite and both scripts on amd64 and aarch64.
+A push that moves stable's `version:` also runs `publish`, which builds stable's
+standalone target, smokes it, and pushes
+`ghcr.io/<owner>/occupancy-forecast:<version>` and `:latest`. **The push that
+deploys stable also publishes the image.** The package is created private on the
+first push; make it public once in its GitHub package settings.
 Two advisory jobs run only when a pin, the `Dockerfile` or `build.yaml` moves:
 `pins-arm` (`check-pins.sh --only arm`) and `cortex-a72`, the stack under
 qemu-user modelling a Pi 4. **A green arm64 runner does not clear a Pi 4** —
@@ -250,7 +261,8 @@ what a thing does and what to do with it, never why it was designed that way.
   tests or docs. The tests run against a synthetic household on purpose: that is
   what stops one particular installation creeping back into the package.
 - Never commit an Influx token or MQTT password. Supervisor injects them at
-  runtime via `run.sh`.
+  runtime via `run.sh`; the standalone image reads them from the container's
+  environment via `standalone.sh` ([`docs/standalone.md`](docs/standalone.md)).
 - Never add a test dependency to `requirements.txt`. Dev-only pins go in
   `requirements-dev.txt`, because the shipped image deliberately carries no test
   framework.

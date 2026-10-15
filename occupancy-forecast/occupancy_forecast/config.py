@@ -365,8 +365,9 @@ def zone_name_map() -> dict[str, str]:
 # Deliberately NO host default: an unset variable must fail, not silently dial
 # somebody else's broker.
 NO_BROKER = ("no MQTT broker: nothing in the panel's broker card and no mqtt "
-             "service from Supervisor. Fill in the broker on the add-on's "
-             "Connections tab, or install the Mosquitto add-on.")
+             "service from Supervisor. Fill in the broker on the "
+             "Connections tab or install the Mosquitto add-on; without "
+             "Supervisor, set MQTT_HOST.")
 
 
 def mqtt_settings(settings: "Settings | None" = None) -> dict:
@@ -398,6 +399,44 @@ def mqtt_settings(settings: "Settings | None" = None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Outside Supervisor
+# ---------------------------------------------------------------------------
+
+def standalone() -> bool:
+    """No Supervisor: nothing proxies Home Assistant or guards the port."""
+    return not os.environ.get("SUPERVISOR_TOKEN")
+
+
+def ha_base_url() -> str:
+    """`HA_URL` as Home Assistant's root; a trailing `/api` is accepted too."""
+    base = os.environ.get("HA_URL", "").strip().rstrip("/")
+    return base[:-len("/api")] if base.endswith("/api") else base
+
+
+def standalone_password() -> str | None:
+    """`OCCUPANCY_PASSWORD`, which guards the port outside Supervisor only."""
+    return (os.environ.get("OCCUPANCY_PASSWORD") or None) if standalone() else None
+
+
+SSL_ENV = ("OCCUPANCY_SSL_CERT", "OCCUPANCY_SSL_KEY")
+
+
+def ssl_files() -> tuple[str, str] | None:
+    """The certificate and key to serve HTTPS with, outside Supervisor only."""
+    if not standalone():
+        return None
+    paths = [os.environ.get(name, "").strip() for name in SSL_ENV]
+    if not any(paths):
+        return None
+    for name, path in zip(SSL_ENV, paths):
+        if not path:
+            raise ValueError(f"{name} is not set; set both {' and '.join(SSL_ENV)} or neither")
+        if not os.access(path, os.R_OK):
+            raise ValueError(f"{name}={path} cannot be read; check the path and the volume it is mounted from")
+    return paths[0], paths[1]
+
+
 # Ingress authenticates but does not authorise, and forwards no admin flag.
 # Supervisor sets `X-Remote-User-Id` and strips any client copy, so it cannot be
 # forged. EMPTY MEANS EVERYONE, or an upgrade would lock the owner out.
@@ -415,6 +454,20 @@ DEFAULT_TOPIC_PREFIX = "occupancy_forecast"
 # edge a second stable build on MQTT until its next restart.
 _topic_prefix: str | None = None
 _topic_prefix_error: str | None = None
+
+TOPIC_PREFIX_ENV = "OCCUPANCY_TOPIC_PREFIX"
+
+
+def _standalone_topic_prefix() -> str:
+    """The env override, or the default. A bad value raises rather than falling
+    back, because the fallback is the name a store install already uses."""
+    chosen = os.environ.get(TOPIC_PREFIX_ENV, "").strip()
+    if not chosen:
+        return DEFAULT_TOPIC_PREFIX
+    if not re.fullmatch(r"[a-z0-9_]+", chosen):
+        raise ValueError(f"{TOPIC_PREFIX_ENV}={chosen!r}: use lowercase letters, "
+                         "digits and underscores only")
+    return chosen
 
 
 def _supervisor_slug(token: str, timeout: float) -> str:
@@ -459,15 +512,16 @@ def set_supervisor_options(options: dict, token: str, timeout: float = 10.0) -> 
 def resolve_topic_prefix(attempts: int = 1, delay: float = 0.0,
                          timeout: float = 5.0) -> bool:
     """Ask Supervisor for this add-on's slug; True once the prefix is known.
-    The only network call for it. Outside an add-on the default is cached at
-    once; inside one a failure caches NOTHING, so the next call asks again.
+    The only network call for it. Outside an add-on `OCCUPANCY_TOPIC_PREFIX` or
+    the default is cached at once; inside one a failure caches NOTHING, so the
+    next call asks again.
     """
     global _topic_prefix, _topic_prefix_error
     if _topic_prefix is not None:
         return True
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
-        _topic_prefix = DEFAULT_TOPIC_PREFIX
+        _topic_prefix = _standalone_topic_prefix()
         return True
     for attempt in range(1, attempts + 1):
         try:

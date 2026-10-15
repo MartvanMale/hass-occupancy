@@ -34,6 +34,11 @@ echo "=== building $TREE for $ARCH ==="
 echo "    BUILD_FROM $BASE"
 guard_start
 docker build --build-arg "BUILD_FROM=$BASE" -t "$TAG" "$TREE"
+# The published image for Supervisor-less installs, from the same layers.
+if grep -q ' AS standalone$' "$TREE/Dockerfile"; then
+    docker build --build-arg "BUILD_FROM=$BASE" --target standalone \
+        -t "$TAG-standalone" "$TREE"
+fi
 
 echo
 echo "built $TAG"

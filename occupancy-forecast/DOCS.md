@@ -4,6 +4,10 @@ See the [repository README](https://github.com/MartvanMale/hass-occupancy) for
 what this does. This page is how to set it up, and the reference for the
 options, the sensors that need explaining, and the panel.
 
+On Home Assistant Container or Core, without the add-on store, follow
+[Running without Supervisor](https://github.com/MartvanMale/hass-occupancy/blob/main/docs/standalone.md)
+first, then continue here.
+
 ## Setting up
 
 Three steps, and only the last of them is required. This section is what the

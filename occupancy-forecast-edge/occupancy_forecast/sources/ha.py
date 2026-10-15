@@ -64,7 +64,9 @@ class HomeAssistant:
         supervisor = os.environ.get("SUPERVISOR_TOKEN")
         if base_url is None and supervisor:
             base_url, token = SUPERVISOR_API, supervisor
-        self.base_url = (base_url or os.environ.get("HA_URL", "")).rstrip("/")
+        if base_url is None and config.ha_base_url():
+            base_url = config.ha_base_url() + "/api"
+        self.base_url = (base_url or "").rstrip("/")
         self.token = token or os.environ.get("HA_TOKEN", "")
         self.timeout = timeout
         if not self.base_url:
