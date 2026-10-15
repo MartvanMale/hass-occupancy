@@ -70,7 +70,7 @@ class Listener:
         if url is None and supervisor:
             url, token = SUPERVISOR_WS, supervisor
         if url is None:
-            base = os.environ.get("HA_URL", "").rstrip("/")
+            base = config.ha_base_url()
             if base:
                 url = base.replace("https://", "wss://", 1).replace(
                     "http://", "ws://", 1) + "/api/websocket"

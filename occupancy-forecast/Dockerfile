@@ -1,5 +1,5 @@
 ARG BUILD_FROM
-FROM $BUILD_FROM
+FROM $BUILD_FROM AS addon
 
 # The Home Assistant Debian base brings S6 and bashio but no Python, so it is
 # installed here. See build.yaml for why this is not the Python base image.
@@ -36,7 +36,14 @@ COPY panel/dist ./occupancy_forecast/web/dist/
 
 COPY occupancy_forecast/ ./occupancy_forecast/
 
-COPY run.sh /run.sh
-RUN chmod a+x /run.sh
+COPY run.sh standalone.sh /
+RUN chmod a+x /run.sh /standalone.sh
 
 CMD ["/run.sh"]
+
+# The published image for Home Assistant Core/Container: `--target standalone`.
+FROM addon AS standalone
+CMD ["/standalone.sh"]
+
+# Last, so a plain build -- Supervisor's -- is the add-on.
+FROM addon

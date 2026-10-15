@@ -9,6 +9,7 @@ sensor states and persistent notifications.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import copy
 import datetime as dt
@@ -16,6 +17,7 @@ import hashlib
 import json
 import faulthandler
 import logging
+import secrets
 import sys
 import threading
 import time
@@ -647,6 +649,7 @@ async def lifespan(_: FastAPI):
     # First, so that bootstrap's own warnings land in the configured format
     # rather than being the one thing that still prints raw.
     log.configure()
+    _say_how_the_port_is_guarded()
     # Who this add-on is on MQTT, asked of Supervisor BEFORE anything is named;
     # a few retries because the usual cause of a miss is a host still booting.
     config.resolve_topic_prefix(attempts=5, delay=3.0)
@@ -738,6 +741,51 @@ app = FastAPI(title="Occupancy Forecast", version=train_mod.MODEL_VERSION,
 web.mount(app)
 
 
+# Outside Supervisor nothing stands in front of the port, so a password does:
+# HTTP Basic, which a browser asks for once and resends with the panel's fetches.
+OPEN_PATHS = frozenset({"/health"})
+
+
+def password_refusal(request: Request) -> Response | None:
+    """A 401 for a request without the standalone password; None to let it in."""
+    password = config.standalone_password()
+    if password is None or request.url.path in OPEN_PATHS:
+        return None
+    scheme, _, encoded = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() == "basic":
+        try:
+            _, _, given = base64.b64decode(encoded).decode().partition(":")
+        except ValueError:
+            given = ""
+        if secrets.compare_digest(given.encode(), password.encode()):
+            return None
+    return Response(status_code=401, content="password required",
+                    headers={"WWW-Authenticate": 'Basic realm="Occupancy Forecast"'})
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    refused = password_refusal(request)
+    return refused if refused is not None else await call_next(request)
+
+
+def _say_how_the_port_is_guarded() -> None:
+    if not config.standalone():
+        return
+    if config.admin_users():
+        _log.warning("OCCUPANCY_ADMIN_USERS is ignored outside Supervisor; "
+                     "OCCUPANCY_PASSWORD guards the panel and API")
+    if config.ssl_files() is not None:
+        _log.info("serving HTTPS on port %d", PORT)
+    else:
+        _log.warning("serving plain HTTP on port %d; set OCCUPANCY_SSL_CERT and "
+                     "OCCUPANCY_SSL_KEY to serve HTTPS", PORT)
+    if config.standalone_password() is None:
+        _log.warning("no OCCUPANCY_PASSWORD: anyone who can reach port %d can "
+                     "read the forecast and change the settings. Set "
+                     "OCCUPANCY_PASSWORD to require one.", PORT)
+
+
 # The header Supervisor's Ingress proxy sets, and strips from the incoming
 # request first so a browser cannot supply its own. See config.admin_users().
 REMOTE_USER_HEADER = "X-Remote-User-Id"
@@ -748,9 +796,10 @@ def require_admin(request: Request) -> str | None:
 
     Read the allowlist per request, because the option changes while the
     add-on runs. No header plus an empty allowlist is the ordinary unrestricted
-    case; no header plus a NON-empty one is refused.
+    case; no header plus a NON-empty one is refused. Outside Supervisor the
+    header is the client's own, so the allowlist means nothing there.
     """
-    allowed = config.admin_users()
+    allowed = config.admin_users() if not config.standalone() else frozenset()
     if not allowed:
         return None
     user = request.headers.get(REMOTE_USER_HEADER)
@@ -963,6 +1012,9 @@ def health() -> JSONResponse:
     add-on.
     """
     body = _status()
+    if config.standalone_password() is not None:
+        # Open to a healthcheck, so it names nobody.
+        body = {"status": body["status"], "code": body["code"]}
     unhealthy = _stall["since"] is not None or _state.get("ha") is None
     return JSONResponse(content=body, status_code=503 if unhealthy else 200)
 
@@ -1526,4 +1578,10 @@ def ui() -> str:
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
+    try:
+        tls = config.ssl_files()
+    except ValueError as err:
+        sys.exit(f"not starting: {err}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning",
+                ssl_certfile=tls[0] if tls else None,
+                ssl_keyfile=tls[1] if tls else None)
