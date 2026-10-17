@@ -47,6 +47,7 @@ SETTINGS_KEYS = {"people", "zones", "house_entity", "holiday_country",
                  "day_schedule",
                  "departure_threshold", "arrival_threshold", "crossing_min_hours",
                  "forecast_retention_days",
+                 "training_day", "training_hour", "training_minute",
                  "source", "influx_url", "influx_org", "influx_bucket",
                  "mqtt_host", "mqtt_port", "mqtt_user", "mqtt_ssl",
                  # Flags, not values: `Settings.public` never serves a secret.
@@ -294,7 +295,8 @@ def test_every_settable_field_the_form_sends_is_on_a_validator_allowlist():
     payload = {"people": [], "zones": [], "house_entity": None,
                "day_schedule": None, "departure_threshold": 0.5,
                "arrival_threshold": 0.5, "crossing_min_hours": 2,
-               "forecast_retention_days": 30, "source": "store",
+               "forecast_retention_days": 30, "training_day": 5,
+               "training_hour": 3, "training_minute": 23, "source": "store",
                "influx_url": "", "influx_org": "", "influx_bucket": "b",
                "influx_token": "tok", "mqtt_host": "", "mqtt_port": 1883,
                "mqtt_user": "", "mqtt_password": "pw", "mqtt_ssl": False}

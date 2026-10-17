@@ -780,6 +780,7 @@ def test_a_config_written_before_the_crossing_cuts_still_loads():
     assert loaded.departure_threshold == config.DEFAULT_DEPARTURE_THRESHOLD
     assert loaded.arrival_threshold == config.DEFAULT_ARRIVAL_THRESHOLD
     assert loaded.crossing_min_hours == config.DEFAULT_CROSSING_MIN_HOURS
+    assert (loaded.training_day, loaded.training_hour, loaded.training_minute) == (5, 3, 23)
 
 
 def test_an_office_zones_config_migrates_to_a_ticked_list():

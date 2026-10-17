@@ -8,6 +8,7 @@ import json
 import re
 import threading
 import time
+import zoneinfo
 
 import pytest
 from fastapi import HTTPException
@@ -25,6 +26,19 @@ def at(text: str) -> dt.datetime:
 
 SHORT = server.MIN_DAYS_TO_TRAIN + 1      # still retraining daily
 MATURE = server.FULL_HISTORY_DAYS + 1     # weekly now
+
+
+def at_slot(monkeypatch, day: int, hour: int, minute: int) -> None:
+    from occupancy_forecast import config
+    monkeypatch.setattr(config, "TRAINING_DAY", day)
+    monkeypatch.setattr(config, "TRAINING_HOUR", hour)
+    monkeypatch.setattr(config, "TRAINING_MINUTE", minute)
+
+
+@pytest.fixture(autouse=True)
+def monday_four(monkeypatch):
+    """The schedule these tests were written against: Monday 04:00."""
+    at_slot(monkeypatch, 0, 4, 0)
 
 
 def test_a_daily_schedule_takes_the_next_04_00():
@@ -72,6 +86,162 @@ def test_there_is_no_next_train_before_there_is_enough_history():
     """Saying "tomorrow at 04:00" would be a lie -- the worker checks the same
     threshold and will skip."""
     assert server._next_train(at("2026-09-07T03:00"), 1.0) is None
+
+
+def test_the_next_train_honours_the_chosen_day_and_minute(monkeypatch):
+    at_slot(monkeypatch, 5, 3, 23)                     # Saturday 03:23
+    assert server._next_train(at("2026-09-07T12:00"), SHORT).startswith("2026-09-08T03:23")
+    assert server._next_train(at("2026-09-07T12:00"), MATURE).startswith("2026-09-12T03:23")
+    # Saturday 03:24: this week's has started, so the next Saturday.
+    assert server._next_train(at("2026-09-12T03:24"), MATURE).startswith("2026-09-19T03:23")
+
+
+# ---------------------------------------------------------------------------
+# Whether a scheduled train starts now
+# ---------------------------------------------------------------------------
+
+def test_a_slot_is_due_for_an_hour_after_its_minute(monkeypatch):
+    at_slot(monkeypatch, 0, 3, 23)
+    assert server._due_slot(at("2026-09-07T03:22"), SHORT, None) is None
+    assert server._due_slot(at("2026-09-07T03:23"), SHORT, None) == dt.date(2026, 9, 7)
+    assert server._due_slot(at("2026-09-07T04:22"), SHORT, None) == dt.date(2026, 9, 7)
+    # A restart later in the day does not train.
+    assert server._due_slot(at("2026-09-07T04:23"), SHORT, None) is None
+    assert server._due_slot(at("2026-09-07T10:00"), SHORT, None) is None
+
+
+def test_a_slot_runs_once(monkeypatch):
+    at_slot(monkeypatch, 0, 3, 23)
+    assert server._due_slot(at("2026-09-07T03:30"), SHORT, dt.date(2026, 9, 7)) is None
+
+
+def test_a_restart_after_the_train_finished_does_not_train_again(monkeypatch):
+    """`last_train_day` lives in the scheduler and is lost on a restart; the
+    finished train's own stamp is not."""
+    at_slot(monkeypatch, 0, 3, 23)
+    tz = config_mod.tzinfo()
+    now = dt.datetime(2026, 9, 7, 3, 40, tzinfo=tz)
+    done = dt.datetime(2026, 9, 7, 3, 27, tzinfo=tz).astimezone(dt.timezone.utc)
+    assert server._due_slot(now, SHORT, None, done) is None
+    before = dt.datetime(2026, 9, 6, 3, 27, tzinfo=tz).astimezone(dt.timezone.utc)
+    assert server._due_slot(now, SHORT, None, before) == dt.date(2026, 9, 7)
+
+
+def test_a_slot_just_before_midnight_is_caught_after_it(monkeypatch):
+    at_slot(monkeypatch, 0, 23, 59)
+    assert server._due_slot(at("2026-09-08T00:03"), SHORT, None) == dt.date(2026, 9, 7)
+    assert server._due_slot(at("2026-09-08T00:03"), MATURE, None) == dt.date(2026, 9, 7), \
+        "the weekday is the slot's, not the one the cycle landed on"
+
+
+def test_a_weekly_schedule_skips_the_other_days(monkeypatch):
+    at_slot(monkeypatch, 5, 3, 23)
+    assert server._due_slot(at("2026-09-07T03:30"), MATURE, None) is None
+    assert server._due_slot(at("2026-09-12T03:30"), MATURE, None) == dt.date(2026, 9, 12)
+
+
+def test_a_slot_the_clocks_skip_still_runs(monkeypatch):
+    """02:30 does not exist in Amsterdam on 2026-03-29; the first cycle after
+    the jump, at 03:00, is inside the window on the wall clock."""
+    at_slot(monkeypatch, 6, 2, 30)
+    tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
+    now = dt.datetime(2026, 3, 29, 3, 0, tzinfo=tz)
+    assert server._due_slot(now, SHORT, None) == dt.date(2026, 3, 29)
+    # Finished at 03:05 and restarted at 03:10: done, on the wall clock too.
+    done = dt.datetime(2026, 3, 29, 3, 5, tzinfo=tz).astimezone(dt.timezone.utc)
+    later = dt.datetime(2026, 3, 29, 3, 10, tzinfo=tz)
+    assert server._due_slot(later, SHORT, None, done) is None
+
+
+# ---------------------------------------------------------------------------
+# How long the scheduler sleeps
+# ---------------------------------------------------------------------------
+
+AMSTERDAM = zoneinfo.ZoneInfo("Europe/Amsterdam")
+
+
+def local(*parts) -> dt.datetime:
+    return dt.datetime(*parts, tzinfo=AMSTERDAM)
+
+
+def test_the_sleep_is_real_time_across_the_autumn_change():
+    """01:00 CEST to 03:23 CET on 2026-10-25 is 3 h 23 min, not the 2 h 23 min
+    the wall clocks differ by."""
+    assert server._seconds_until(local(2026, 10, 25, 3, 23),
+                                 local(2026, 10, 25, 1, 0)) == 3 * 3600 + 23 * 60
+
+
+def test_the_next_slot_is_the_next_train_as_a_datetime(monkeypatch):
+    at_slot(monkeypatch, 5, 3, 23)
+    now = local(2026, 9, 7, 12, 0)
+    assert server._next_slot(now, SHORT).isoformat(timespec="minutes") == \
+        server._next_train(now, SHORT)
+    assert server._next_slot(now, 1.0) is None
+
+
+def test_the_scheduler_trains_at_the_slot(monkeypatch):
+    at_slot(monkeypatch, 0, 3, 23)
+    assert server._scheduler_step(local(2026, 9, 7, 3, 23), SHORT, None, None) == \
+        (dt.date(2026, 9, 7), 0.0)
+
+
+def test_the_scheduler_sleeps_until_just_before_the_slot(monkeypatch):
+    at_slot(monkeypatch, 0, 3, 23)
+    assert server._scheduler_step(local(2026, 9, 7, 3, 3), SHORT, None, None) == \
+        (None, 20 * 60 - server.SCHEDULE_MARGIN_SECONDS)
+    # The last seconds are slept whole, so the step after them trains.
+    assert server._scheduler_step(local(2026, 9, 7, 3, 22, 55), SHORT, None, None) == \
+        (None, 5.0)
+
+
+def test_the_repeated_autumn_hour_does_not_spin(monkeypatch):
+    """02:30 CET on 2026-10-25, after 02:30 CEST: a 02:45 slot is ahead on the
+    wall clock but behind in real time, and the sleep must not be 0."""
+    at_slot(monkeypatch, 6, 2, 45)
+    second = dt.datetime(2026, 10, 25, 1, 30, tzinfo=dt.timezone.utc).astimezone(AMSTERDAM)
+    _, wait = server._scheduler_step(second, SHORT, None, None)
+    assert wait == server.MIN_CYCLE_SECONDS
+
+
+def test_the_scheduler_checks_in_at_least_hourly(monkeypatch):
+    at_slot(monkeypatch, 0, 3, 23)
+    assert server._scheduler_step(local(2026, 9, 7, 12, 0), SHORT, None, None) == \
+        (None, server.SCHEDULE_CHECK_SECONDS)
+    # Too little history: no slot, and still hourly.
+    assert server._scheduler_step(local(2026, 9, 7, 12, 0), 1.0, None, None) == \
+        (None, server.SCHEDULE_CHECK_SECONDS)
+
+
+def test_a_slot_the_clocks_skip_trains_on_the_wake_before_it(monkeypatch):
+    """02:30 on 2026-03-29 resolves to 03:30 CEST, the end of its window, so
+    the wake five seconds earlier still trains."""
+    at_slot(monkeypatch, 6, 2, 30)
+    before = local(2026, 3, 29, 1, 50)
+    _, wait = server._scheduler_step(before, SHORT, None, None)
+    woke = (before.astimezone(dt.timezone.utc)
+            + dt.timedelta(seconds=wait)).astimezone(AMSTERDAM)
+    assert woke == local(2026, 3, 29, 3, 29, 55)
+    assert server._scheduler_step(woke, SHORT, None, None)[0] == dt.date(2026, 3, 29)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("training_day", 7), ("training_day", -1), ("training_hour", 24),
+    ("training_minute", 60), ("training_minute", 1.5),
+    ("training_hour", True), ("training_hour", "3"),
+    ("training_hour", float("nan")), ("training_hour", float("inf"))])
+def test_a_training_time_out_of_range_is_refused(key, value):
+    with pytest.raises(HTTPException) as raised:
+        server.typed_patch({key: value})
+    assert raised.value.status_code == 400
+
+
+def test_the_training_time_edges_are_accepted():
+    assert server.typed_patch({"training_day": 6, "training_hour": 23,
+                               "training_minute": 59.0}) == {
+        "training_day": 6, "training_hour": 23, "training_minute": 59}
+    assert server.typed_patch({"training_day": 0, "training_hour": 0,
+                               "training_minute": 0}) == {
+        "training_day": 0, "training_hour": 0, "training_minute": 0}
 
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,10 @@ export function bytes(n: number): string {
  *  is the closest thing to a name the add-on has without asking Home Assistant. */
 export const pretty = (slug: string) => slug.charAt(0).toUpperCase() + slug.slice(1)
 
+/** An hour and minute as a 24-hour `HH:MM`, whatever the viewer's locale. */
+export const hhmm = (hour: number, minute: number) =>
+  `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+
 /** A 0-1 fraction as a percentage with a fixed number of decimals. */
 export const percent = (v: number, digits = 1) => `${(v * 100).toFixed(digits)}%`
 
