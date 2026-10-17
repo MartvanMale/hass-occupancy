@@ -1092,7 +1092,8 @@ def test_the_password_is_ignored_inside_supervisor(monkeypatch, supervised):
 
 
 @pytest.mark.parametrize("path", ["/", "/api/status", "/api/candidates",
-                                  "/assets/index.js", "/openapi.json", "/train"])
+                                  "/api/events", "/assets/index.js",
+                                  "/openapi.json", "/train"])
 def test_every_path_but_health_wants_the_password(standalone, path):
     refused = server.password_refusal(_request(path=path))
     assert refused is not None and refused.status_code == 401
@@ -1477,3 +1478,156 @@ def test_bootstrap_saves_config_json_before_it_touches_supervisor(monkeypatch, t
     runtime_mod.bootstrap(tmp_path / "config.json")
 
     assert calls == ["save", "retire"]
+
+
+# ---------------------------------------------------------------------------
+# The panel's event stream
+# ---------------------------------------------------------------------------
+# Driven by hand under asyncio.run: the suite has no pytest-asyncio.
+
+import asyncio  # noqa: E402
+
+
+class _Tab:
+    """A request whose client never leaves; the stream ends by cancellation."""
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+@pytest.fixture
+def quiet_state(monkeypatch):
+    """A settled add-on: nothing moves unless a test moves it."""
+    state = dict(server._state, last_collect="c", last_predict="p", last_train="t",
+                 loaded_at="l", usable_days=40.0, training_started_at=None,
+                 last_error_public=None, settings=object())
+    monkeypatch.setattr(server, "_state", state)
+    monkeypatch.setattr(server, "_listener", None)
+    monkeypatch.setattr(server, "_stall", dict(server._stall, since=None))
+    monkeypatch.setattr(server, "_heartbeat", dict(server._heartbeat, cycles=3))
+    return state
+
+
+def _events(changes, clock=None) -> list[str]:
+    """The event names sent while each of `changes` runs in turn, one per check."""
+    pending = list(changes)
+
+    async def sleep(_seconds):
+        if not pending:
+            raise asyncio.CancelledError
+        pending.pop(0)()
+
+    async def go():
+        names = []
+        try:
+            async for event in server.change_events(_Tab(), now=clock or _Clock()):
+                names.append(event.split("\n")[0].removeprefix("event: "))
+        except asyncio.CancelledError:
+            pass
+        return names
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(server.asyncio, "sleep", sleep)
+        return asyncio.run(go())
+
+
+@pytest.mark.parametrize("field, value", [
+    ("last_collect", "c2"), ("last_train", "t2"), ("loaded_at", "l2"),
+    ("usable_days", 41.0), ("training_started_at", "s"),
+    ("last_error_public", "boom"), ("settings", object()),
+])
+def test_each_status_field_moves_the_status_mark(quiet_state, field, value):
+    before = server._change_marks()
+    quiet_state[field] = value
+    after = server._change_marks()
+    assert after["status"] != before["status"]
+    assert after["forecast"] == before["forecast"]
+
+
+def test_a_new_forecast_moves_both_marks(quiet_state):
+    before = server._change_marks()
+    quiet_state["last_predict"] = "p2"
+    after = server._change_marks()
+    assert after["status"] != before["status"]
+    assert after["forecast"] != before["forecast"]
+
+
+def test_the_worker_phase_and_its_age_move_no_mark(quiet_state):
+    before = server._change_marks()
+    server._heartbeat.update(phase="predict", at=time.monotonic() - 99)
+    assert server._change_marks() == before
+
+
+def test_the_listener_counters_move_no_mark(quiet_state, monkeypatch):
+    class Listener:
+        status = {"connected": True, "events": 1, "fired": 1, "last_event": "e"}
+    monkeypatch.setattr(server, "_listener", Listener())
+    before = server._change_marks()
+    Listener.status = dict(Listener.status, events=9, fired=9)
+    assert server._change_marks() == before
+
+
+def test_the_stream_says_hello_then_names_what_changed(quiet_state):
+    def predict():
+        quiet_state["last_predict"] = "p2"
+
+    def collect():
+        quiet_state["last_collect"] = "c2"
+
+    assert _events([predict, lambda: None, collect]) == [
+        "hello", "forecast", "status", "status"]
+
+
+def test_a_change_before_the_first_check_is_still_sent(quiet_state):
+    """The snapshot is taken before `hello`, so nothing between them is lost."""
+    assert _events([lambda: quiet_state.update(loaded_at="l2")]) == ["hello", "status"]
+
+
+def test_a_quiet_stream_pings(quiet_state):
+    clock = _Clock()
+
+    def later():
+        clock.t += server.EVENTS_PING_SECONDS
+
+    assert _events([lambda: None, later], clock) == ["hello", "ping"]
+
+
+def test_cancelling_the_stream_ends_it(quiet_state, caplog):
+    """How a closed tab arrives: a cancel at the sleep, not a disconnect flag."""
+    async def go():
+        stream = server.change_events(_Tab(), now=_Clock())
+        await anext(stream)
+
+        async def drain():
+            async for _ in stream:
+                pass
+
+        task = asyncio.create_task(drain())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    caplog.set_level("DEBUG", logger=server._log.name)
+    asyncio.run(go())
+    assert "event stream closed" in caplog.text
+
+
+def test_the_events_route_streams_without_caching():
+    response = asyncio.run(server.api_events(_Tab()))
+    assert response.media_type == "text/event-stream"
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+
+
+def test_the_events_route_is_a_get():
+    routes = {r.path: r for r in server.app.routes if hasattr(r, "methods")}
+    assert routes["/api/events"].methods == {"GET"}

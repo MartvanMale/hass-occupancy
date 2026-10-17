@@ -3,6 +3,7 @@
 ### Added
 
 - The Configuration page has a Training schedule section where you choose the day, hour and minute of the scheduled training run.
+- The panel now updates on its own. Times and countdowns stay current, and a new forecast or a finished training run appears as soon as it happens instead of at the next refresh.
 
 ### Changed
 

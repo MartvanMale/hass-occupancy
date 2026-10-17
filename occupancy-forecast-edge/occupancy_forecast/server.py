@@ -1,14 +1,15 @@
 """The add-on: collector, scheduler, HTTP API and the configuration UI.
 
 Handlers are sync `def`: an `async def` doing blocking history reads or a fit
-would occupy the event loop and hang `/health` exactly when it is needed. Three
-loops run on their own -- collector every COLLECT_MINUTES, predictor after each
-collect, trainer weekly and on demand. ADVISORY ONLY: the only writes are MQTT
-sensor states and persistent notifications.
+would occupy the event loop and hang `/health`. The one exception, /api/events,
+reads only memory. Three loops run on their own: collect, predict after each
+collect, train on schedule or on demand. The add-on is advisory: it writes
+only MQTT sensor states and persistent notifications.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import copy
@@ -26,7 +27,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from . import (config, departure, discover, eta as eta_mod, evaluate, explore,
                features, listen, log, night)
@@ -1140,6 +1141,67 @@ def health() -> JSONResponse:
 @app.get("/api/status")
 def api_status() -> dict:
     return _status()
+
+
+# Seconds between checks for a change, and between the pings that let the
+# panel tell a live stream from one a proxy is holding back.
+EVENTS_CHECK_SECONDS = 1.0
+EVENTS_PING_SECONDS = 15.0
+
+
+def _change_marks() -> dict[str, tuple]:
+    """What the panel would refetch, per endpoint. Memory only: it runs on the event loop."""
+    listener = dict(_listener.status) if _listener else {"connected": False}
+    listener.pop("events", None)
+    listener.pop("fired", None)
+    return {
+        "forecast": (_state["last_predict"],),
+        # Not the worker phase: it moves every few seconds and the panel's clock covers it.
+        "status": (_state["last_collect"], _state["last_predict"],
+                   _state["last_train"], _state["loaded_at"],
+                   _state.get("usable_days"), _train_lock.locked(),
+                   _state["training_started_at"], _broker.connected,
+                   _broker.last_error_public, tuple(sorted(listener.items())),
+                   _stall["since"], _state["last_error_public"],
+                   _heartbeat["cycles"], id(_state["settings"])),
+    }
+
+
+async def change_events(request: Request, now=time.monotonic):
+    """`hello`, then a `status` or `forecast` event for each change, and a `ping`.
+
+    A closed tab ends this by cancelling it at the sleep: behind the password
+    middleware `is_disconnected()` never turns true.
+    """
+    sent = _change_marks()
+    pinged = now()
+    yield "event: hello\ndata: {}\n\n"
+    try:
+        while True:
+            await asyncio.sleep(EVENTS_CHECK_SECONDS)
+            if await request.is_disconnected():
+                return
+            marks = _change_marks()
+            for name, mark in marks.items():
+                if mark != sent.get(name):
+                    yield f"event: {name}\ndata: {{}}\n\n"
+            sent = marks
+            if now() - pinged >= EVENTS_PING_SECONDS:
+                pinged = now()
+                yield "event: ping\ndata: {}\n\n"
+    finally:
+        _log.debug("event stream closed")
+
+
+class EventStream(StreamingResponse):
+    media_type = "text/event-stream"
+
+
+@app.get("/api/events", response_class=EventStream)
+async def api_events(request: Request) -> EventStream:
+    """Tells the panel when to refetch. The events carry no data."""
+    return EventStream(change_events(request), headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # The shading changes at most on the hour and costs an HA history call, while

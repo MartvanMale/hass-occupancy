@@ -3,7 +3,7 @@ import { Card } from '../components/Card'
 import { Chip } from '../components/Chip'
 import { Row } from '../components/Row'
 import { Icon } from '../components/Icon'
-import { relativeTime } from '../format'
+import { Ago } from '../components/Ago'
 import { Field } from '../components/Field'
 import { Select } from '../components/Select'
 
@@ -56,7 +56,7 @@ function Notices({ status }: { status: Status }) {
           <div className="info">
             <div className="primary">
               The worker has been stuck in “{status.worker.stalled_in}” since{' '}
-              {relativeTime(status.worker.stalled_since)}
+              <Ago iso={status.worker.stalled_since} />
             </div>
             <div className="secondary">
               Forecasts are not being updated. Thread stacks are in the add-on log;

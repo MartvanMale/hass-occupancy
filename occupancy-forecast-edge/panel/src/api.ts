@@ -16,6 +16,9 @@ async function get<T>(path: string): Promise<T> {
 }
 
 export const getStatus = () => get<Status>('api/status')
+
+/** Named events with no data, each meaning "fetch that again". */
+export const openEvents = () => new EventSource('api/events')
 export const getCandidates = () => get<Candidates>('api/candidates')
 export const getSettings = () => get<Settings>('api/config')
 

@@ -2,12 +2,12 @@
  *  raw ISO stamp is the right instant and the wrong unit. */
 
 /** "13 hours ago", "just now", "in 6 hours". */
-export function relativeTime(iso: string | null | undefined): string {
+export function relativeTime(iso: string | null | undefined, now = Date.now()): string {
   if (!iso) return 'never'
   const then = new Date(iso).getTime()
   if (Number.isNaN(then)) return 'never'
 
-  const seconds = Math.round((then - Date.now()) / 1000)
+  const seconds = Math.round((then - now) / 1000)
   const magnitude = Math.abs(seconds)
   if (magnitude < 45) return 'just now'
 

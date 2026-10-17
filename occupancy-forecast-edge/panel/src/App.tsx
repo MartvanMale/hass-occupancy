@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { checkBroker, checkInflux, getCandidates, getSettings, getStatus, saveConfig } from './api'
 import type { BrokerCheck, Candidates, InfluxCheck, Settings, Status } from './types'
 import { hhmm } from './format'
+import { useServerEvents } from './hooks'
 import { Icon, Shape } from './components/Icon'
 import { SaveDock } from './components/SaveDock'
 import { ConfigView, type Connection } from './views/ConfigView'
@@ -9,13 +10,17 @@ import { ConnectionsView } from './views/ConnectionsView'
 import { DataView } from './views/DataView'
 import { OverviewView } from './views/OverviewView'
 
-/** Status is polled; the configuration is not, because only the form on this
- *  page changes it. Ten seconds is fast enough to watch MQTT reconnect. */
+/** Status is polled when the event stream is not getting through; the
+ *  configuration never is, because only the form on this page changes it. */
 const POLL_MS = 10_000
 
-/** A running train has an elapsed time that should tick and a finish worth
- *  noticing promptly; it lasts minutes, so the faster poll costs nothing. */
+/** A train lasts minutes, so polling faster while one runs costs nothing
+ *  and shows its finish promptly. */
 const POLL_MS_TRAINING = 3_000
+
+/** The poll that runs beside a live stream, for what the stream leaves out
+ *  (zone scans, the history span, a slot passing without a train). */
+const POLL_MS_LIVE = 60_000
 
 /**
  * The panel's only navigation. Deliberately not persisted: a hash pushes entries
@@ -176,18 +181,24 @@ export function App() {
 
   // The poll stays here rather than in ConfigView: the header reads `status`
   // too, and a view that owned it would restart it on every tab switch.
+  const [forecastSeq, setForecastSeq] = useState(0)
+  const live = useServerEvents(
+    () => { void refreshStatus() },
+    () => setForecastSeq((n) => n + 1),
+  )
+
   const training = status?.training_in_progress ?? false
   useEffect(() => {
-    let live = true
+    let current = true
     const tick = () => {
       getStatus()
-        .then((s) => { if (live) setStatus(s) })
+        .then((s) => { if (current) setStatus(s) })
         .catch(() => {})
     }
     tick()
-    const id = setInterval(tick, training ? POLL_MS_TRAINING : POLL_MS)
-    return () => { live = false; clearInterval(id) }
-  }, [training])
+    const id = setInterval(tick, live ? POLL_MS_LIVE : training ? POLL_MS_TRAINING : POLL_MS)
+    return () => { current = false; clearInterval(id) }
+  }, [training, live])
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -375,7 +386,8 @@ export function App() {
         ) : view === 'data' ? (
           <DataView status={status} />
         ) : (
-          <OverviewView status={status} refreshStatus={refreshStatus} />
+          <OverviewView status={status} refreshStatus={refreshStatus}
+                        forecastSeq={forecastSeq} live={live} />
         )}
       </div>
     </div>
