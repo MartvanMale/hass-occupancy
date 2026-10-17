@@ -110,6 +110,12 @@ DEFAULT_DEPARTURE_THRESHOLD = 0.5
 DEFAULT_ARRIVAL_THRESHOLD = 0.5
 DEFAULT_CROSSING_MIN_HOURS = 2
 
+# When the scheduled train runs, in household time; Monday is day 0, as in
+# `datetime.weekday()`.
+DEFAULT_TRAINING_DAY = 5
+DEFAULT_TRAINING_HOUR = 3
+DEFAULT_TRAINING_MINUTE = 23
+
 # Write-only settings: stored and used, never served back. See `Settings.public`.
 SECRETS = ("influx_token", "mqtt_password")
 
@@ -159,6 +165,10 @@ class Settings:
     crossing_min_hours: int = DEFAULT_CROSSING_MIN_HOURS
     # Days; 0 never prunes, and lowering it deletes on the next cycle, for good.
     forecast_retention_days: int = FORECAST_RETENTION_DAYS
+    # The scheduled train: weekday (Monday 0), hour and minute, household time.
+    training_day: int = DEFAULT_TRAINING_DAY
+    training_hour: int = DEFAULT_TRAINING_HOUR
+    training_minute: int = DEFAULT_TRAINING_MINUTE
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
@@ -242,10 +252,14 @@ DAY_SCHEDULE: str | None = None
 DEPARTURE_THRESHOLD: float = DEFAULT_DEPARTURE_THRESHOLD
 ARRIVAL_THRESHOLD: float = DEFAULT_ARRIVAL_THRESHOLD
 CROSSING_MIN_HOURS: int = DEFAULT_CROSSING_MIN_HOURS
+TRAINING_DAY: int = DEFAULT_TRAINING_DAY
+TRAINING_HOUR: int = DEFAULT_TRAINING_HOUR
+TRAINING_MINUTE: int = DEFAULT_TRAINING_MINUTE
 
 
-def _crossing_cut(value, default: float | int, low: float, high: float):
-    """One crossing cut, clamped to something servable; never raises. A
+def _crossing_cut(value, default: float | int, low: float, high: float,
+                  what: str = "crossing cut"):
+    """One numeric setting, clamped to something servable; never raises. A
     hand-edited config.json reaches `configure()` unvalidated, so this clamps
     and leaves rejecting a bad value loudly to the API.
     """
@@ -256,11 +270,11 @@ def _crossing_cut(value, default: float | int, low: float, high: float):
             raise TypeError(value)
         number = type(default)(value)
     except (TypeError, ValueError):
-        _log.warning("ignoring unusable crossing cut %r, using %s", value, default)
+        _log.warning("ignoring unusable %s %r, using %s", what, value, default)
         return default
     clamped = type(default)(min(max(number, low), high))
     if clamped != number:
-        _log.warning("clamping crossing cut %s to %s", number, clamped)
+        _log.warning("clamping %s %s to %s", what, number, clamped)
     return clamped
 
 
@@ -268,6 +282,7 @@ def configure(settings: Settings) -> tuple[Subject, ...]:
     """Apply an installation's identity. Call once at startup."""
     global SETTINGS, SUBJECTS, PEOPLE, ZONES, TIMEZONE, HOLIDAY_COUNTRY, HOME_COORDS
     global DEPARTURE_THRESHOLD, ARRIVAL_THRESHOLD, CROSSING_MIN_HOURS, DAY_SCHEDULE
+    global TRAINING_DAY, TRAINING_HOUR, TRAINING_MINUTE
 
     if not settings.people:
         raise ValueError(
@@ -323,6 +338,12 @@ def configure(settings: Settings) -> tuple[Subject, ...]:
     CROSSING_MIN_HOURS = _crossing_cut(
         settings.crossing_min_hours, DEFAULT_CROSSING_MIN_HOURS,
         1, max(HORIZONS_H))
+    TRAINING_DAY = _crossing_cut(
+        settings.training_day, DEFAULT_TRAINING_DAY, 0, 6, "training day")
+    TRAINING_HOUR = _crossing_cut(
+        settings.training_hour, DEFAULT_TRAINING_HOUR, 0, 23, "training hour")
+    TRAINING_MINUTE = _crossing_cut(
+        settings.training_minute, DEFAULT_TRAINING_MINUTE, 0, 59, "training minute")
     return SUBJECTS
 
 

@@ -1,3 +1,19 @@
+## 0.6.0 - 2026-10-17
+
+### Added
+
+- The Setup tab has a Training schedule section where you choose the day, hour and minute of the scheduled training run.
+- The panel now updates on its own. Times and countdowns stay current, and a new forecast or a finished training run appears as soon as it happens instead of at the next refresh.
+
+### Changed
+
+- Scheduled training now runs on Saturday at 03:23 by default, instead of Monday at 04:00. While the history is still short it runs daily at that time.
+- Scheduled training starts at the chosen minute, instead of up to five minutes later. A changed training time applies as soon as you save it.
+
+### Fixed
+
+- Restarting the add-on shortly after a scheduled training run no longer starts a second one.
+
 ## 0.5.0 - 2026-10-15
 
 ### Added
