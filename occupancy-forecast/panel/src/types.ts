@@ -137,6 +137,10 @@ export interface Settings {
   /** Days of published forecasts kept for the "Was it right?" chart.
    *  0 means never pruned. */
   forecast_retention_days: number
+  /** The scheduled train, in household time. Monday is day 0. */
+  training_day: number
+  training_hour: number
+  training_minute: number
   source: 'store' | 'influx'
   influx_url: string
   influx_org: string
@@ -169,6 +173,10 @@ export interface ConfigPatch {
   /** Days of published forecasts kept for the "Was it right?" chart.
    *  0 means never pruned. */
   forecast_retention_days: number
+  /** The scheduled train, in household time. Monday is day 0. */
+  training_day: number
+  training_hour: number
+  training_minute: number
   source: 'store' | 'influx'
   influx_url: string
   influx_org: string

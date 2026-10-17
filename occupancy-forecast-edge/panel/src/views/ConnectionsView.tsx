@@ -7,7 +7,8 @@ import { Row } from '../components/Row'
 import { Select } from '../components/Select'
 import { Text } from '../components/Text'
 import type { Connection } from './ConfigView'
-import { count, relativeTime } from '../format'
+import { count } from '../format'
+import { Ago } from '../components/Ago'
 
 /**
  * Where the add-on reaches the rest of the house: history in, entities out,
@@ -247,9 +248,9 @@ export function ConnectionsView({
               accent={listener.connected ? 'aqua' : 'orange'}
               primary={`Listening to ${count(listener.entities ?? 0)} entities`}
               secondary={listener.events
-                ? `${count(listener.fired ?? 0)} of ${count(listener.events)} events
-                   were worth re-predicting.${listener.last_event
-                     ? ` Last ${relativeTime(listener.last_event)}.` : ''}`
+                ? <>{`${count(listener.fired ?? 0)} of ${count(listener.events)} events
+                   were worth re-predicting.`}{listener.last_event
+                     && <> Last <Ago iso={listener.last_event} />.</>}</>
                 : 'No events seen yet.'}
             />
             <Row

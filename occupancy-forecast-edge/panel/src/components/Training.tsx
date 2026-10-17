@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { runAction, type Action } from '../api'
-import { absoluteTime, duration, relativeTime, splitError } from '../format'
+import { absoluteTime, duration, splitError } from '../format'
+import { useNow } from '../hooks'
 import type { Status } from '../types'
+import { Ago } from './Ago'
 import { Icon, type IconName } from './Icon'
 import { Row } from './Row'
 
@@ -24,6 +26,22 @@ const DONE: Record<Action, string> = {
   collect: 'Collected.',
   predict: 'Published a fresh forecast.',
   reload: 'Models reloaded from disk.',
+}
+
+/** A running train's age, by the second, beside how long the last one took. */
+function Elapsed({ status }: { status: Status }) {
+  const now = useNow(1_000)
+  const started = Date.parse(status.training_started_at ?? '')
+  // The lock is taken before the start is stamped, so a stamp no newer than the
+  // last train, or the last failure, belongs to an earlier run.
+  const ended = Math.max(Date.parse(status.last_train ?? '') || 0,
+                         Date.parse(splitError(status.last_error)?.when ?? '') || 0)
+  if (Number.isNaN(started) || started <= ended) {
+    return <>Starting…</>
+  }
+  const last = status.last_train_seconds != null
+    ? ` · the last train took ${duration(status.last_train_seconds)}` : ''
+  return <>Running for {duration((now - started) / 1000)}{last}.</>
 }
 
 export function Training({
@@ -68,13 +86,13 @@ export function Training({
           icon="refresh"
           accent="aqua"
           primary="Training now"
-          secondary={`Started ${relativeTime(status.training_started_at)}.`}
+          secondary={<Elapsed status={status} />}
         />
       ) : status.last_train ? (
         <Row
           icon="model"
           accent="aqua"
-          primary={`Last trained ${relativeTime(status.last_train)}`}
+          primary={<>Last trained <Ago iso={status.last_train} /></>}
           secondary={
             absoluteTime(status.last_train) +
             (status.last_train_seconds != null
@@ -96,7 +114,7 @@ export function Training({
         accent="blue"
         primary={
           status.next_train
-            ? `Next train ${relativeTime(status.next_train)}`
+            ? <>Next train <Ago iso={status.next_train} /></>
             : 'No train scheduled yet'
         }
         secondary={
@@ -113,7 +131,7 @@ export function Training({
           primary="Something failed"
           secondary={
             failure.when
-              ? `${failure.message} · ${relativeTime(failure.when)}`
+              ? <>{failure.message} · <Ago iso={failure.when} /></>
               : failure.message
           }
         />

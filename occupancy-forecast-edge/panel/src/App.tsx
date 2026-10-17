@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { checkBroker, checkInflux, getCandidates, getSettings, getStatus, saveConfig } from './api'
 import type { BrokerCheck, Candidates, InfluxCheck, Settings, Status } from './types'
+import { hhmm } from './format'
+import { useServerEvents } from './hooks'
 import { Icon, Shape } from './components/Icon'
 import { SaveDock } from './components/SaveDock'
 import { ConfigView, type Connection } from './views/ConfigView'
@@ -8,13 +10,17 @@ import { ConnectionsView } from './views/ConnectionsView'
 import { DataView } from './views/DataView'
 import { OverviewView } from './views/OverviewView'
 
-/** Status is polled; the configuration is not, because only the form on this
- *  page changes it. Ten seconds is fast enough to watch MQTT reconnect. */
+/** Status is polled when the event stream is not getting through; the
+ *  configuration never is, because only the form on this page changes it. */
 const POLL_MS = 10_000
 
-/** A running train has an elapsed time that should tick and a finish worth
- *  noticing promptly; it lasts minutes, so the faster poll costs nothing. */
+/** A train lasts minutes, so polling faster while one runs costs nothing
+ *  and shows its finish promptly. */
 const POLL_MS_TRAINING = 3_000
+
+/** The poll that runs beside a live stream, for what the stream leaves out
+ *  (zone scans, the history span, a slot passing without a train). */
+const POLL_MS_LIVE = 60_000
 
 /**
  * The panel's only navigation. Deliberately not persisted: a hash pushes entries
@@ -61,6 +67,8 @@ export function App() {
   const [arrival, setArrival] = useState<string>('0.5')
   const [minHours, setMinHours] = useState<string>('2')
   const [retention, setRetention] = useState<string>('30')
+  const [trainingDay, setTrainingDay] = useState<string>('5')
+  const [trainingTime, setTrainingTime] = useState<string>('03:23')
   const [loaded, setLoaded] = useState(false)
 
   // The connection half, grouped: ten more `useState` pairs threaded through
@@ -82,6 +90,7 @@ export function App() {
   // Typed, so they can be mid-edit. An empty field must not reach the server as
   // Number('') === 0, which is the one value that means something else.
   const retentionOk = /^\d+$/.test(retention.trim())
+  const timeOk = /^([01]\d|2[0-3]):[0-5]\d$/.test(trainingTime.trim())
   const portOk = /^\d+$/.test(connection.mqtt_port.trim())
     && Number(connection.mqtt_port) >= 1 && Number(connection.mqtt_port) <= 65535
 
@@ -99,6 +108,8 @@ export function App() {
     setArrival(s.arrival_threshold.toFixed(2))
     setMinHours(String(s.crossing_min_hours))
     setRetention(String(s.forecast_retention_days))
+    setTrainingDay(String(s.training_day))
+    setTrainingTime(hhmm(s.training_hour, s.training_minute))
     // The two secrets are deliberately not seeded -- the server never sends
     // them. An empty box means "keep what is stored"; the `_set` flags say so.
     setWholeConnection({
@@ -132,6 +143,8 @@ export function App() {
     || Number(arrival) !== loadedSettings.arrival_threshold
     || Number(minHours) !== loadedSettings.crossing_min_hours
     || Number(retention) !== loadedSettings.forecast_retention_days
+    || Number(trainingDay) !== loadedSettings.training_day
+    || trainingTime.trim() !== hhmm(loadedSettings.training_hour, loadedSettings.training_minute)
     || connection.source !== loadedSettings.source
     || connection.influx_url !== loadedSettings.influx_url
     || connection.influx_org !== loadedSettings.influx_org
@@ -168,18 +181,24 @@ export function App() {
 
   // The poll stays here rather than in ConfigView: the header reads `status`
   // too, and a view that owned it would restart it on every tab switch.
+  const [forecastSeq, setForecastSeq] = useState(0)
+  const live = useServerEvents(
+    () => { void refreshStatus() },
+    () => setForecastSeq((n) => n + 1),
+  )
+
   const training = status?.training_in_progress ?? false
   useEffect(() => {
-    let live = true
+    let current = true
     const tick = () => {
       getStatus()
-        .then((s) => { if (live) setStatus(s) })
+        .then((s) => { if (current) setStatus(s) })
         .catch(() => {})
     }
     tick()
-    const id = setInterval(tick, training ? POLL_MS_TRAINING : POLL_MS)
-    return () => { live = false; clearInterval(id) }
-  }, [training])
+    const id = setInterval(tick, live ? POLL_MS_LIVE : training ? POLL_MS_TRAINING : POLL_MS)
+    return () => { current = false; clearInterval(id) }
+  }, [training, live])
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -200,6 +219,9 @@ export function App() {
         arrival_threshold: Number(arrival),
         crossing_min_hours: Number(minHours),
         forecast_retention_days: Number(retention),
+        training_day: Number(trainingDay),
+        training_hour: Number(trainingTime.trim().slice(0, 2)),
+        training_minute: Number(trainingTime.trim().slice(3, 5)),
         source: connection.source,
         influx_url: connection.influx_url,
         influx_org: connection.influx_org,
@@ -324,6 +346,8 @@ export function App() {
                 arrival={arrival}
                 minHours={minHours}
                 retention={retention}
+                trainingDay={trainingDay}
+                trainingTime={trainingTime}
                 togglePerson={togglePerson}
                 toggleZone={toggleZone}
                 setHouse={setHouse}
@@ -332,6 +356,8 @@ export function App() {
                 setArrival={setArrival}
                 setMinHours={setMinHours}
                 setRetention={setRetention}
+                setTrainingDay={setTrainingDay}
+                setTrainingTime={setTrainingTime}
               />
             ) : (
               <ConnectionsView
@@ -351,15 +377,17 @@ export function App() {
               saving={saving}
               saved={saved}
               dirty={dirty}
-              complaint={error ?? (retentionOk
-                ? portOk ? null : 'The broker port must be a whole number between 1 and 65535.'
-                : 'Days to keep must be a whole number of days, 0 or more.')}
+              complaint={error ?? (!retentionOk
+                ? 'Days to keep must be a whole number of days, 0 or more.'
+                : !timeOk ? 'Training time must be a 24-hour time, like 03:23.'
+                : portOk ? null : 'The broker port must be a whole number between 1 and 65535.')}
             />
           </form>
         ) : view === 'data' ? (
           <DataView status={status} />
         ) : (
-          <OverviewView status={status} refreshStatus={refreshStatus} />
+          <OverviewView status={status} refreshStatus={refreshStatus}
+                        forecastSeq={forecastSeq} live={live} />
         )}
       </div>
     </div>

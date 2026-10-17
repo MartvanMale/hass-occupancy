@@ -182,3 +182,10 @@ def test_a_hand_edited_run_length_is_clamped_to_the_curve():
     assert config.CROSSING_MIN_HOURS == max(config.HORIZONS_H)
     config.configure(make_settings(crossing_min_hours=0))
     assert config.CROSSING_MIN_HOURS == 1
+
+
+def test_a_hand_edited_training_time_is_clamped():
+    from occupancy_forecast.tests.conftest import settings as make_settings
+    config.configure(make_settings(training_day=9, training_hour=-2, training_minute="x"))
+    assert (config.TRAINING_DAY, config.TRAINING_HOUR, config.TRAINING_MINUTE) == (
+        6, 0, config.DEFAULT_TRAINING_MINUTE)

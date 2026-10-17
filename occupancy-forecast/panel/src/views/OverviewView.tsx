@@ -8,7 +8,9 @@ import { Curves, type Curve } from '../components/Curves'
 import { Horizons } from '../components/Horizons'
 import { Training } from '../components/Training'
 import { VerificationCard } from '../components/VerificationCard'
-import { percent, pretty, relativeTime } from '../format'
+import { percent, pretty } from '../format'
+import { Ago } from '../components/Ago'
+import { useNow } from '../hooks'
 
 /**
  * Overview: who is home, who is coming home, and how much of it to believe.
@@ -29,7 +31,7 @@ function clock(at: Date): string {
  * routine may only sharpen it -- see `predict._next_change`. The date is named
  * when it is not today.
  */
-function changeSentence(change: NextChange): string {
+function changeSentence(change: NextChange, now: number): string {
   // Not "no change expected", a claim about the house: the curve is sparse, so
   // the usual reason there is no crossing is that no horizon near it publishes.
   if (change.direction === null || change.at === null) {
@@ -38,17 +40,17 @@ function changeSentence(change: NextChange): string {
   const at = new Date(change.at)
   if (Number.isNaN(at.getTime())) return 'No arrival or departure time is predicted.'
 
-  const sameDay = at.toDateString() === new Date().toDateString()
-  const when = sameDay ? clock(at) : `${clock(at)} ${dayWord(at)}`
+  const sameDay = at.toDateString() === new Date(now).toDateString()
+  const when = sameDay ? clock(at) : `${clock(at)} ${dayWord(at, now)}`
   return change.direction === 'leaving'
     ? `Expected to leave around ${when}.`
     : `Expected back around ${when}.`
 }
 
 /** "tomorrow", or a weekday name past that. */
-function dayWord(at: Date): string {
+function dayWord(at: Date, now: number): string {
   const days = Math.round(
-    (new Date(at.toDateString()).getTime() - new Date(new Date().toDateString()).getTime())
+    (new Date(at.toDateString()).getTime() - new Date(new Date(now).toDateString()).getTime())
     / 86_400_000)
   return days === 1 ? 'tomorrow'
     : at.toLocaleDateString(undefined, { weekday: 'long' })
@@ -56,11 +58,11 @@ function dayWord(at: Date): string {
 
 /** "in 3 h", "within the hour", from a moment rather than the raw crossing --
  *  so the chip and the sentence cannot disagree about the same event. */
-function untilLabel(at: string | null): string {
+function untilLabel(at: string | null, now: number): string {
   // Both of these are the ABSENT case, not a settled one: "steady" would be a
   // positive claim about a house the add-on has nothing to say about.
   if (at === null) return 'no estimate'
-  const hours = (new Date(at).getTime() - Date.now()) / 3_600_000
+  const hours = (new Date(at).getTime() - now) / 3_600_000
   if (!Number.isFinite(hours)) return 'no estimate'
   if (hours <= 1) return 'within the hour'
   return `in ${Math.round(hours)} h`
@@ -99,7 +101,21 @@ function SubjectRows({ subjects, house }: { subjects: SubjectForecast[]; house: 
   )
 }
 
-function ChangeRows({ subjects, house }: { subjects: SubjectForecast[]; house: string }) {
+/** "12 min out", counted down from when the forecast was published. */
+function etaSentence(etaMinutes: number, predictedAt: string | null, now: number): string {
+  const published = Date.parse(predictedAt ?? '')
+  const left = Number.isNaN(published)
+    ? etaMinutes : etaMinutes - (now - published) / 60_000
+  const minutes = Math.round(left)
+  return minutes <= 0 ? 'On the way, arriving now.' : `On the way, ${minutes} min out.`
+}
+
+function ChangeRows({ subjects, house, predictedAt }: {
+  subjects: SubjectForecast[]
+  house: string
+  predictedAt: string | null
+}) {
+  const now = useNow(30_000)
   return (
     <>
       {subjects.map((s) => {
@@ -112,9 +128,9 @@ function ChangeRows({ subjects, house }: { subjects: SubjectForecast[]; house: s
         // `eta_minutes` is null unless they are demonstrably travelling, so the
         // sentence needs no "if already on the way" hedge.
         const secondary = [
-          changeSentence(change),
+          changeSentence(change, now),
           arriving && s.eta_minutes !== null
-            ? `On the way, ${Math.round(s.eta_minutes)} min out.` : '',
+            ? etaSentence(s.eta_minutes, predictedAt, now) : '',
         ].filter(Boolean).join(' ')
         return (
           <Row
@@ -125,7 +141,7 @@ function ChangeRows({ subjects, house }: { subjects: SubjectForecast[]; house: s
             secondary={secondary}
             trailing={
               <Chip
-                label={untilLabel(change.at)}
+                label={untilLabel(change.at, now)}
                 icon={leaving || arriving ? 'clock' : 'model'}
                 accent={leaving ? 'orange' : arriving ? 'blue' : 'aqua'}
               />
@@ -137,25 +153,27 @@ function ChangeRows({ subjects, house }: { subjects: SubjectForecast[]; house: s
   )
 }
 
-export function OverviewView({ status, refreshStatus }: {
+export function OverviewView({ status, refreshStatus, forecastSeq, live }: {
   status: Status | null
   refreshStatus: () => Promise<void>
+  /** Bumped when the server says a new forecast was published. */
+  forecastSeq: number
+  live: boolean
 }) {
   const [forecast, setForecast] = useState<Forecast | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    let live = true
+    let current = true
     const load = () =>
       getForecast()
-        .then((f) => { if (live) { setForecast(f); setError(null) } })
-        .catch((e) => { if (live) setError(String(e)) })
+        .then((f) => { if (current) { setForecast(f); setError(null) } })
+        .catch((e) => { if (current) setError(String(e)) })
     load()
-    // The forecast is republished every cycle; a minute is well inside that and
-    // far outside anything that would make this tab a load.
-    const timer = setInterval(load, 60_000)
-    return () => { live = false; clearInterval(timer) }
-  }, [])
+    // A safety net while the event stream is live; the only source otherwise.
+    const timer = setInterval(load, live ? 300_000 : 60_000)
+    return () => { current = false; clearInterval(timer) }
+  }, [forecastSeq, live])
 
   // One sentence standing in for whichever forecast cards cannot be drawn.
   // Deliberately NOT an early return: it would hide the two cards that explain why.
@@ -203,7 +221,7 @@ export function OverviewView({ status, refreshStatus }: {
       <div className="cards pair">
         <Card
           title="Right now"
-          subtitle={ready ? `Published ${relativeTime(ready.predicted_at)}.` : undefined}
+          subtitle={ready ? <>Published <Ago iso={ready.predicted_at} />.</> : undefined}
         >
           {missing ?? <SubjectRows subjects={ordered} house={house} />}
         </Card>
@@ -216,7 +234,8 @@ export function OverviewView({ status, refreshStatus }: {
         </Card>
 
         <Card title="Next expected change">
-          {missing ?? <ChangeRows subjects={ordered} house={house} />}
+          {missing ?? <ChangeRows subjects={ordered} house={house}
+                                   predictedAt={ready?.predicted_at ?? null} />}
         </Card>
 
         <Card title="Training">

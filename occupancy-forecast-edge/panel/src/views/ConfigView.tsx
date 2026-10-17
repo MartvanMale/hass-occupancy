@@ -3,7 +3,7 @@ import { Card } from '../components/Card'
 import { Chip } from '../components/Chip'
 import { Row } from '../components/Row'
 import { Icon } from '../components/Icon'
-import { relativeTime } from '../format'
+import { Ago } from '../components/Ago'
 import { Field } from '../components/Field'
 import { Select } from '../components/Select'
 
@@ -56,7 +56,7 @@ function Notices({ status }: { status: Status }) {
           <div className="info">
             <div className="primary">
               The worker has been stuck in “{status.worker.stalled_in}” since{' '}
-              {relativeTime(status.worker.stalled_since)}
+              <Ago iso={status.worker.stalled_since} />
             </div>
             <div className="secondary">
               Forecasts are not being updated. Thread stacks are in the add-on log;
@@ -147,6 +147,9 @@ export interface ConfigViewProps {
   arrival: string
   minHours: string
   retention: string
+  trainingDay: string
+  /** `HH:MM`, 24-hour, as typed; App.tsx checks and splits it. */
+  trainingTime: string
   togglePerson: (entity: string, on: boolean) => void
   toggleZone: (entity: string, on: boolean) => void
   setHouse: (value: string) => void
@@ -155,6 +158,8 @@ export interface ConfigViewProps {
   setArrival: (value: string) => void
   setMinHours: (value: string) => void
   setRetention: (value: string) => void
+  setTrainingDay: (value: string) => void
+  setTrainingTime: (value: string) => void
 }
 
 /** Discrete options rather than a number input: 0.42 is unreachable, which is
@@ -169,13 +174,21 @@ const RUNS = [1, 2, 3, 4, 6].map((h) => ({
   label: h === 1 ? '1 hour (any single hour)' : `${h} hours`,
 }))
 
+// Monday first, so the value is Python's `weekday()`, which the server checks.
+const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+const DAYS = DAY_NAMES.map((name, i) => ({
+  value: String(i),
+  label: name,
+}))
 
 export function ConfigView({
   status, candidates,
   people, zones, house, holiday, daySchedule, departure, arrival, minHours,
-  retention,
+  retention, trainingDay, trainingTime,
   togglePerson, toggleZone, setHouse, setHoliday, setDaySchedule,
   setDeparture, setArrival, setMinHours, setRetention,
+  setTrainingDay, setTrainingTime,
 }: ConfigViewProps) {
   return (
     <>
@@ -379,6 +392,35 @@ export function ConfigView({
                   onChange={(e) => setRetention(e.target.value)}
                 />
                 days
+              </span>
+            }
+          />
+
+          <p className="subhead">Training schedule</p>
+          <Field
+            icon="calendar"
+            label="Training day"
+            hint="Training runs daily until there is enough history, then weekly on this day."
+            control={
+              <Select label="Training day" value={trainingDay} onChange={setTrainingDay}
+                      options={DAYS} />
+            }
+          />
+          <Field
+            icon="clock"
+            label="Training time"
+            hint="24-hour clock."
+            control={
+              <span className="days">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={5}
+                  placeholder="03:23"
+                  aria-label="Training time"
+                  value={trainingTime}
+                  onChange={(e) => setTrainingTime(e.target.value)}
+                />
               </span>
             }
           />

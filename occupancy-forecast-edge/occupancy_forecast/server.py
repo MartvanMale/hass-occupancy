@@ -1,14 +1,15 @@
 """The add-on: collector, scheduler, HTTP API and the configuration UI.
 
 Handlers are sync `def`: an `async def` doing blocking history reads or a fit
-would occupy the event loop and hang `/health` exactly when it is needed. Three
-loops run on their own -- collector every COLLECT_MINUTES, predictor after each
-collect, trainer weekly and on demand. ADVISORY ONLY: the only writes are MQTT
-sensor states and persistent notifications.
+would occupy the event loop and hang `/health`. The one exception, /api/events,
+reads only memory. Three loops run on their own: collect, predict after each
+collect, train on schedule or on demand. The add-on is advisory: it writes
+only MQTT sensor states and persistent notifications.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import copy
@@ -17,6 +18,7 @@ import hashlib
 import json
 import faulthandler
 import logging
+import math
 import secrets
 import sys
 import threading
@@ -25,7 +27,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from . import (config, departure, discover, eta as eta_mod, evaluate, explore,
                features, listen, log, night)
@@ -44,8 +46,13 @@ COLLECT_MINUTES = 5
 # each cycle is a full `predict.LOOKBACK_DAYS` rebuild. Load protection, not
 # politeness.
 MIN_CYCLE_SECONDS = 60
-TRAIN_WEEKDAY = 0          # Monday
-TRAIN_HOUR = 4
+# How late a slot may still start, after a restart or while a manual train holds
+# the lock. Later than this, a restart does not train.
+TRAIN_WINDOW = dt.timedelta(hours=1)
+# The scheduler's longest sleep, so a clock jump or a lost wake costs an hour at most.
+SCHEDULE_CHECK_SECONDS = 3600
+# How early the scheduler wakes before a slot, to absorb a late wake on a busy box.
+SCHEDULE_MARGIN_SECONDS = 5
 
 # How long the worker may go without reaching its next phase. The failure this
 # exists for is silent: a blocked thread leaves `last_error` None and `/health`
@@ -132,6 +139,8 @@ _stall = {"count": 0, "since": None, "phase": None, "acted": False}
 _nudge = threading.Event()
 _listener: listen.Listener | None = None
 _stop = threading.Event()
+# Set by a saved configuration to wake the scheduler, which may sleep an hour.
+_reschedule = threading.Event()
 
 
 # ---------------------------------------------------------------------------
@@ -313,22 +322,103 @@ def do_train() -> dict:
             "labelled_rows": int(table["home_frac"].notna().sum())}
 
 
-def _next_train(now: dt.datetime, days: float) -> str | None:
-    """When the worker will next retrain, or None if it cannot yet.
+def _slot(now: dt.datetime, day: dt.date) -> dt.datetime:
+    """The scheduled train on `day`, in `now`'s own tzinfo: sharing the object
+    is what makes comparisons read the wall clock across a DST change."""
+    return dt.datetime.combine(
+        day, dt.time(config.TRAINING_HOUR, config.TRAINING_MINUTE), tzinfo=now.tzinfo)
 
-    Separate from the `due` test in `_worker` -- that answers "is it now" --
-    and they share the constants. Local time, with the offset in the string,
-    because the schedule is.
+
+def _last_trained_at() -> dt.datetime | None:
+    """`_state["last_train"]` as an aware datetime; a stamp without an offset is UTC."""
+    try:
+        when = dt.datetime.fromisoformat(_state["last_train"])
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+
+
+def _due_slot(now: dt.datetime, days: float, last_train_day: dt.date | None,
+              trained_at: dt.datetime | None = None) -> dt.date | None:
+    """The date of the scheduled train that should start now, or None.
+
+    Yesterday is checked too, so a 23:59 slot is still caught after midnight.
+    `trained_at` is the last finished train, which survives a restart.
+    """
+    for day in (now.date(), now.date() - dt.timedelta(days=1)):
+        slot = _slot(now, day)
+        if not slot <= now < slot + TRAIN_WINDOW or last_train_day == day:
+            continue
+        if days >= FULL_HISTORY_DAYS and day.weekday() != config.TRAINING_DAY:
+            continue
+        if trained_at is not None and trained_at.astimezone(now.tzinfo) >= slot:
+            continue
+        return day
+    return None
+
+
+def _next_slot(now: dt.datetime, days: float) -> dt.datetime | None:
+    """When the scheduler will next retrain, or None if it cannot yet.
+
+    `_due_slot` answers "is it now". Both build the time with `_slot`.
     """
     if days < MIN_DAYS_TO_TRAIN:
         return None
-    candidate = now.replace(hour=TRAIN_HOUR, minute=0, second=0, microsecond=0)
+    candidate = _slot(now, now.date())
     if candidate <= now:
-        candidate += dt.timedelta(days=1)
+        candidate = _slot(now, now.date() + dt.timedelta(days=1))
     if days >= FULL_HISTORY_DAYS:
         # Mature: weekly rather than daily, so walk on to the training weekday.
-        candidate += dt.timedelta(days=(TRAIN_WEEKDAY - candidate.weekday()) % 7)
-    return candidate.isoformat(timespec="minutes")
+        ahead = (config.TRAINING_DAY - candidate.weekday()) % 7
+        candidate = _slot(now, candidate.date() + dt.timedelta(days=ahead))
+    return candidate
+
+
+def _next_train(now: dt.datetime, days: float) -> str | None:
+    """`_next_slot` for the status page: local time with the offset in the
+    string, because the schedule is local."""
+    slot = _next_slot(now, days)
+    return None if slot is None else slot.isoformat(timespec="minutes")
+
+
+def _seconds_until(when: dt.datetime, now: dt.datetime) -> float:
+    """Real seconds from `now` to `when`. In UTC, because two datetimes sharing
+    a `ZoneInfo` subtract as wall clock, an hour off across a DST change."""
+    return (when.astimezone(dt.timezone.utc)
+            - now.astimezone(dt.timezone.utc)).total_seconds()
+
+
+def _scheduler_step(now: dt.datetime, days: float, last_train_day: dt.date | None,
+                    trained_at: dt.datetime | None) -> tuple[dt.date | None, float]:
+    """The slot to train for now, or None, and how long to sleep before the next step.
+
+    The sleep ends SCHEDULE_MARGIN_SECONDS before the slot, so a slot in the
+    spring-forward gap is still inside its window on the wall clock.
+    """
+    if days >= MIN_DAYS_TO_TRAIN:
+        due = _due_slot(now, days, last_train_day, trained_at)
+        if due is not None:
+            return due, 0.0
+    slot = _next_slot(now, days)
+    if slot is None:
+        return None, float(SCHEDULE_CHECK_SECONDS)
+    until = _seconds_until(slot, now)
+    if until <= 0:
+        # The repeated autumn hour: ahead on the wall clock, behind in real time.
+        return None, float(MIN_CYCLE_SECONDS)
+    wait = until - SCHEDULE_MARGIN_SECONDS if until > 2 * SCHEDULE_MARGIN_SECONDS else until
+    return None, min(wait, float(SCHEDULE_CHECK_SECONDS))
+
+
+def _train_and_publish() -> None:
+    """Train, then publish with the new models at once rather than waiting up
+    to five minutes for the next cycle. The caller holds `_train_lock`."""
+    try:
+        do_train()
+        do_predict()
+    except Exception as err:  # noqa: BLE001
+        _record_error(err, from_cycle=False)
+        _log.error("train failed: %s", err)
 
 
 def _start_background_train() -> None:
@@ -347,13 +437,7 @@ def _start_background_train() -> None:
 
     def run() -> None:
         try:
-            do_train()
-            # Publish with the new models at once rather than waiting up to five
-            # minutes for the next cycle, exactly as the worker does.
-            do_predict()
-        except Exception as err:  # noqa: BLE001
-            _record_error(err, from_cycle=False)
-            _log.error("train failed: %s", err)
+            _train_and_publish()
         finally:
             _train_lock.release()
 
@@ -518,7 +602,7 @@ def check_stall(now: float | None = None, dump=None) -> bool:
         _log.critical(
             "worker STALLED in %s for %.0fs after %d cycles. Thread stacks "
             "follow -- the frame at the top of occupancy-worker (or "
-            "occupancy-train) is where it is stuck.",
+            "occupancy-scheduler, or occupancy-train) is where it is stuck.",
             phase, late, _heartbeat["cycles"])
         try:
             (dump or _dump_stacks)()
@@ -572,8 +656,8 @@ def _say_alive(now: float | None = None) -> bool:
 
 
 def _worker() -> None:
-    """Collect, predict, and retrain on schedule. One thread, no scheduler library."""
-    last_train_day = None
+    """Collect, predict, and retrain once after a model version change.
+    `_scheduler` starts the scheduled train."""
     stale_retrained = False
     while not _stop.is_set():
         started = time.monotonic()
@@ -596,27 +680,15 @@ def _worker() -> None:
             beat("notify")
             _notify_progress()
 
-            # The household's clock, not the container's: TRAIN_HOUR is a
-            # local hour.
-            now = dt.datetime.now(config.tzinfo())
-            days = _history_days()
-            # Daily while the history is still growing fast, weekly once it is
-            # mature and a retrain has little left to change.
-            due = (now.hour == TRAIN_HOUR
-                   and (days < FULL_HISTORY_DAYS or now.weekday() == TRAIN_WEEKDAY)
-                   and last_train_day != now.date())
             # A MODEL_VERSION bump refuses every artifact at once, and the next
             # scheduled train may be a week away -- so retrain off-schedule, once.
             forced = (not _state["models"] and not stale_retrained
                       and bool(predict_mod.stale_artifacts()))
-            if (due or forced) and days >= MIN_DAYS_TO_TRAIN:
-                if forced:
-                    stale_retrained = True
-                    _log.info("retraining now: every model on disk was built by "
-                              "an older version, and nothing is published until "
-                              "they are replaced")
-                if due:
-                    last_train_day = now.date()
+            if forced and _history_days() >= MIN_DAYS_TO_TRAIN:
+                stale_retrained = True
+                _log.info("retraining now: every model on disk was built by "
+                          "an older version, and nothing is published until "
+                          "they are replaced")
                 if _take_train_lock():
                     beat("train")
                     try:
@@ -637,6 +709,50 @@ def _worker() -> None:
         _say_alive()
         beat("waiting")
         _wait_for_work(started)
+
+
+def _scheduler() -> None:
+    """Start the scheduled train at its minute, daily while the history is short
+    and weekly once it is mature. Sleeps until the slot, an hour at most;
+    `_reschedule` wakes it when the configuration is saved.
+    """
+    last_train_day = None
+    announced = refused = None
+    while not _stop.is_set():
+        wait = float(MIN_CYCLE_SECONDS)
+        try:
+            # The household's clock, not the container's: the schedule is local.
+            now = dt.datetime.now(config.tzinfo())
+            # Wait for the worker's first count of the history. With 0 days, a
+            # restart just after a slot would sleep an hour and miss it.
+            counted = (_state.get("usable_days") is not None
+                       or getattr(_state["source"], "store", None) is None)
+            if counted:
+                days = _history_days()
+                due, wait = _scheduler_step(now, days, last_train_day,
+                                            _last_trained_at())
+                if due is not None and _take_train_lock():
+                    last_train_day = due
+                    _log.info("scheduled train starting")
+                    try:
+                        _train_and_publish()
+                    finally:
+                        _train_lock.release()
+                    continue
+                if due is not None:
+                    if refused != due:
+                        _log.info("scheduled train waits for the train already running")
+                        refused = due
+                    wait = float(MIN_CYCLE_SECONDS)
+                upcoming = _next_train(now, days)
+                if upcoming is not None and upcoming != announced:
+                    _log.info("next scheduled train: %s", upcoming)
+                announced = upcoming
+        except Exception as err:  # noqa: BLE001
+            _log.error("scheduler: %s", err)
+        if _reschedule.wait(wait):
+            _reschedule.clear()
+            last_train_day = None
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +798,7 @@ async def lifespan(_: FastAPI):
               "" if configured else " -- NOT RUNNING: fix the configuration on the panel")
     yield
     _stop.set()
+    _reschedule.set()
     if _listener is not None:
         _listener.stop()
     _broker.close()
@@ -718,12 +835,14 @@ _threads_started = False
 
 
 def _start_worker_threads(settings) -> None:
-    """Start the worker, the watchdog and the listener. Once, ever."""
+    """Start the worker, the scheduler, the watchdog and the listener. Once, ever."""
     global _threads_started, _listener
     if _threads_started:
         return
     _threads_started = True
     threading.Thread(target=_worker, name="occupancy-worker", daemon=True).start()
+    threading.Thread(target=_scheduler, name="occupancy-scheduler",
+                     daemon=True).start()
     threading.Thread(target=_watchdog, name="occupancy-watchdog",
                      daemon=True).start()
     # `start` never raises: a listener that cannot connect is a slower
@@ -1024,6 +1143,67 @@ def api_status() -> dict:
     return _status()
 
 
+# Seconds between checks for a change, and between the pings that let the
+# panel tell a live stream from one a proxy is holding back.
+EVENTS_CHECK_SECONDS = 1.0
+EVENTS_PING_SECONDS = 15.0
+
+
+def _change_marks() -> dict[str, tuple]:
+    """What the panel would refetch, per endpoint. Memory only: it runs on the event loop."""
+    listener = dict(_listener.status) if _listener else {"connected": False}
+    listener.pop("events", None)
+    listener.pop("fired", None)
+    return {
+        "forecast": (_state["last_predict"],),
+        # Not the worker phase: it moves every few seconds and the panel's clock covers it.
+        "status": (_state["last_collect"], _state["last_predict"],
+                   _state["last_train"], _state["loaded_at"],
+                   _state.get("usable_days"), _train_lock.locked(),
+                   _state["training_started_at"], _broker.connected,
+                   _broker.last_error_public, tuple(sorted(listener.items())),
+                   _stall["since"], _state["last_error_public"],
+                   _heartbeat["cycles"], id(_state["settings"])),
+    }
+
+
+async def change_events(request: Request, now=time.monotonic):
+    """`hello`, then a `status` or `forecast` event for each change, and a `ping`.
+
+    A closed tab ends this by cancelling it at the sleep: behind the password
+    middleware `is_disconnected()` never turns true.
+    """
+    sent = _change_marks()
+    pinged = now()
+    yield "event: hello\ndata: {}\n\n"
+    try:
+        while True:
+            await asyncio.sleep(EVENTS_CHECK_SECONDS)
+            if await request.is_disconnected():
+                return
+            marks = _change_marks()
+            for name, mark in marks.items():
+                if mark != sent.get(name):
+                    yield f"event: {name}\ndata: {{}}\n\n"
+            sent = marks
+            if now() - pinged >= EVENTS_PING_SECONDS:
+                pinged = now()
+                yield "event: ping\ndata: {}\n\n"
+    finally:
+        _log.debug("event stream closed")
+
+
+class EventStream(StreamingResponse):
+    media_type = "text/event-stream"
+
+
+@app.get("/api/events", response_class=EventStream)
+async def api_events(request: Request) -> EventStream:
+    """Tells the panel when to refetch. The events carry no data."""
+    return EventStream(change_events(request), headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # The shading changes at most on the hour and costs an HA history call, while
 # the panel polls the forecast every minute.
 _night_cache: dict = {"at": 0.0, "hours": 0, "bands": []}
@@ -1093,16 +1273,17 @@ def api_config() -> dict:
     return _state["settings"].public()
 
 
-def _number(payload: dict, key: str, what: str) -> float:
-    """One numeric field out of a config patch, or a 400.
+def _number(payload: dict, key: str, what: str, name: str | None = None) -> float:
+    """One numeric field out of a config patch, or a 400 that calls it `name`.
 
     `bool` is rejected explicitly: JSON `true` arrives as an int and would be
     clamped into a legal-looking cut.
     """
     value = payload[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)):
         raise HTTPException(
-            status_code=400, detail=f"{key} must be {what}, not {value!r}.")
+            status_code=400, detail=f"{name or key} must be {what}, not {value!r}.")
     return float(value)
 
 
@@ -1228,6 +1409,16 @@ def typed_patch(payload: dict) -> dict:
                        f"and a +{max(config.HORIZONS_H)} h forecast is deleted "
                        f"before it can be scored.")
         out["forecast_retention_days"] = int(value)
+    for key, label, high, what in (
+            ("training_day", "Training day", 6, "a weekday, 0 (Monday) to 6 (Sunday)"),
+            ("training_hour", "Training hour", 23, "an hour, 0 to 23"),
+            ("training_minute", "Training minute", 59, "a minute, 0 to 59")):
+        if key in payload:
+            value = _number(payload, key, what, label)
+            if value != int(value) or not 0 <= value <= high:
+                raise HTTPException(
+                    status_code=400, detail=f"{label} must be {what}, not {payload[key]!r}.")
+            out[key] = int(value)
     if "people" in payload:
         out["people"] = _entity_list(payload["people"], "people", "person")
     if "zones" in payload:
@@ -1355,6 +1546,7 @@ def api_save_config(payload: dict) -> dict:
         raise HTTPException(status_code=400, detail=str(err)) from err
     settings.save()
     _state["settings"] = settings
+    _reschedule.set()                       # the training time may have moved
     # The log outlives a save, including one that switches `source`.
     if _state["forecast_log"] is None:
         _state["forecast_log"] = runtime.forecast_log()
