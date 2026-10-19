@@ -211,7 +211,11 @@ def test_no_feature_is_a_target():
 
 def test_every_column_a_horizon_reads_has_a_family():
     """`column_family` lets the panel summarise a table it cannot show; an
-    unclassified column falls into "unknown" and is silently mis-summarised."""
+    unclassified column falls into "unknown" and is silently mis-summarised.
+
+    Every name below is built unconditionally, candidates included: a candidate
+    reaches the parquet whether or not it is served.
+    """
     minted = {"time", "subject", "home_frac", *features.BUILT_NOT_SHIPPED}
     minted.update(train.origin_features())
     for horizon in config.HORIZONS_H:
@@ -219,7 +223,10 @@ def test_every_column_a_horizon_reads_has_a_family():
         minted.update(features.target_calendar_columns(horizon))
         minted.update(features.cross_subject_lag_columns(horizon))
         minted.add(features.climatology_column(horizon))
+        minted.add(features.wide_climatology_column(horizon))
+        minted.update(features.climatology_slope_columns(horizon))
         minted.add(features.slot_climatology_column(horizon))
+        minted.add(features.next_alarm_relative_column(horizon))
         minted.update(f"tgt{horizon}h_lag{days}d" for days in features.DAILY_LAGS)
 
     for column in minted:
@@ -551,3 +558,67 @@ def test_a_person_with_no_alarm_entity_gets_the_column_anyway():
     features._add_next_alarm(frame, None, subject, "2026-08-31", None, slots)
 
     assert frame["next_alarm_h"].isna().all()
+
+
+def test_the_origin_alarm_candidate_mints_no_target_slot_twin():
+    """`extra_target_columns` turns every origin extra into a `tgt{h}h_` name.
+    The alarm reading at the origin has no target-slot equivalent, so serving it
+    through that hook would ask for a column nothing builds."""
+    from occupancy_forecast import features, train
+
+    before = features.SHIPPED_EXTRAS
+    try:
+        features.SHIPPED_EXTRAS = ("next_alarm",)
+        assert "next_alarm_h" in train.base_features()
+        assert not any("next_alarm" in name
+                       for name in features.extra_target_columns(6))
+        # A missing alarm must not drop the row, or only the served arm shrinks.
+        assert "next_alarm_h" in train.nan_allowed()
+        assert "next_alarm_h" in train.nan_allowed_for(6)
+        assert "next_alarm_h" not in train.required_origin_columns()
+    finally:
+        features.SHIPPED_EXTRAS = before
+
+
+def test_the_relative_alarm_is_measured_from_the_target_slot():
+    """A tree cannot subtract two of its own columns, so the horizon comes off
+    the alarm before the fit sees it. Built wide per horizon so that both
+    families read it, then collapsed to one column by the melt."""
+    import numpy as np
+    import pandas as pd
+
+    from occupancy_forecast import features, train
+
+    slots = pd.date_range("2026-09-01T00:00Z", periods=2, freq="1h", tz="UTC")
+    table = pd.DataFrame({
+        "subject": ["alice", "alice"],
+        "time": slots,
+        "home_frac": [1.0, 1.0],
+        "next_alarm_h": [7.0, np.nan],
+    })
+    wide = features._add_horizon_columns(table)
+
+    # An alarm 7 h out is 5 h from the slot two hours ahead of the origin.
+    assert wide[features.next_alarm_relative_column(2)].iloc[0] == pytest.approx(5.0)
+    assert wide[features.next_alarm_relative_column(5)].iloc[0] == pytest.approx(2.0)
+    # No alarm stays no alarm; a horizon must not invent one.
+    assert np.isnan(wide[features.next_alarm_relative_column(2)].iloc[1])
+
+    before = features.SHIPPED_EXTRAS
+    try:
+        features.SHIPPED_EXTRAS = ("next_alarm_rel",)
+        long = features.long_frame(wide, horizons=(2, 5))
+        column = features.NEXT_ALARM_RELATIVE_COLUMN
+        at = long.set_index(["time", features.HORIZON_COLUMN])[column]
+        assert at.loc[(slots[0], 2.0)] == pytest.approx(5.0)
+        assert at.loc[(slots[0], 5.0)] == pytest.approx(2.0)
+        assert column in train.base_features()
+        assert column in train.nan_allowed()
+        # The dedicated family must read it too, or `choose` compares the two
+        # families on different feature sets.
+        name = features.next_alarm_relative_column(6)
+        assert name in features.extra_target_columns(6)
+        assert name in train.features_for(6)
+        assert name in train.nan_allowed_for(6)
+    finally:
+        features.SHIPPED_EXTRAS = before
