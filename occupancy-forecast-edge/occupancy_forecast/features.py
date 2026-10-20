@@ -34,12 +34,11 @@ DAILY_LAGS = (1, 2, 3, 7, 14, 21)
 # BECAUSE this is the longest in-table feature, so widening it buys noise with folds.
 CLIMATOLOGY_WEEKS = 4
 
-# A wider candidate, not a default: it costs no folds but doubles
+# The wider window, served beside the narrow one. It costs no folds but doubles
 # `predict.LOOKBACK_DAYS`, and every serving cycle is a full lookback rebuild.
 WIDE_CLIMATOLOGY_WEEKS = 8
 
-# Every width the table carries. `climatology_column(h)` still means the served
-# one; the rest are candidates.
+# Every width the table carries. `climatology_column(h)` means the narrow one.
 CLIMATOLOGY_WIDTHS = (CLIMATOLOGY_WEEKS, WIDE_CLIMATOLOGY_WEEKS)
 
 # Which width the transition slopes are differenced from. The narrow one
@@ -94,7 +93,7 @@ BUILT_NOT_SHIPPED: tuple[str, ...] = (
 #   "wclim_slope"     the climatology's slope either side of the target slot
 #   "next_alarm"      hours from the ORIGIN to the next alarm
 #   "next_alarm_rel"  the same, measured from the TARGET slot
-SHIPPED_EXTRAS: tuple[str, ...] = ("next_alarm_rel",)
+SHIPPED_EXTRAS: tuple[str, ...] = ("next_alarm_rel", "wclim_wide")
 
 # The melted name; the wide one is `next_alarm_relative_column`.
 NEXT_ALARM_RELATIVE_COLUMN = "next_alarm_rel_h"

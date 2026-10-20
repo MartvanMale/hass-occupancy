@@ -37,7 +37,7 @@ from . import baseline, config, estimators, evaluate, features, log
 
 _log = log.get(__name__)
 
-MODEL_VERSION = "0.5.0"
+MODEL_VERSION = "0.6.0"
 
 # Minimum Brier skill over the best baseline before a horizon is published at
 # all; below it `predict` publishes nothing rather than a number no better than

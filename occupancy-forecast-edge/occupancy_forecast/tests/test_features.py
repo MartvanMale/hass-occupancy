@@ -622,3 +622,15 @@ def test_the_relative_alarm_is_measured_from_the_target_slot():
         assert name in train.nan_allowed_for(6)
     finally:
         features.SHIPPED_EXTRAS = before
+
+
+def test_the_wide_climatology_is_served_to_both_families():
+    """The shipped tuple must reach both the dedicated and the pooled feature
+    lists, or `choose` compares the two families on different inputs."""
+    from occupancy_forecast import features, train
+
+    assert "wclim_wide" in features.SHIPPED_EXTRAS
+    for horizon in (1, 12, 48):
+        assert features.wide_climatology_column(horizon) in train.features_for(horizon)
+        assert features.wide_climatology_column(horizon) in train.nan_allowed_for(horizon)
+    assert f"wclim{features.WIDE_CLIMATOLOGY_WEEKS}" in train.base_features()
