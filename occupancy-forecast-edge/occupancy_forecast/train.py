@@ -37,7 +37,7 @@ from . import baseline, config, estimators, evaluate, features, log
 
 _log = log.get(__name__)
 
-MODEL_VERSION = "0.4.1"
+MODEL_VERSION = "0.6.0"
 
 # Minimum Brier skill over the best baseline before a horizon is published at
 # all; below it `predict` publishes nothing rather than a number no better than
@@ -136,6 +136,7 @@ def origin_features() -> list[str]:
         "coverage",
         *features.CALENDAR_COLUMNS,
         *features.extra_origin_columns(),
+        *features.extra_origin_only_columns(),
         *features.zone_columns(),
         *(f"other_{slug}" for slug in config.all_slugs()),
         *features.PROXIMITY_COLUMNS,
@@ -153,6 +154,8 @@ def may_be_nan() -> set[str]:
         *(f"other_{slug}" for slug in config.all_slugs()),
         *features.zone_columns(),
         *features.PROXIMITY_COLUMNS,
+        # Null when no alarm is set; requiring it would shrink the served arm only.
+        *features.extra_origin_only_columns(),
     }
 
 

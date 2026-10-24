@@ -34,12 +34,11 @@ DAILY_LAGS = (1, 2, 3, 7, 14, 21)
 # BECAUSE this is the longest in-table feature, so widening it buys noise with folds.
 CLIMATOLOGY_WEEKS = 4
 
-# A wider candidate, not a default: it costs no folds but doubles
+# The wider window, served beside the narrow one. It costs no folds but doubles
 # `predict.LOOKBACK_DAYS`, and every serving cycle is a full lookback rebuild.
 WIDE_CLIMATOLOGY_WEEKS = 8
 
-# Every width the table carries. `climatology_column(h)` still means the served
-# one; the rest are candidates.
+# Every width the table carries. `climatology_column(h)` means the narrow one.
 CLIMATOLOGY_WIDTHS = (CLIMATOLOGY_WEEKS, WIDE_CLIMATOLOGY_WEEKS)
 
 # Which width the transition slopes are differenced from. The narrow one
@@ -84,15 +83,20 @@ BUILT_NOT_SHIPPED: tuple[str, ...] = (
 )
 
 # Candidates: always built, served only when named here, so a probe can measure
-# one against a control on one parquet and one set of fold windows. Every name
-# below has been measured against a control and not shipped; re-run
+# one against a control on one parquet and one set of fold windows. A name left
+# out of the tuple has been measured against a control and lost; re-run
 # `python -m occupancy_forecast.probe` when the archive is longer. Shipping a
 # winner is a tuple edit plus a MODEL_VERSION bump plus a retrain.
 #
-#   "int_calendar"  INTEGER_CALENDAR_COLUMNS, origin and target
-#   "wclim_wide"    the same-weekday climatology over WIDE_CLIMATOLOGY_WEEKS
-#   "wclim_slope"   the climatology's slope either side of the target slot
-SHIPPED_EXTRAS: tuple[str, ...] = ()
+#   "int_calendar"    INTEGER_CALENDAR_COLUMNS, origin and target
+#   "wclim_wide"      the same-weekday climatology over WIDE_CLIMATOLOGY_WEEKS
+#   "wclim_slope"     the climatology's slope either side of the target slot
+#   "next_alarm"      hours from the ORIGIN to the next alarm
+#   "next_alarm_rel"  the same, measured from the TARGET slot
+SHIPPED_EXTRAS: tuple[str, ...] = ("next_alarm_rel", "wclim_wide")
+
+# The melted name; the wide one is `next_alarm_relative_column`.
+NEXT_ALARM_RELATIVE_COLUMN = "next_alarm_rel_h"
 
 
 def extra_origin_columns() -> tuple[str, ...]:
@@ -103,6 +107,12 @@ def extra_origin_columns() -> tuple[str, ...]:
     return tuple(out)
 
 
+def extra_origin_only_columns() -> tuple[str, ...]:
+    """Candidates that exist at the origin and have no target-slot twin, so
+    `extra_target_columns` must not mint a `tgt{h}h_` name for them."""
+    return ("next_alarm_h",) if "next_alarm" in SHIPPED_EXTRAS else ()
+
+
 def extra_target_columns(horizon: int) -> tuple[str, ...]:
     """Candidate TARGET columns for one horizon, wide names."""
     out = [f"tgt{horizon}h_{name}" for name in extra_origin_columns()]
@@ -110,6 +120,8 @@ def extra_target_columns(horizon: int) -> tuple[str, ...]:
         out.append(wide_climatology_column(horizon))
     if "wclim_slope" in SHIPPED_EXTRAS:
         out.extend(climatology_slope_columns(horizon))
+    if "next_alarm_rel" in SHIPPED_EXTRAS:
+        out.append(next_alarm_relative_column(horizon))
     return tuple(out)
 
 
@@ -121,6 +133,8 @@ def extra_long_columns() -> tuple[str, ...]:
     if "wclim_slope" in SHIPPED_EXTRAS:
         out.extend(f"wclim{TRANSITION_SOURCE_WEEKS}_{side}"
                    for side in ("slope_back", "slope_fwd"))
+    if "next_alarm_rel" in SHIPPED_EXTRAS:
+        out.append(NEXT_ALARM_RELATIVE_COLUMN)
     return tuple(out)
 
 
@@ -152,6 +166,12 @@ def climatology_slope_columns(horizon: int) -> tuple[str, str]:
     """
     stem = f"tgt{horizon}h_wclim{TRANSITION_SOURCE_WEEKS}"
     return f"{stem}_slope_back", f"{stem}_slope_fwd"
+
+
+def next_alarm_relative_column(horizon: int) -> str:
+    """Hours from the TARGET slot to the alarm, wide name. Built per horizon so
+    both families read it; the melt collapses all 48 to one column."""
+    return f"tgt{horizon}h_{NEXT_ALARM_RELATIVE_COLUMN}"
 
 
 def climatology_column(horizon: int) -> str:
@@ -254,6 +274,7 @@ def _long_renames(horizon: int) -> dict[str, str]:
     out[back] = f"wclim{TRANSITION_SOURCE_WEEKS}_slope_back"
     out[forward] = f"wclim{TRANSITION_SOURCE_WEEKS}_slope_fwd"
     out[slot_climatology_column(horizon)] = f"sclim{SLOT_CLIMATOLOGY_DAYS}"
+    out[next_alarm_relative_column(horizon)] = NEXT_ALARM_RELATIVE_COLUMN
     lags = safe_daily_lags(horizon)
     if lags:
         for slug in config.all_slugs():
@@ -298,7 +319,7 @@ FAMILIES: tuple[str, ...] = (
     "key", "state", "target", "proximity", "calendar", "zone",
     "cross_subject", "horizon_target", "target_calendar", "daily_lag",
     "cross_subject_lag", "climatology", "climatology_slope", "slot_climatology",
-    "not_shipped",
+    "next_alarm", "not_shipped",
 )
 
 
@@ -343,6 +364,8 @@ def column_family(name: str) -> str:
             return "climatology"
         if rest.startswith("sclim"):
             return "slot_climatology"
+        if rest.startswith("next_alarm"):
+            return "next_alarm"
         if rest in ALL_CALENDAR_COLUMNS:
             return "target_calendar"
     return "unknown"
@@ -371,6 +394,8 @@ FAMILY_WORDS: dict[str, str] = {
                          "differenced are on different rows",
     "slot_climatology": "the same slot on every recent day, weekdays pooled — "
                         "blunter than the weekday average and far less noisy",
+    "next_alarm": "how long after the slot being predicted the phone alarm is "
+                  "set for",
     "not_shipped": "built but deliberately not served yet — too little history to train on",
     "unknown": "not recognised — this is a bug in column_family",
 }
@@ -882,6 +907,10 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
 
     new: dict[str, np.ndarray] = {}
 
+    # Defensive: a caller may add the BUILT_NOT_SHIPPED placeholders after this.
+    alarm = (table["next_alarm_h"].to_numpy(dtype=float)
+             if "next_alarm_h" in table.columns else np.full(len(table), np.nan))
+
     for horizon in config.HORIZONS_H:
         ahead = pd.Timedelta(hours=horizon)
 
@@ -893,6 +922,9 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
         target_local = _localise(table["time"] + ahead)
         for name, values in _cyclical(target_local, prefix=f"tgt{horizon}h_").items():
             new[name] = values.to_numpy()
+
+        # Measured from the TARGET slot: a tree cannot form this difference itself.
+        new[next_alarm_relative_column(horizon)] = alarm - horizon
 
         # Daily lags OF THE TARGET SLOT. Gated -- see safe_daily_lags.
         for days in DAILY_LAGS:
