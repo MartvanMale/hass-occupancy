@@ -108,7 +108,7 @@ available` beside each, so the two can be read side by side.
 | **zones** | Settings → Areas & zones. Work, a second office, a school, the supermarket | the `zone_*` columns, and the three `out_today` sensors, which exist only for zones you ticked. Zones are roleless on purpose — which one means "work" for which person is learned, not declared |
 | **a person group** | a `group` whose members are people | the house's own occupancy, measured. Without one it is derived as "anyone is home" |
 | **holiday calendar** | the `holidays` package, seeded from the country set in Home Assistant | the `is_holiday` feature. Set it to the calendar the household actually *keeps*, which is not always where the house is |
-| **next alarm** | Companion app → Manage sensors → **Next alarm**, which is off by default | nothing yet — it is collected and not served. Turn it on now so the history exists when it ships |
+| **next alarm** | in the Companion app, under Manage sensors, **Next alarm**, which is off by default | a few percent better forecasts from one to about six hours ahead, for a person whose alarm time varies from day to day. Someone who wakes at the same time every day gains nothing from it |
 | **night shading** | any `schedule` entity you already keep | display only: it greys the hours outside the schedule on the 48-hour chart. No feature, no model, no published entity |
 
 ### Two names that have to line up

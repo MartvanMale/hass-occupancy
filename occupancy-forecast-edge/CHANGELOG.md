@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.7.0 - 2026-10-24
+
 ### Added
 
 - The forecast now reads the next alarm on each person's phone, from the Home Assistant app's Next alarm sensor. Forecasts are a few percent more accurate from one to about six hours ahead, and the gain goes to whoever's alarm time varies from day to day, not to someone who wakes at the same time. The Next alarm sensor has to be enabled in the Home Assistant app on each person's phone for the forecast to use it.
