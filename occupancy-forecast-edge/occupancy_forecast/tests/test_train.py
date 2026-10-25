@@ -95,7 +95,7 @@ def _fitted():
 
         ded_est, ded_scored, ded_rows = train.train_dedicated(path, HORIZON, windows)
         pool_est, pool_scored, pool_rows = train.train_pooled(
-            path, windows, horizons=TEST_HORIZONS, n_jobs=1)
+            path, windows, scratch=path.parent, horizons=TEST_HORIZONS, n_jobs=1)
 
         dedicated = train._candidate(
             HORIZON, "dedicated", ded_scored, f"y_{HORIZON}h", len(windows),
@@ -603,16 +603,19 @@ def test_a_worker_is_handed_the_feature_switch_rather_than_inheriting_it():
     `config.configure` one `_pooled_fold` documents."""
     before = features.SHIPPED_EXTRAS
     try:
+        features.SHIPPED_EXTRAS = ("int_calendar",)
+        wide = train.read_wide(_feature_table(days=12))
+        long_path = Path(tempfile.mkdtemp()) / train.LONG_NAME
+        train.write_long(wide, long_path, horizons=(1,))
+        features.SHIPPED_EXTRAS = before
+
         stamp = pd.Timestamp("2026-01-01", tz="UTC")
-        frame = pd.DataFrame({
-            "time": [stamp],
-            features.HORIZON_COLUMN: [1.0],
-            features.TARGET_COLUMN: [1.0],
-        })
         # No rows before `start`, so it returns early -- the switch must already
         # have been applied by then, or a real fold would fit the wrong list.
-        assert train._pooled_fold(frame, 0, stamp, stamp + pd.Timedelta(hours=1),
-                                  None, ("int_calendar",)) is None
+        part, _peak = train._pooled_fold(long_path, 0, stamp,
+                                         stamp + pd.Timedelta(hours=1),
+                                         None, ("int_calendar",))
+        assert part is None
         assert features.SHIPPED_EXTRAS == ("int_calendar",)
     finally:
         features.SHIPPED_EXTRAS = before
@@ -652,7 +655,8 @@ def test_a_feature_with_no_values_does_not_stop_training(days, blank):
     features.write(wide, path)
     windows, _ = train.shared_windows(wide)
 
-    train.train_pooled(wide, windows, horizons=(1, HORIZON), n_jobs=1)
+    train.train_pooled(wide, windows, scratch=path.parent,
+                       horizons=(1, HORIZON), n_jobs=1)
     train.train_dedicated(path, HORIZON, windows)
 
 
@@ -795,3 +799,152 @@ def test_unreadable_memory_falls_back_to_cores(machine, tmp_path):
     machine(available_gb=3.0)
     (tmp_path / "meminfo").unlink()
     assert train.worker_count(per_worker=10e9) == 5
+
+
+def test_the_blocked_melt_matches_the_one_frame_melt(tmp_path):
+    """`write_long` melts a block of origin rows at a time, so the whole long
+    table never exists in the server. Row order matters too, because
+    `subsample` draws per row and a different order moves every metric."""
+    # Several blocks, and more than one subject per timestamp, or the block
+    # boundaries and the sort keys go untested.
+    wide = train.read_wide(_feature_table(days=12))
+    horizons = (1, HORIZON, 24)
+    path = tmp_path / train.LONG_NAME
+    rows, size = train.write_long(wide, path, horizons=horizons, block_rows=64)
+
+    columns = train.pooled_columns()
+    expected = train.to_long(wide, horizons=horizons)[columns]
+    pd.testing.assert_frame_equal(train.load_long(path), expected)
+    assert rows == len(expected)
+    assert size > 0
+
+
+def test_the_long_table_is_written_in_the_order_load_long_trusts(tmp_path):
+    """`load_long` does not sort, so the file has to arrive in exactly the
+    order the pooled code reads. Pinned here rather than inferred from
+    `long_frame`'s own sort, which is in another module."""
+    wide = train.read_wide(_feature_table(days=12))
+    path = tmp_path / train.LONG_NAME
+    train.write_long(wide, path, horizons=(1, HORIZON), block_rows=64)
+
+    frame = train.load_long(path)
+    keys = ["time", features.HORIZON_COLUMN, "subject"]
+    assert frame[keys].equals(frame[keys].sort_values(keys).reset_index(drop=True))
+
+
+def test_a_melt_block_never_splits_a_timestamp(tmp_path):
+    """A timestamp split across two blocks would be written out of order, and
+    `load_long` does not sort."""
+    wide = train.read_wide(_feature_table(days=4))
+    subjects = wide["subject"].nunique()
+    assert subjects > 1, "a single subject cannot show the hazard"
+
+    times = wide["time"].to_numpy()
+    for start, stop in train._melt_blocks(wide, block_rows=7):
+        if stop < len(wide):
+            assert times[stop - 1] != times[stop], "a timestamp spans two blocks"
+
+
+def test_the_melt_is_refused_when_it_would_not_fit(machine, tmp_path):
+    """The budget is asked before the melt, so a refusal costs nothing."""
+    machine(available_gb=0.001)
+    wide = train.read_wide(_feature_table(days=12))
+    windows, _ = train.shared_windows(wide)
+    with pytest.raises(train.OutOfMemory, match="previous models stay in use"):
+        train.train_pooled(wide, windows, scratch=tmp_path, horizons=(1, HORIZON))
+    assert not (tmp_path / train.LONG_NAME).exists()
+
+
+def test_the_melt_estimate_is_the_size_of_one_horizon_times_the_count():
+    wide = train.read_wide(_feature_table(days=12))
+    one = train.frame_bytes(train._melt_block(wide, (1,)))
+    assert train.long_bytes(wide, (1, HORIZON, 24)) == one * 3
+    assert train.long_bytes(wide.iloc[:0], (1,)) == 0
+
+
+def test_the_peak_resident_set_is_read_or_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(train, "STATUS", tmp_path / "status")
+    (tmp_path / "status").write_text("Name:\tpython\nVmHWM:\t  2048 kB\nVmRSS:\t 1 kB\n")
+    assert train.peak_rss() == 2048 * 1024
+    (tmp_path / "status").unlink()
+    assert train.peak_rss() is None
+
+
+def test_a_phase_keeps_its_largest_peak(monkeypatch):
+    readings = iter([100, 300, 200])
+    monkeypatch.setattr(train, "peak_rss", lambda: next(readings))
+    phases = train.Phases()
+    for _ in range(3):
+        with phases("melt"):
+            pass
+    assert phases.peaks["melt"] == 300
+    phases.note_peak("worker", None)
+    assert "worker" not in phases.peaks
+    phases.note_peak("worker", 1_500_000)
+    assert phases.peaks_as_dict()["worker"] == 1.5
+
+
+def test_the_summary_records_the_peak_separately_from_the_seconds(tmp_path):
+    phases = train.Phases()
+    phases.note_peak("pooled melt", 400_000_000)
+    train.write_summary({}, tmp_path, phases={"pooled melt": 1.0},
+                        peak_mb=phases.peaks_as_dict())
+    summary = json.loads(train.summary_path(tmp_path).read_text())
+    assert summary["peak_mb"] == {"pooled melt": 400.0}
+    assert summary["phases"] == {"pooled melt": 1.0}
+
+
+def test_publishing_leaves_the_melts_scratch_file_behind(tmp_path):
+    """The staging directory doubles as the melt's scratch, so `_publish` must
+    move artifacts only."""
+    staging = train._staging(tmp_path / "models")
+    staging.mkdir(parents=True)
+    (staging / "occupancy_pooled.pkl").write_bytes(b"artifact")
+    (staging / "metrics.json").write_text("{}")
+    (staging / train.LONG_NAME).write_bytes(b"scratch")
+
+    models_dir = tmp_path / "models"
+    train._publish(staging, models_dir)
+    assert (models_dir / "occupancy_pooled.pkl").read_bytes() == b"artifact"
+    assert (models_dir / "metrics.json").exists()
+    assert not (models_dir / train.LONG_NAME).exists()
+    assert (staging / train.LONG_NAME).exists()
+
+
+def test_an_unsorted_feature_table_is_refused_rather_than_melted(tmp_path):
+    """`_melt_blocks` walks timestamps with `searchsorted`, which on unsorted
+    input returns an edge that does not advance."""
+    wide = train.read_wide(_feature_table(days=12))
+    shuffled = wide.sort_values(["subject", "time"]).reset_index(drop=True)
+    with pytest.raises(ValueError, match="not in time order"):
+        train.write_long(shuffled, tmp_path / train.LONG_NAME, horizons=(1,))
+
+
+def test_the_fold_subsample_picks_the_rows_the_old_draw_picked():
+    """The index draw must pick the same rows as the old frame draw, or every
+    metric moves. The expected rows are spelled out here rather than taken from
+    the helper under test."""
+    frame = pd.DataFrame({"a": np.arange(1000.0)})
+    train_idx = np.flatnonzero(np.arange(1000) % 3 != 0)
+    for seed in (0, 1, 7):
+        rng = np.random.default_rng(seed)
+        was = rng.random(len(train_idx)) < train.TRAIN_SAMPLE_RATE
+        expected = frame.iloc[train_idx].iloc[np.flatnonzero(was)]
+
+        keep = train.subsample_rows(len(train_idx), seed)
+        now = frame.iloc[train_idx if keep is None else train_idx[keep]]
+        pd.testing.assert_frame_equal(now, expected)
+
+
+def test_nothing_is_copied_when_every_column_was_observed():
+    """The fill is a no-op on a table where every column has values, so
+    `transform` hands back the frame it was given."""
+    from occupancy_forecast import estimators
+    frame = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, np.nan]})
+    step = estimators.UnobservedToConstant().fit(frame)
+    assert step.transform(frame) is frame
+
+    blank = pd.DataFrame({"a": [1.0, 2.0], "b": [np.nan, np.nan]})
+    filled = estimators.UnobservedToConstant().fit(blank).transform(blank)
+    assert filled is not blank
+    assert list(filled["b"]) == [0.0, 0.0]

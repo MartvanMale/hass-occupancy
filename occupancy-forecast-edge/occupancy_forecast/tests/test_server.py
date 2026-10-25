@@ -140,6 +140,43 @@ def test_a_weekly_schedule_skips_the_other_days(monkeypatch):
     assert server._due_slot(at("2026-09-12T03:30"), MATURE, None) == dt.date(2026, 9, 12)
 
 
+def test_a_failed_train_takes_tomorrows_slot_not_next_weeks(monkeypatch):
+    """A weekly schedule waits seven days, which is a long time to serve models
+    that a failed train says are stale."""
+    at_slot(monkeypatch, 5, 3, 23)
+    sunday = at("2026-09-13T03:30")
+    assert server._due_slot(sunday, MATURE, None) is None
+    assert server._due_slot(sunday, MATURE, None, retry=True) == dt.date(2026, 9, 13)
+
+
+def test_the_retry_is_announced_for_tomorrow(monkeypatch):
+    at_slot(monkeypatch, 5, 3, 23)
+    saturday = at("2026-09-12T04:30")
+    assert server._next_train(saturday, MATURE) == "2026-09-19T03:23"
+    assert server._next_train(saturday, MATURE, retry=True) == "2026-09-13T03:23"
+
+
+def test_a_retry_slot_is_due_through_the_scheduler_step(monkeypatch):
+    at_slot(monkeypatch, 5, 3, 23)
+    sunday = at("2026-09-13T03:30")
+    assert server._scheduler_step(sunday, MATURE, None, None)[0] is None
+    assert server._scheduler_step(sunday, MATURE, None, None,
+                                  retry=True) == (dt.date(2026, 9, 13), 0.0)
+
+
+def test_a_train_that_fails_says_so(monkeypatch):
+    """The scheduler reads this to decide between tomorrow and next week."""
+    monkeypatch.setattr(server, "do_train", lambda: {})
+    monkeypatch.setattr(server, "do_predict", lambda: None)
+    assert server._train_and_publish() is True
+
+    def broken():
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(server, "do_train", broken)
+    assert server._train_and_publish() is False
+
+
 def test_a_slot_the_clocks_skip_still_runs(monkeypatch):
     """02:30 does not exist in Amsterdam on 2026-03-29; the first cycle after
     the jump, at 03:00, is inside the window on the wall clock."""
