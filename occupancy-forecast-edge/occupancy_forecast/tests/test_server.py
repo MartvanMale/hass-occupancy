@@ -1668,3 +1668,29 @@ def test_the_events_route_streams_without_caching():
 def test_the_events_route_is_a_get():
     routes = {r.path: r for r in server.app.routes if hasattr(r, "methods")}
     assert routes["/api/events"].methods == {"GET"}
+
+
+def test_a_synchronous_train_that_fails_leaves_a_readable_reason(monkeypatch,
+                                                                tmp_path,
+                                                                caplog):
+    """The panel trains in the background, but /train without `background` is
+    still live for anything scripted against it, and it has to leave the reason
+    behind too."""
+    from fastapi import Response
+
+    from occupancy_forecast import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    def broken():
+        raise RuntimeError("a training process was killed")
+
+    monkeypatch.setattr(server, "do_train", broken)
+    with caplog.at_level("ERROR"):
+        with pytest.raises(HTTPException) as raised:
+            server.run_train(Response())
+
+    assert raised.value.status_code == 500
+    assert "train failed" in caplog.text
+    assert "a training process was killed" in (tmp_path / "last_failure.txt").read_text()
+    assert not server._train_lock.locked(), "the lock has to come back"

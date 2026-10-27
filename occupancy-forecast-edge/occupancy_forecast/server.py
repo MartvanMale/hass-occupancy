@@ -14,6 +14,7 @@ import base64
 import contextlib
 import copy
 import datetime as dt
+import traceback
 import hashlib
 import json
 import faulthandler
@@ -275,67 +276,78 @@ def do_train() -> dict:
     # Timed per stretch as well as end to end: these four say whether the
     # answer is in the fits at all.
     phases = train_mod.Phases()
-    source = _state["source"]
-    with phases("features"):
-        table = features.build(source)
-        features.write(table, config.FEATURES_PATH)
-        feature_rows = len(table)
-        labelled_rows = int(table["home_frac"].notna().sum())
-    # Not held across the fits: the melt needs that memory.
-    del table
-    with phases("models"):
-        summary = train_mod.train_all(config.FEATURES_PATH, config.MODELS_DIR)
     try:
-        with phases("eta"):
-            eta_summary = eta_mod.train_all(source, config.MODELS_DIR)
-    except Exception as err:  # noqa: BLE001
-        _log.error("eta training failed: %s", err)
-        eta_summary = {}
-    # Guarded like the ETA models: a household with no zones has nothing to
-    # answer, and that must not fail a train. The read is guarded too, because
-    # the models are already published by this point.
-    try:
-        table = train_mod.read_wide(config.FEATURES_PATH)
-    except Exception as err:  # noqa: BLE001
-        _log.error("the feature table could not be read, so the out and "
-                   "departure routines were skipped: %s", err)
-        table = None
-    if table is not None:
+        source = _state["source"]
+        free = train_mod.available_memory()
+        _log.info("preparing the feature table, %.0f MB in use, %s",
+                  (train_mod.rss() or 0) / 1e6,
+                  "free memory unknown" if free is None
+                  else f"{free / 1e9:.1f} GB free")
+        with phases("features"):
+            built = features.build_to(source, config.FEATURES_PATH, phases=phases)
+        feature_rows, labelled_rows = built["rows"], built["labelled_rows"]
+        _log.info("feature table built: %d rows and %d columns, written in %d blocks",
+                  feature_rows, built["columns"], built["row_groups"])
+        with phases("models"):
+            summary = train_mod.train_all(config.FEATURES_PATH, config.MODELS_DIR)
         try:
-            with phases("out routine"):
-                labelled = outing_mod.label_out_days(table,
-                                                     departure.label_days(table))
-                routine = outing_mod.fit_routine(labelled)
-                outing_mod.save_routine(routine, config.MODELS_DIR)
-            _log.info("out routine fitted for %d person(s)", len(routine))
+            with phases("eta"):
+                eta_summary = eta_mod.train_all(source, config.MODELS_DIR)
         except Exception as err:  # noqa: BLE001
-            _log.error("out routine failed: %s", err)
-        # Guarded separately from the one above, which reads the configured
-        # zones. This one reads none, and it times the next-change row.
+            _log.error("eta training failed: %s", err)
+            eta_summary = {}
+        # Guarded like the ETA models: a household with no zones has nothing to
+        # answer, and that must not fail a train. The read is guarded too, because
+        # the models are already published by this point.
         try:
-            with phases("departure routine"):
-                leaving = departure.fit_routine(departure.label_days(table))
-                departure.save_routine(leaving, config.MODELS_DIR)
-            _log.info("departure routine fitted for %d subject(s)", len(leaving))
+            table = train_mod.read_wide(
+                config.FEATURES_PATH, columns=outing_mod.routine_columns())
         except Exception as err:  # noqa: BLE001
-            _log.error("departure routine failed: %s", err)
-        del table
-    _load_models()
-    elapsed = time.monotonic() - started
-    train_mod.stamp_duration(elapsed, config.MODELS_DIR)
-    _state["last_train"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    _state["last_train_seconds"] = round(elapsed, 1)
-    _log.info("training finished in %.0fs (%s): %d/%d horizons ship a model "
-              "(%d dedicated, %d pooled)", elapsed, phases.line(),
-              _shipping_horizons(), len(config.HORIZONS_H),
-              sum(1 for a in _state["models"].values()
-                  if a.get("metrics", {}).get("kind") == "dedicated"),
-              sum(1 for a in _state["models"].values()
-                  if a.get("metrics", {}).get("kind") == "pooled"))
-    return {"horizons": summary, "eta": eta_summary,
-            "duration_s": round(elapsed, 1),
-            "feature_rows": feature_rows,
-            "labelled_rows": labelled_rows}
+            _log.error("the feature table could not be read, so the out and "
+                       "departure routines were skipped: %s", err)
+            table = None
+        if table is not None:
+            try:
+                with phases("out routine"):
+                    labelled = outing_mod.label_out_days(table,
+                                                         departure.label_days(table))
+                    routine = outing_mod.fit_routine(labelled)
+                    outing_mod.save_routine(routine, config.MODELS_DIR)
+                _log.info("out routine fitted for %d person(s)", len(routine))
+            except Exception as err:  # noqa: BLE001
+                _log.error("out routine failed: %s", err)
+            # Guarded separately from the one above, which reads the configured
+            # zones. This one reads none, and it times the next-change row.
+            try:
+                with phases("departure routine"):
+                    leaving = departure.fit_routine(departure.label_days(table))
+                    departure.save_routine(leaving, config.MODELS_DIR)
+                _log.info("departure routine fitted for %d subject(s)", len(leaving))
+            except Exception as err:  # noqa: BLE001
+                _log.error("departure routine failed: %s", err)
+            del table
+        _load_models()
+        elapsed = time.monotonic() - started
+        train_mod.stamp_run(elapsed, config.MODELS_DIR, phases.as_dict(),
+                            phases.peaks_as_dict())
+        _state["last_train"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        _state["last_train_seconds"] = round(elapsed, 1)
+        _log.info("training finished in %.0fs: %d/%d horizons ship a model "
+                  "(%d dedicated, %d pooled)", elapsed,
+                  _shipping_horizons(), len(config.HORIZONS_H),
+                  sum(1 for a in _state["models"].values()
+                      if a.get("metrics", {}).get("kind") == "dedicated"),
+                  sum(1 for a in _state["models"].values()
+                      if a.get("metrics", {}).get("kind") == "pooled"))
+        return {"horizons": summary, "eta": eta_summary,
+                "duration_s": round(elapsed, 1),
+                "feature_rows": feature_rows,
+                "labelled_rows": labelled_rows}
+    finally:
+        # Logged on the way out too, or a failed train reports nothing.
+        _log.info("time per training phase: %s", phases.line())
+        _log.info("peak memory per phase: %s, and %.0f MB in use now",
+                  phases.peak_line(), (train_mod.rss() or 0) / 1e6)
 
 
 def _slot(now: dt.datetime, day: dt.date) -> dt.datetime:
@@ -439,10 +451,21 @@ def _train_and_publish() -> bool:
         do_train()
         do_predict()
         return True
-    except Exception as err:  # noqa: BLE001
-        _record_error(err, from_cycle=False)
-        _log.error("train failed: %s", err)
+    except BaseException as err:
+        _train_failed(err)
+        if not isinstance(err, Exception):
+            raise
         return False
+
+
+def _train_failed(err: BaseException) -> None:
+    """Everything a failed train leaves behind, wherever it was started from.
+    The file comes first, because the log line can be lost."""
+    _write_failure(err, "train")
+    _log.error("train failed: %s: %s", type(err).__name__, err)
+    _log.debug("train traceback", exc_info=True)
+    if isinstance(err, Exception):
+        _record_error(err, from_cycle=False)
 
 
 def _start_background_train() -> None:
@@ -462,6 +485,11 @@ def _start_background_train() -> None:
     def run() -> None:
         try:
             _train_and_publish()
+        except BaseException as err:
+            _write_failure(err, "training thread")
+            _log.error("the training thread stopped: %s: %s",
+                       type(err).__name__, err)
+            raise
         finally:
             _train_lock.release()
 
@@ -480,6 +508,20 @@ def _take_train_lock() -> bool:
         return False
     _train_started["at"] = time.monotonic()
     return True
+
+
+def _write_failure(err: BaseException, where: str) -> None:
+    """The last failure, on disk. A kill takes the log line with it and the
+    status page only ever shows the public placeholder, so without this a train
+    can fail with no readable reason anywhere."""
+    try:
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (config.DATA_DIR / "last_failure.txt").write_text(
+            f"{dt.datetime.now(dt.timezone.utc).isoformat()} {where}\n"
+            f"{type(err).__module__}.{type(err).__name__}: {err}\n\n"
+            + "".join(traceback.format_exception(err)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _record_error(err: Exception, from_cycle: bool) -> None:
@@ -1785,7 +1827,7 @@ def run_train(response: Response, background: bool = False) -> dict:
     except HTTPException:
         raise
     except Exception as err:  # noqa: BLE001
-        _record_error(err, from_cycle=False)
+        _train_failed(err)
         raise HTTPException(status_code=500, detail=str(err)) from err
     finally:
         _train_lock.release()

@@ -294,7 +294,7 @@ def test_the_duration_can_be_stamped_after_the_fact(tmp_path):
     train.write_summary({"1": {"ships": True}}, tmp_path)
     assert train.last_summary(tmp_path)["duration_s"] is None
 
-    train.stamp_duration(251.44, tmp_path)
+    train.stamp_run(251.44, tmp_path)
     assert train.last_summary(tmp_path)["duration_s"] == 251.4
     # Stamping must not lose what was already there.
     assert train.last_summary(tmp_path)["trained_at"]
@@ -524,11 +524,13 @@ def test_one_family_missing_is_not_a_failure():
 
 
 def test_the_ladder_slice_carries_everything_the_rungs_read():
-    """`train_all` hands each ladder worker only `baseline.columns_for(h)`, so a
-    rung reading a column not named there scores on a frame missing it --
-    silently, if the column merely goes NaN."""
+    """A ladder worker reads `train.ladder_columns(h)` and nothing else, so a
+    rung reaching for a column not named there scores on a frame missing it,
+    silently if the column merely goes NaN."""
     wide, windows = _fitted()["wide"], _fitted()["windows"]
     for horizon in TEST_HORIZONS:
+        assert set(baseline.columns_for(horizon)) <= set(
+            train.ladder_columns(horizon)), "the worker reads a narrower frame"
         whole = baseline.run(wide, horizon, windows=windows)
         sliced = baseline.run(wide[baseline.columns_for(horizon)], horizon,
                               windows=windows)
@@ -781,18 +783,32 @@ def machine(tmp_path, monkeypatch):
     return write
 
 
+def _fits(free_gb: float, per_worker: float) -> int:
+    """What the budget allows, spelled out: a share of free memory over the
+    data a worker holds plus the interpreter it needs to hold it."""
+    budget = free_gb * 1e9 * train.MEMORY_SHARE
+    return int(budget // (per_worker + train.WORKER_BASELINE_BYTES))
+
+
 def test_workers_are_capped_by_free_memory(machine):
     machine(available_gb=3.0)
     assert train.worker_count() == 5, "no estimate: cores less one"
     assert train.worker_count(per_worker=0.1e9) == 5, "cores stay the ceiling"
-    assert train.worker_count(per_worker=0.75e9) == 2
-    with pytest.raises(train.OutOfMemory, match="needs about 10.0 GB"):
+    assert train.worker_count(per_worker=0.75e9) == _fits(3.0, 0.75e9) == 2
+    with pytest.raises(train.OutOfMemory, match="for one worker"):
         train.worker_count(per_worker=10e9)
+
+
+def test_a_worker_is_priced_with_the_interpreter_it_needs(machine):
+    """A worker costs an interpreter before it touches data, so a narrow frame
+    must not read as a free one."""
+    machine(available_gb=0.4)
+    assert train.worker_count(per_worker=0.03e9) == 1
 
 
 def test_a_cgroup_limit_counts_as_less_free_memory(machine):
     machine(available_gb=5.0, limit_gb=2.0, used_gb=0.5)
-    assert train.worker_count(per_worker=0.5e9) == 2
+    assert train.worker_count(per_worker=0.5e9) == _fits(1.5, 0.5e9) == 1
 
 
 def test_unreadable_memory_falls_back_to_cores(machine, tmp_path):
@@ -804,7 +820,7 @@ def test_unreadable_memory_falls_back_to_cores(machine, tmp_path):
 def test_the_blocked_melt_matches_the_one_frame_melt(tmp_path):
     """`write_long` melts a block of origin rows at a time, so the whole long
     table never exists in the server. Row order matters too, because
-    `subsample` draws per row and a different order moves every metric."""
+    `load_long` does not sort what it reads."""
     # Several blocks, and more than one subject per timestamp, or the block
     # boundaries and the sort keys go untested.
     wide = train.read_wide(_feature_table(days=12))
@@ -920,22 +936,6 @@ def test_an_unsorted_feature_table_is_refused_rather_than_melted(tmp_path):
         train.write_long(shuffled, tmp_path / train.LONG_NAME, horizons=(1,))
 
 
-def test_the_fold_subsample_picks_the_rows_the_old_draw_picked():
-    """The index draw must pick the same rows as the old frame draw, or every
-    metric moves. The expected rows are spelled out here rather than taken from
-    the helper under test."""
-    frame = pd.DataFrame({"a": np.arange(1000.0)})
-    train_idx = np.flatnonzero(np.arange(1000) % 3 != 0)
-    for seed in (0, 1, 7):
-        rng = np.random.default_rng(seed)
-        was = rng.random(len(train_idx)) < train.TRAIN_SAMPLE_RATE
-        expected = frame.iloc[train_idx].iloc[np.flatnonzero(was)]
-
-        keep = train.subsample_rows(len(train_idx), seed)
-        now = frame.iloc[train_idx if keep is None else train_idx[keep]]
-        pd.testing.assert_frame_equal(now, expected)
-
-
 def test_nothing_is_copied_when_every_column_was_observed():
     """The fill is a no-op on a table where every column has values, so
     `transform` hands back the frame it was given."""
@@ -948,3 +948,233 @@ def test_nothing_is_copied_when_every_column_was_observed():
     filled = estimators.UnobservedToConstant().fit(blank).transform(blank)
     assert filled is not blank
     assert list(filled["b"]) == [0.0, 0.0]
+
+
+def test_a_phase_the_server_timed_reaches_the_summary(tmp_path):
+    """`train_all` writes the summary before the server's own phases are done,
+    so the server adds its keys to what the trainer already wrote."""
+    phases = train.Phases()
+    phases.seconds["features"] = 12.0
+    phases.note_peak("features horizons", 190_000_000)
+    train.write_summary({"1": {"ships": True}}, tmp_path,
+                        phases={"read": 1.0}, peak_mb={"read": 700.0})
+
+    train.stamp_run(99.0, tmp_path, phases.as_dict(), phases.peaks_as_dict())
+    summary = json.loads(train.summary_path(tmp_path).read_text())
+    assert summary["phases"] == {"read": 1.0, "features": 12.0}
+    assert summary["peak_mb"] == {"read": 700.0, "features horizons": 190.0}
+    assert summary["duration_s"] == 99.0
+
+
+def test_the_resident_set_is_read_or_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(train, "STATUS", tmp_path / "status")
+    (tmp_path / "status").write_text("VmHWM:\t 4096 kB\nVmRSS:\t 2048 kB\n")
+    assert train.rss() == 2048 * 1024
+    assert train.peak_rss() == 4096 * 1024
+    (tmp_path / "status").unlink()
+    assert train.rss() is None
+
+
+def test_a_declared_file_is_read_without_a_second_sort(tmp_path):
+    """`build_to` writes in order and says so, and sorting it again would cost
+    a second copy of the whole table."""
+    from occupancy_forecast.tests.test_features import _built_source
+
+    source, start, stop = _built_source(days=8)
+    declared = tmp_path / "declared.parquet"
+    features.build_to(source, declared, start, stop, target_bytes=1_000_000)
+    assert train.declares_time_order(declared)
+
+    plain = tmp_path / "plain.parquet"
+    features.write(features.build(source, start, stop), plain)
+    assert not train.declares_time_order(plain)
+
+    skipped, sorted_ = train.read_wide(declared), train.read_wide(plain)
+    assert skipped["time"].is_monotonic_increasing
+    # The same rows either way. The subject order within one timestamp does
+    # differ, because the sorted path leaves it to an unstable sort.
+    keys = ["time", "subject"]
+    pd.testing.assert_frame_equal(skipped.sort_values(keys).reset_index(drop=True),
+                                  sorted_.sort_values(keys).reset_index(drop=True))
+    assert list(skipped[keys].itertuples(index=False)) == sorted(
+        skipped[keys].itertuples(index=False)), "a declared file reads back in order"
+
+
+def test_a_table_out_of_time_order_is_still_sorted(tmp_path):
+    """A file written before the order was declared gets the sort it needs."""
+    from occupancy_forecast.tests.test_features import _built_source
+
+    source, start, stop = _built_source(days=6)
+    table = features.build(source, start, stop)
+    shuffled = table.sort_values(["subject", "time"]).reset_index(drop=True)
+    path = tmp_path / "subject_major.parquet"
+    features.write(shuffled, path)
+
+    assert not train.declares_time_order(path)
+    assert train.read_wide(path)["time"].is_monotonic_increasing
+
+
+def test_the_sample_does_not_depend_on_the_order_the_rows_arrive_in():
+    """A worker decides a row group at a time, so the draw has to be a function
+    of the row's key rather than its position."""
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({
+        "subject": rng.choice(list(config.all_slugs()), 4000),
+        "time": pd.Timestamp("2026-01-01", tz="UTC")
+        + pd.to_timedelta(rng.integers(0, 40000, 4000), unit="m"),
+        features.HORIZON_COLUMN: rng.integers(1, 49, 4000).astype(float),
+    }).drop_duplicates(subset=["subject", "time", features.HORIZON_COLUMN])
+
+    keys = ["subject", "time", features.HORIZON_COLUMN]
+    chosen = frame[train.sampled_rows(frame, 0.25, seed=3)]
+    shuffled = frame.sample(frac=1.0, random_state=7).reset_index(drop=True)
+    again = shuffled[train.sampled_rows(shuffled, 0.25, seed=3)]
+
+    assert set(map(tuple, chosen[keys].to_numpy())) == set(
+        map(tuple, again[keys].to_numpy()))
+
+
+def test_the_sample_keeps_about_the_rate():
+    """Uniform enough that a rate means what it says, or the budget is wrong."""
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame({
+        "subject": rng.choice(list(config.all_slugs()), 60000),
+        "time": pd.Timestamp("2026-01-01", tz="UTC")
+        + pd.to_timedelta(np.arange(60000), unit="min"),
+        features.HORIZON_COLUMN: rng.integers(1, 49, 60000).astype(float),
+    })
+    for rate in (0.25, 0.125, 0.0625):
+        kept = train.sampled_rows(frame, rate, seed=0).mean()
+        assert abs(kept - rate) < 0.01, (rate, kept)
+    assert train.sampled_rows(frame, 1.0, seed=0).all(), "a full rate keeps all"
+
+
+def test_a_folds_scored_rows_are_never_sampled_away(tmp_path):
+    """The gate sees all forty-eight horizons, so the window a fold scores on
+    comes back whole however low the rate goes."""
+    from occupancy_forecast.tests.test_features import _built_source
+
+    source, start, stop = _built_source(days=10)
+    wide = train.read_wide(_feature_table(days=10))
+    long_path = tmp_path / train.LONG_NAME
+    train.write_long(wide, long_path, horizons=(1, HORIZON))
+
+    whole = train.load_long(long_path)
+    times = whole["time"]
+    window = (times.iloc[len(times) // 2], times.iloc[-1] + pd.Timedelta("1min"))
+    in_window = int(((times >= window[0]) & (times < window[1])).sum())
+
+    sampled = train.load_long_sampled(long_path, 0.0625, seed=0, window=window)
+    scored = ((sampled["time"] >= window[0]) & (sampled["time"] < window[1])).sum()
+    assert int(scored) == in_window
+    assert len(sampled) < len(whole), "outside the window it did sample"
+
+
+def test_the_leaf_floor_follows_the_sample_rate():
+    """The floor counts person-days, so it has to move with how many rows an
+    origin contributes."""
+    assert train.min_samples_leaf(12 / 48) == 100
+    assert train.min_samples_leaf(6 / 48) == 50
+    assert train.min_samples_leaf(1 / 48) == 20, "a floor of one row is not a floor"
+
+
+def test_the_sample_rate_steps_down_to_what_fits(machine):
+    """A tight box trains on fewer horizons per origin rather than not at all."""
+    estimate, folds = 1e9, 26
+    rungs = [p / len(config.HORIZONS_H) for p in train.HORIZONS_PER_ORIGIN_RUNGS]
+
+    machine(available_gb=8.0)
+    assert train.pooled_rate(estimate, folds) == train.TRAIN_SAMPLE_RATE
+
+    # Each rung has to be affordable at its own price and not at the one above.
+    seen = []
+    for free in (8.0, 1.6, 1.2, 0.8, 0.6, 0.45, 0.2):
+        machine(available_gb=free)
+        rate = train.pooled_rate(estimate, folds)
+        assert rate is None or rate in rungs, rate
+        seen.append(rate)
+    assert seen[0] == train.TRAIN_SAMPLE_RATE
+    assert seen[-1] is None, "nothing fits, so it refuses"
+    tried = [r for r in seen if r is not None]
+    assert tried == sorted(tried, reverse=True), "less memory must not buy more rows"
+    assert len(set(tried)) > 2, "the rungs have to step"
+
+
+def test_a_rate_that_does_not_fit_refuses_rather_than_tries(machine, tmp_path):
+    """The refusal names the table's size, which is the figure the reader can
+    act on."""
+    machine(available_gb=0.05)
+    wide = train.read_wide(_feature_table(days=12))
+    windows, _ = train.shared_windows(wide)
+    with pytest.raises(train.OutOfMemory, match="not enough free memory"):
+        train.train_pooled(wide, windows, scratch=tmp_path, horizons=(1, HORIZON))
+
+
+def test_the_sampled_read_hands_every_row_group_back(tmp_path, monkeypatch):
+    """Both passes over the row groups have to release, or the read grows by
+    the whole file."""
+    import pyarrow.parquet as pq
+
+    long_path = tmp_path / "long.parquet"
+    rows, _ = train.write_long(_feature_table(days=20), long_path,
+                               horizons=TEST_HORIZONS, block_rows=256)
+    groups = pq.ParquetFile(long_path).metadata.num_row_groups
+    assert groups > 1, "one row group cannot show a per-group leak"
+
+    calls = []
+    monkeypatch.setattr(features, "release_arrow", lambda: calls.append(1))
+    frame = train.load_long_sampled(long_path, 1.0, 0)
+    assert len(frame) == rows
+    assert len(calls) == 2 * groups, "the keys pass and the fill pass, each group"
+
+
+def test_the_melt_hands_its_blocks_back(tmp_path, monkeypatch):
+    """The melt writes a row group per block, and every one of them releases."""
+    import pyarrow.parquet as pq
+
+    long_path = tmp_path / "long.parquet"
+    calls = []
+    monkeypatch.setattr(features, "release_arrow", lambda: calls.append(1))
+    train.write_long(_feature_table(days=20), long_path,
+                     horizons=TEST_HORIZONS, block_rows=256)
+    groups = pq.ParquetFile(long_path).metadata.num_row_groups
+    assert len(calls) >= groups
+
+
+def test_a_fold_is_priced_with_the_window_it_scores(machine):
+    """A fold holds its sample and the whole window it scores, so the price has
+    to cover both."""
+    assert train.worker_share(1 / 48, 26) == pytest.approx(1 / 48 + 1 / 26)
+    assert train.worker_share(0.9, 2) == 1.0, "never more than the whole table"
+    assert train.pooled_bytes(1e9, 1 / 48, 26) > train.pooled_bytes(1e9, 1 / 48, 1000)
+
+    # Wide scoring windows cost rows: the same box steps down a rung for them.
+    machine(available_gb=1.4)
+    assert train.pooled_rate(1e9, 1000) > train.pooled_rate(1e9, 26)
+
+
+def test_the_fan_out_is_priced_after_the_melt(tmp_path, monkeypatch, machine):
+    """The melt spends memory the workers then have to fit into, so the price
+    is read off the melted table and not off the estimate."""
+    machine(available_gb=8.0)
+    order = []
+    real_rate, real_melt = train.pooled_rate, train.write_long
+
+    def priced(long_bytes, n_folds):
+        order.append("price")
+        return real_rate(long_bytes, n_folds)
+
+    def melt(*args, **kwargs):
+        order.append("melt")
+        answer = real_melt(*args, **kwargs)
+        machine(available_gb=0.05)      # what the melt just cost
+        return answer
+
+    monkeypatch.setattr(train, "pooled_rate", priced)
+    monkeypatch.setattr(train, "write_long", melt)
+    path = _feature_table(days=20)
+    windows, _ = train.shared_windows(train.read_wide(path))
+    with pytest.raises(train.OutOfMemory, match="not enough free memory"):
+        train.train_pooled(path, windows, scratch=tmp_path,
+                           horizons=TEST_HORIZONS)
+    assert order == ["price", "melt", "price"]
