@@ -99,9 +99,9 @@ has to change in both.**
    unedited in the Changelog tab that every store user sees, so the register you
    write in is the register they read. Name entities, options and panel pages
    rather than modules and functions, and keep anything they have to act on. The
-   mechanism, the measurement and the alternative you rejected are worth
-   recording, but they go in the **commit message**, where the reader is
-   somebody reading the diff.
+   mechanism goes in the **commit message**, written as what the code now does,
+   for somebody reading the diff. Measurements, rejected alternatives and bug
+   hunts go in neither file.
 
    **One entry, one line.** Each entry is a single `- ` line however long it
    runs; never hard-wrap it. The same goes for any paragraph in the changelog.
@@ -234,12 +234,8 @@ The budget, and it is a real budget:
 
 What does *not* belong in a comment: the measurements you took, the alternative
 you rejected, the bug you hit on the way, or a narration of how the code came to
-look like this. Those go in the **commit message** — the same rule the changelog
-section above states, for the same reason. A reader of the diff wants them; a
-reader of the file next year does not.
-
-An incident that shaped the code is worth one sentence naming it, not a
-retelling.
+look like this. None of it belongs in the commit body either, which records what
+the code now does. That is the same rule the changelog section above states.
 
 This applies to prose in docs too, agents included. Prefer cutting to adding.
 

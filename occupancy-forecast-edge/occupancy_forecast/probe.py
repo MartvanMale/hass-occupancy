@@ -174,7 +174,7 @@ def run_arm(path: Path, windows: list, extras: tuple[str, ...],
         _log.info("arm %s: %d features",
                   ",".join(extras) or "control", len(train.base_features()))
         _estimator, scored, _rows = train.train_pooled(
-            path, windows, horizons=horizons, n_jobs=n_jobs)
+            path, windows, scratch=path.parent, horizons=horizons, n_jobs=n_jobs)
         return scored
     finally:
         features.SHIPPED_EXTRAS = before

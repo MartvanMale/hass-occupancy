@@ -10,12 +10,16 @@ a guess.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
 import datetime as dt
 import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from . import config, log
 
@@ -404,6 +408,36 @@ FAMILY_WORDS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # The grid
 # ---------------------------------------------------------------------------
+
+def release_arrow() -> None:
+    """Hand pyarrow's freed pages back to the OS. Its pool keeps them after a
+    block is dropped, so call this wherever one is."""
+    pa.default_memory_pool().release_unused()
+
+
+def release_heap() -> None:
+    """Release Arrow's pages and trim the heap glibc grew to hold them. It
+    walks every arena, so call it at the end of a phase, never in a block loop."""
+    release_arrow()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):   # not glibc
+        pass
+
+
+def row_blocks(times: np.ndarray, block_rows: int) -> list[tuple[int, int]]:
+    """Row ranges that never split a timestamp. A timestamp spanning two blocks
+    would be written out of order, and the readers of both tables do not sort.
+    `times` has to be non-decreasing, or the walk does not advance."""
+    edges, start, total = [], 0, len(times)
+    while start < total:
+        stop = min(start + block_rows, total)
+        if stop < total:
+            stop = int(np.searchsorted(times, times[stop - 1], side="right"))
+        edges.append((start, stop))
+        start = stop
+    return edges
+
 
 def grid(start: pd.Timestamp, stop: pd.Timestamp) -> pd.DatetimeIndex:
     """Left edges of every whole slot in [start, stop]: slot `t` is
@@ -898,14 +932,53 @@ def deepest_lookback_days() -> int:
     return max(7 * weeks, SLOT_CLIMATOLOGY_DAYS, max(DAILY_LAGS))
 
 
-def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
-    """Targets, target-time calendar, and target-relative lags, per horizon."""
-    keyed = table.set_index(["subject", "time"])["home_frac"]
+HORIZON_COLUMNS_FIXED = 23
 
-    wide = table.pivot_table(index="time", columns="subject", values="home_frac",
-                             aggfunc="first")
 
-    new: dict[str, np.ndarray] = {}
+def horizon_column_count() -> int:
+    """How many columns one horizon mints. The cross-subject block is one per
+    subject, so it moves with the household."""
+    return HORIZON_COLUMNS_FIXED + len(config.all_slugs())
+
+
+class _Columns:
+    """The horizon columns, written straight into one block in emission order.
+
+    The array is (columns, rows) because that is how pandas stores a float
+    block: the transpose wraps without copying and pyarrow can then alias the
+    buffers instead of converting them.
+    """
+
+    def __init__(self, width: int, rows: int) -> None:
+        self._array = np.empty((width, rows))
+        self._names: list[str] = []
+
+    def __setitem__(self, name: str, values: np.ndarray) -> None:
+        self._array[len(self._names)] = values
+        self._names.append(name)
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+    def frame(self, index) -> pd.DataFrame:
+        filled = self._array[:len(self._names)]
+        return pd.DataFrame(filled.T, columns=self._names, index=index, copy=False)
+
+
+def _add_horizon_columns(table: pd.DataFrame, keyed: pd.Series | None = None,
+                         pivot: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Targets, target-time calendar, and target-relative lags, per horizon.
+
+    `keyed` and `pivot` are the only lookups that reach outside the rows handed
+    in, so a caller holding the whole history can pass them and melt a block.
+    """
+    if keyed is None:
+        keyed = table.set_index(["subject", "time"])["home_frac"]
+
+    wide = pivot if pivot is not None else table.pivot_table(
+        index="time", columns="subject", values="home_frac", aggfunc="first")
+
+    new = _Columns(horizon_column_count() * len(config.HORIZONS_H), len(table))
 
     # Defensive: a caller may add the BUILT_NOT_SHIPPED placeholders after this.
     alarm = (table["next_alarm_h"].to_numpy(dtype=float)
@@ -986,7 +1059,11 @@ def _add_horizon_columns(table: pd.DataFrame) -> pd.DataFrame:
                 new[cross_subject_lag_column(horizon, slug, min(lags))] = np.where(
                     is_self == slug, np.nan, values)
 
-    return pd.concat([table, pd.DataFrame(new, index=table.index)], axis=1)
+    # The emission loop and the count have to agree, or the block is mis-sized.
+    expected = horizon_column_count() * len(config.HORIZONS_H)
+    if len(new) != expected:
+        raise RuntimeError(f"{len(new)} horizon columns, expected {expected}")
+    return pd.concat([table, new.frame(table.index)], axis=1)
 
 
 def _add_cross_subject(table: pd.DataFrame) -> pd.DataFrame:
@@ -1051,9 +1128,11 @@ def usable_history_days(source, stop: str | None = None) -> float:
     return float(np.count_nonzero(valid)) / config.SLOTS_PER_DAY
 
 
-def build(source, start: str | None = None, stop: str | None = None) -> pd.DataFrame:
-    """Build the modelling table. Full rebuild every time: an incremental
-    version would be a correctness risk for no measurable saving."""
+def _build_origins(source, start: str | None = None,
+                   stop: str | None = None) -> pd.DataFrame:
+    """The origin table: one row per subject and slot, before any horizon
+    column. Sorted here, because the horizon step keeps whatever order it is
+    handed."""
     config.require()
     start = start or history_start(source)
     start_ts = pd.Timestamp(start)
@@ -1089,7 +1168,6 @@ def build(source, start: str | None = None, stop: str | None = None) -> pd.DataF
     table["state_now"] = table["home_frac"]
 
     table = _add_cross_subject(table)
-    table = _add_horizon_columns(table)
 
     # Placeholders for the companion-app sensors nothing computes yet;
     # `next_alarm_h` only lands here for a subject with no alarm entity.
@@ -1097,7 +1175,75 @@ def build(source, start: str | None = None, stop: str | None = None) -> pd.DataF
         if column not in table.columns:
             table[column] = np.nan
 
-    return table.sort_values(["subject", "time"]).reset_index(drop=True)
+    return table.sort_values(["time", "subject"]).reset_index(drop=True)
+
+
+def build(source, start: str | None = None, stop: str | None = None) -> pd.DataFrame:
+    """Build the modelling table. Full rebuild every time: an incremental
+    version would be a correctness risk for no measurable saving."""
+    return _add_horizon_columns(_build_origins(source, start, stop))
+
+
+# Sized in bytes because the column count per horizon follows the household.
+BUILD_BLOCK_BYTES = 32_000_000
+
+
+def _phase(phases, name):
+    """`phases(name)` when a caller is timing, and nothing when it is not."""
+    return contextlib.nullcontext() if phases is None else phases(name)
+
+
+def build_to(source, path: Path, start: str | None = None, stop: str | None = None,
+             target_bytes: int = BUILD_BLOCK_BYTES, phases=None) -> dict:
+    """Build the modelling table to `path`, a block of origin rows at a time,
+    and return what it holds. The whole table never exists in this process."""
+    with _phase(phases, "features origins"):
+        origins = _build_origins(source, start, stop)
+    rows, labelled = len(origins), int(origins["home_frac"].notna().sum())
+
+    keyed = origins.set_index(["subject", "time"])["home_frac"]
+    pivot = origins.pivot_table(index="time", columns="subject",
+                                values="home_frac", aggfunc="first")
+    width = horizon_column_count() * len(config.HORIZONS_H)
+    block_rows = max(1, target_bytes // (8 * width))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Renamed into place at the end, so a failure mid-loop leaves the last good table.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    writer = schema = None
+    groups = columns = 0
+    try:
+        with _phase(phases, "features horizons"):
+            for start_row, stop_row in row_blocks(origins["time"].to_numpy(),
+                                                  block_rows):
+                block = _add_horizon_columns(origins.iloc[start_row:stop_row],
+                                             keyed, pivot)
+                table = pa.Table.from_pandas(block, schema=schema,
+                                             preserve_index=False)
+                if writer is None:
+                    schema, columns = table.schema, len(block.columns)
+                    writer = pq.ParquetWriter(
+                        tmp, schema,
+                        sorting_columns=pq.SortingColumn.from_ordering(
+                            schema, [("time", "ascending"), ("subject", "ascending")]))
+                with _phase(phases, "features write"):
+                    writer.write_table(table)
+                groups += 1
+                _log.debug("feature block %d: %d rows", groups, len(block))
+                # Dropped before the next block refills a buffer pyarrow aliases.
+                del block, table
+                release_arrow()
+    except BaseException:
+        if writer is not None:
+            writer.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    if writer is None:
+        raise ValueError(f"no rows to build from {start}..{stop}")
+    writer.close()
+    tmp.replace(path)
+    return {"rows": rows, "labelled_rows": labelled, "columns": columns,
+            "row_groups": groups}
 
 
 def write(table: pd.DataFrame, path: Path) -> Path:
@@ -1118,15 +1264,17 @@ def main(argv: list[str] | None = None) -> None:
     _, _, source, _ = runtime.bootstrap()
 
     began = dt.datetime.now()
-    table = build(source, args.start, args.stop)
-    write(table, args.out)
+    built = build_to(source, args.out, args.start, args.stop)
 
-    labelled = table["home_frac"].notna().sum()
-    print(f"{len(table)} rows, {labelled} with a label "
-          f"({100 * labelled / max(len(table), 1):.1f}% coverage), "
-          f"{len(table.columns)} columns -> {args.out} "
+    rows, labelled = built["rows"], built["labelled_rows"]
+    print(f"{rows} rows, {labelled} with a label "
+          f"({100 * labelled / max(rows, 1):.1f}% coverage), "
+          f"{built['columns']} columns in {built['row_groups']} blocks "
+          f"-> {args.out} "
           f"in {(dt.datetime.now() - began).total_seconds():.1f}s")
-    for subject, part in table.groupby("subject"):
+    # Two columns read back, because holding the whole table is what build_to avoids.
+    summary = pd.read_parquet(args.out, columns=["subject", "home_frac"])
+    for subject, part in summary.groupby("subject"):
         print(f"  {subject:<10} mean home_frac {part['home_frac'].mean():.3f}  "
               f"P(home>=0.5) {(part['home_frac'] >= 0.5).mean():.3f}")
 

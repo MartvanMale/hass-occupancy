@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Fixed
+
+- Training no longer runs the Home Assistant host out of memory. If there is not enough memory to train a model, the add-on log says so and forecasting continues with the models already in use.
+- A training run that fails now says why in the add-on log.
+- A training run that fails is retried the next day instead of at the next weekly run. If you restart the add-on before the retry, the retry is dropped and training waits for its next scheduled run.
+
 ## 0.7.0 - 2026-10-24
 
 ### Added
