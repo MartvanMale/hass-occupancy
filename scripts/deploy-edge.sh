@@ -34,6 +34,8 @@ fi
 
 sed -i -E "s/^version: \"([^\"]+)\"/version: \"\1.${sha}${dirty}\"/" "$stamped/config.yaml"
 grep '^version:' "$stamped/config.yaml"
+version=$(sed -nE 's/^version: "([^"]+)"/\1/p' "$stamped/config.yaml")
+[[ -n "$version" ]] || { echo "no version line found in config.yaml. Check its version: field, then deploy again." >&2; exit 1; }
 
 # dist is NOT excluded: it is the artifact this deploy ships, and the box cannot
 # build it.
@@ -46,9 +48,17 @@ rsync -a --delete \
 # `update`, not `rebuild`: rebuild does NOT reload apparmor.txt, so it is only
 # the fallback for redeploying one commit. The test reads `"installed": false`,
 # not the exit status, which is 0 once the store has seen the directory.
+# The CLI times out before a slow reload ends, so the loop waits until the store
+# shows the stamp; on a same-commit redeploy it already does.
 ssh "$HOST" "
     set -e
-    ha store reload
+    ha store reload || true
+    n=0
+    until ha addons info $SLUG --raw-json | grep -q '\"version_latest\": *\"$version\"'; do
+        n=\$((n+1))
+        if [ \$n -ge 60 ]; then echo 'store reload did not pick up $version within 120 s. Run ha store reload on the box, then deploy again.' >&2; exit 1; fi
+        sleep 2
+    done
     if [ \"\$(ha addons info $SLUG --raw-json | grep -o '\"installed\": *false')\" ]; then
         ha addons install $SLUG
         echo 'installed but NOT started -- start it once /data is in place'

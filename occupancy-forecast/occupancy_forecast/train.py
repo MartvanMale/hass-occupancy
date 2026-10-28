@@ -4,7 +4,7 @@ Direct multi-horizon, never recursive: the target is always the real slot at
 `t + h`. A dedicated fit per horizon and one pooled fit over all 48 are both
 trained on the same folds; `choose` picks per horizon and the crossover is
 measured, not hardcoded. The independent unit is the person-day, not the
-melted row -- see MIN_SAMPLES_LEAF.
+melted row -- see `min_samples_leaf`.
 """
 
 from __future__ import annotations
@@ -24,8 +24,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 from joblib import Parallel, delayed
+from joblib.externals.loky import get_reusable_executor
 from joblib.externals.loky.process_executor import TerminatedWorkerError
 import sklearn
 from sklearn.compose import ColumnTransformer
@@ -51,12 +53,15 @@ FEW_FOLDS_SKILL_PCT = 15.0
 
 
 class Phases:
-    """Elapsed seconds per named stretch of a train. An accumulator, not a log
-    line per phase -- a phase that runs 48 times wants to be one total;
-    `.line()` is logged once."""
+    """Elapsed seconds and peak memory per named stretch of a train. An
+    accumulator, not a log line per phase. A phase that runs 48 times is one
+    total, and `.line()` is logged once. `peaks` only ever rise, so a phase
+    that needs less than an earlier one reads as that earlier peak. Read them
+    beside `rss()`."""
 
     def __init__(self) -> None:
         self.seconds: dict[str, float] = {}
+        self.peaks: dict[str, int] = {}
 
     @contextlib.contextmanager
     def __call__(self, name: str):
@@ -66,13 +71,27 @@ class Phases:
         finally:
             self.seconds[name] = (self.seconds.get(name, 0.0)
                                   + time.perf_counter() - started)
+            self.note_peak(name, peak_rss())
+
+    def note_peak(self, name: str, value: int | None) -> None:
+        """Keep the largest reading under `name`, including one a worker
+        reports, which the context manager cannot see."""
+        if value is not None:
+            self.peaks[name] = max(self.peaks.get(name, 0), value)
 
     def as_dict(self) -> dict:
         return {name: round(value, 1) for name, value in self.seconds.items()}
 
+    def peaks_as_dict(self) -> dict:
+        return {name: round(value / 1e6, 1) for name, value in self.peaks.items()}
+
     def line(self) -> str:
         return ", ".join(f"{name} {value:.1f}s"
                          for name, value in self.as_dict().items())
+
+    def peak_line(self) -> str:
+        return ", ".join(f"{name} {value:.0f}MB"
+                         for name, value in self.peaks_as_dict().items())
 
 
 def fold_record_allows(beat: int, n_folds: int) -> bool:
@@ -108,23 +127,20 @@ CATEGORICAL_FEATURES = ["subject"]
 TRAIN_HORIZONS_PER_ORIGIN = 12
 TRAIN_SAMPLE_RATE = TRAIN_HORIZONS_PER_ORIGIN / len(config.HORIZONS_H)
 
-# The leaf floor scaled to what a fit holds: after the melt and the subsample
-# an origin carries TRAIN_HORIZONS_PER_ORIGIN rows, so this keeps the floor
-# meaning "about fifty origins". Leaves and iterations go the other way,
-# because one model now does what 48 did.
-MIN_SAMPLES_LEAF = 100
+# The leaf floor in origins, not rows: an origin carries as many rows as the
+# sample rate leaves it, so the floor has to follow the rate to keep meaning the
+# same number of person-days. Leaves and iterations go the other way, because
+# one model now does what 48 did.
+ORIGINS_PER_LEAF = 100 / TRAIN_HORIZONS_PER_ORIGIN
 MAX_LEAF_NODES = 63
 
 
-def subsample(frame: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
-    """A quarter of the rows, deterministically. See TRAIN_HORIZONS_PER_ORIGIN."""
-    if TRAIN_SAMPLE_RATE >= 1.0 or frame.empty:
-        return frame
-    rng = np.random.default_rng(seed)
-    keep = rng.random(len(frame)) < TRAIN_SAMPLE_RATE
-    if not keep.any():
-        return frame
-    return frame.iloc[np.flatnonzero(keep)]
+def min_samples_leaf(rate: float = None) -> int:
+    """Rows a leaf must hold at `rate`. It is `ORIGINS_PER_LEAF` person-days
+    whatever number of horizons an origin contributes."""
+    rate = TRAIN_SAMPLE_RATE if rate is None else rate
+    per_origin = rate * len(config.HORIZONS_H)
+    return max(20, round(ORIGINS_PER_LEAF * per_origin))
 
 
 def origin_features() -> list[str]:
@@ -288,7 +304,7 @@ def _dedicated_estimator() -> Pipeline:
     ])
 
 
-def _pooled_estimator() -> Pipeline:
+def _pooled_estimator(rate: float = TRAIN_SAMPLE_RATE) -> Pipeline:
     """Every horizon at once, with `horizon_h` a feature. Bigger than its
     dedicated sibling because one model holds the horizon axis too; tree
     building dominates the fit, not row count."""
@@ -297,7 +313,7 @@ def _pooled_estimator() -> Pipeline:
         ("unobserved", estimators.UnobservedToConstant()),
         ("model", HistGradientBoostingRegressor(
             max_iter=300, learning_rate=0.05, max_leaf_nodes=MAX_LEAF_NODES,
-            min_samples_leaf=MIN_SAMPLES_LEAF, l2_regularization=1.0,
+            min_samples_leaf=min_samples_leaf(rate), l2_regularization=1.0,
             random_state=0,
         )),
     ])
@@ -351,7 +367,45 @@ class Metrics:
     reliability: list = field(default_factory=list)
 
 
-def read_wide(path: Path, subjects: tuple[str, ...] | None = None) -> pd.DataFrame:
+def declares_time_order(path: Path) -> bool:
+    """Whether every row group was written in time then subject order. A
+    declaration by the writer, not a guess from the statistics: pyarrow's
+    default row group holds a million rows, so a file with one group looks
+    ordered whatever order it is in."""
+    try:
+        names = pq.read_schema(path).names
+        wanted = (names.index("time"), names.index("subject"))
+        meta = pq.ParquetFile(path).metadata
+    except (OSError, ValueError, KeyError):
+        return False
+    if not meta.num_row_groups:
+        return False
+    for group in range(meta.num_row_groups):
+        declared = meta.row_group(group).sorting_columns
+        if tuple(c.column_index for c in declared) != wanted:
+            return False
+        if any(c.descending for c in declared):
+            return False
+    return True
+
+
+def train_columns(horizons=None) -> list[str]:
+    """Every column a train reads off the wide table outside the melt: the
+    origin block, each horizon's target, and the one lag the baseline ladder
+    and the shrink fit share. The rest belong to the melt, which reads them a
+    row group at a time."""
+    horizons = config.HORIZONS_H if horizons is None else tuple(horizons)
+    wanted = {"time", *CATEGORICAL_FEATURES, *origin_features()}
+    for horizon in horizons:
+        wanted.add(f"y_{horizon}h")
+        lags = features.safe_daily_lags(horizon)
+        if lags:
+            wanted.add(f"tgt{horizon}h_lag{min(lags)}d")
+    return sorted(wanted)
+
+
+def read_wide(path: Path, subjects: tuple[str, ...] | None = None,
+              columns: list[str] | None = None) -> pd.DataFrame:
     """The built table, checked against the feature list first so a stale
     table gets the explanation rather than a pyarrow error. Read ONCE per train
     and passed around -- if you add a third caller, hand it the frame."""
@@ -365,10 +419,15 @@ def read_wide(path: Path, subjects: tuple[str, ...] | None = None) -> pd.DataFra
             f"The feature list has moved ahead of the table -- rebuild it with "
             f"`python -m occupancy_forecast.features --out {path}`.")
 
-    table = pd.read_parquet(path)
+    ordered = declares_time_order(path)
+    table = pd.read_parquet(path, columns=columns)
+    features.release_arrow()
     if subjects is not None:
         table = table[table["subject"].isin(subjects)]
-    return table.sort_values("time").reset_index(drop=True)
+    # Sorting a table already written in order costs a second copy of it.
+    if not ordered:
+        table = table.sort_values("time")
+    return table.reset_index(drop=True)
 
 
 def to_long(wide: pd.DataFrame, subjects: tuple[str, ...] | None = None,
@@ -380,6 +439,233 @@ def to_long(wide: pd.DataFrame, subjects: tuple[str, ...] | None = None,
             .dropna(subset=[*required, features.TARGET_COLUMN])
             .sort_values(["time", features.HORIZON_COLUMN])
             .reset_index(drop=True))
+
+
+# Origin rows melted at a time, so the long table is never held whole.
+MELT_BLOCK_ROWS = 2048
+
+LONG_NAME = "_pooled_long.parquet"
+
+
+def pooled_columns() -> list[str]:
+    """Every column a pooled fit or fold reads, and the only ones the long
+    table carries. `state_now` and `subject` arrive inside `base_features`."""
+    return sorted({*base_features(), "time", features.TARGET_COLUMN})
+
+
+def _melt_block(wide: pd.DataFrame, horizons) -> pd.DataFrame:
+    """A slice of the wide table, melted and filtered exactly as `to_long`
+    does. All three sort keys are named, so the order `load_long` trusts does
+    not depend on how `long_frame` happens to sort."""
+    frame = features.long_frame(wide, horizons=horizons)
+    required = [c for c in base_features() if c not in nan_allowed()]
+    return (frame
+            .dropna(subset=[*required, features.TARGET_COLUMN])
+            .sort_values(["time", features.HORIZON_COLUMN, "subject"])
+            .reset_index(drop=True))
+
+
+def _melt_blocks(wide: pd.DataFrame, block_rows: int) -> list[tuple[int, int]]:
+    """Row ranges that never split a timestamp, so the blocks written in order
+    leave the file sorted and `load_long` needs no sort of its own."""
+    return features.row_blocks(wide["time"].to_numpy(), block_rows)
+
+
+def _in_time_order(wide: pd.DataFrame) -> pd.DataFrame:
+    """`_melt_blocks` walks the timestamps with `searchsorted`, which on an
+    unsorted table returns an edge that does not advance and never finishes."""
+    if not wide.empty and not wide["time"].is_monotonic_increasing:
+        raise ValueError(
+            "the feature table is not in time order, so it cannot be melted a "
+            "block at a time. Read it with `read_wide`, which sorts it.")
+    return wide
+
+
+def wide_blocks(source: Path | pd.DataFrame, block_rows: int):
+    """Slices of the wide table to melt, a row group at a time from a path or
+    straight off a frame. A row group is sub-blocked too, because a file
+    written before the blocks existed holds every row in one."""
+    if isinstance(source, (str, Path)) and declares_time_order(source):
+        parquet = pq.ParquetFile(source)
+        for group in range(parquet.metadata.num_row_groups):
+            wide = parquet.read_row_group(group).to_pandas()
+            for start, stop in _melt_blocks(wide, block_rows):
+                yield wide.iloc[start:stop]
+            del wide
+            features.release_arrow()
+        return
+    # A file that does not claim its order has to be read and sorted whole,
+    # which is what every caller did before the blocks existed.
+    wide = _in_time_order(read_wide(source) if isinstance(source, (str, Path))
+                          else source)
+    for start, stop in _melt_blocks(wide, block_rows):
+        yield wide.iloc[start:stop]
+
+
+def long_bytes(source: Path | pd.DataFrame, horizons=None,
+               block_rows: int = MELT_BLOCK_ROWS) -> int:
+    """What the melted table would take, from one horizon of one block melted
+    for real and scaled up. The dtypes are exact and the row count is not,
+    since each horizon drops its own NaN tail."""
+    horizons = config.HORIZONS_H if horizons is None else tuple(horizons)
+    if not horizons:
+        return 0
+    total = (pq.ParquetFile(source).metadata.num_rows
+             if isinstance(source, (str, Path)) else len(source))
+    if not total:
+        return 0
+    sample = next(iter(wide_blocks(source, block_rows)), None)
+    if sample is None or sample.empty:
+        return 0
+    per_row = frame_bytes(_melt_block(sample, horizons[:1])) / len(sample)
+    return int(per_row * total * len(horizons))
+
+
+def write_long(source: Path | pd.DataFrame, path: Path, horizons=None,
+               block_rows: int = MELT_BLOCK_ROWS) -> tuple[int, int]:
+    """Melt the wide table to `path` a block of origin rows at a time, and
+    return its rows and bytes. Given a path, the wide table is read a row group
+    at a time, so neither table ever exists whole in this process."""
+    horizons = config.HORIZONS_H if horizons is None else tuple(horizons)
+    columns = pooled_columns()
+    writer, schema, rows, size = None, None, 0, 0
+    try:
+        for slice_ in wide_blocks(source, block_rows):
+            block = _melt_block(slice_, horizons)
+            if block.empty:
+                continue
+            if writer is None:
+                absent = [c for c in columns if c not in block.columns]
+                if absent:
+                    raise ValueError(
+                        f"the melted table is missing {len(absent)} of the "
+                        f"{len(columns)} pooled features: {absent[:5]}"
+                        f"{' ...' if len(absent) > 5 else ''}. Rebuild the "
+                        f"feature table with `python -m occupancy_forecast"
+                        f".features --out {config.FEATURES_PATH}`.")
+            block = block[columns]
+            rows += len(block)
+            size += frame_bytes(block)
+            # preserve_index=False, or the post-dropna index is written as a
+            # column and the first block's schema carries it for ever.
+            table = pa.Table.from_pandas(block, schema=schema,
+                                         preserve_index=False)
+            if writer is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(path, schema)
+            writer.write_table(table)
+            del block, table
+            features.release_arrow()
+    finally:
+        if writer is not None:
+            writer.close()
+    if rows == 0:
+        raise ValueError("no usable rows in the feature table after the filter")
+    return rows, size
+
+
+def load_long(path: Path) -> pd.DataFrame:
+    """The pooled family's frame, read in a worker. `write_long` already left
+    it sorted, so there is no sort here to hold a second copy of it."""
+    return pd.read_parquet(path, columns=pooled_columns())
+
+
+_GOLDEN = np.uint64(0x9E3779B97F4A7C15)
+_MIX_A = np.uint64(0xBF58476D1CE4E5B9)
+_MIX_B = np.uint64(0x94D049BB133111EB)
+
+
+def _mix64(value: np.ndarray) -> np.ndarray:
+    """splitmix64's finaliser. A bijection with full avalanche, so a key's
+    hash is uniform and the keep decision below is Bernoulli per row."""
+    with np.errstate(over="ignore"):
+        value = value.astype(np.uint64, copy=True)
+        value ^= value >> np.uint64(30)
+        value *= _MIX_A
+        value ^= value >> np.uint64(27)
+        value *= _MIX_B
+        value ^= value >> np.uint64(31)
+    return value
+
+
+def sampled_rows(frame: pd.DataFrame, rate: float, seed: int) -> np.ndarray:
+    """Which rows a fit at `rate` sees, as a pure function of each row's key.
+    Order-independent on purpose: a reader can decide a row group at a time and
+    get the set one pass over the whole table would have got.
+
+    The subject's code comes from `config.all_slugs()`, not from the data, so
+    the draw does not move when a file is written in another order.
+    """
+    if rate >= 1.0 or frame.empty:
+        return np.ones(len(frame), dtype=bool)
+    slugs = list(config.all_slugs())
+    codes = pd.Categorical(frame["subject"], categories=slugs).codes
+    with np.errstate(over="ignore"):
+        keyed = _mix64(frame["time"].to_numpy("datetime64[ns]").view("int64"))
+        keyed = _mix64(keyed + _GOLDEN * codes.astype(np.uint64))
+        keyed = _mix64(keyed + _MIX_A
+                       * frame[features.HORIZON_COLUMN].to_numpy().astype(np.uint64))
+        keyed = _mix64(keyed + np.uint64(seed))
+    # Top 53 bits as a fraction: the mantissa a float64 can hold exactly.
+    return (keyed >> np.uint64(11)).astype(np.float64) / 9007199254740992.0 < rate
+
+
+def _sample_masks(parquet: pq.ParquetFile, rate: float, seed: int,
+                  window: tuple | None) -> tuple[list, int]:
+    """Which rows each row group contributes, from the three key columns alone.
+    A first pass over 3 of 48 columns is what lets the second pass fill an
+    output sized exactly once."""
+    keys = ["subject", "time", features.HORIZON_COLUMN]
+    masks, total = [], 0
+    for group in range(parquet.metadata.num_row_groups):
+        block = parquet.read_row_group(group, columns=keys).to_pandas()
+        mask = sampled_rows(block, rate, seed)
+        if window is not None:
+            times = block["time"]
+            mask = mask | ((times >= window[0]) & (times < window[1])).to_numpy()
+        masks.append(mask)
+        total += int(mask.sum())
+        del block
+        features.release_arrow()
+    return masks, total
+
+
+def load_long_sampled(path: Path, rate: float, seed: int,
+                      window: tuple | None = None) -> pd.DataFrame:
+    """The pooled frame with only the rows a fit needs, read a row group at a
+    time. `window` keeps every row a fold scores on, which is never sampled:
+    the gate sees all forty-eight horizons.
+
+    Filled into one preallocated block, which holds the sample once however
+    many row groups it came from.
+    """
+    columns = pooled_columns()
+    parquet = pq.ParquetFile(path)
+    masks, total = _sample_masks(parquet, rate, seed, window)
+
+    numeric = [c for c in columns if c not in ("subject", "time")]
+    values = np.empty((len(numeric), total))
+    times = np.empty(total, dtype="datetime64[us]")
+    subjects = np.empty(total, dtype=object)
+    at = 0
+    for group, mask in enumerate(masks):
+        taken = int(mask.sum())
+        if not taken:
+            continue
+        block = parquet.read_row_group(group, columns=columns).to_pandas()
+        for index, name in enumerate(numeric):
+            values[index, at:at + taken] = block[name].to_numpy()[mask]
+        times[at:at + taken] = block["time"].to_numpy("datetime64[us]")[mask]
+        subjects[at:at + taken] = block["subject"].to_numpy()[mask]
+        at += taken
+        del block
+        features.release_arrow()
+
+    # Column order is not part of the contract: every reader selects by name.
+    out = pd.DataFrame(values.T, columns=numeric, copy=False)
+    out["time"] = pd.to_datetime(times, utc=True)
+    out["subject"] = subjects
+    return out
 
 
 def fit_pooled(estimator: Pipeline, frame: pd.DataFrame) -> Pipeline:
@@ -557,13 +843,20 @@ def shared_windows(path: Path | pd.DataFrame) -> tuple[list, dict]:
     return [(f.test_start, f.test_stop) for f in folds], geometry
 
 
-def _one_ladder(frame: pd.DataFrame, horizon: int, geometry: dict, windows: list,
+def ladder_columns(horizon: int) -> list[str]:
+    """Every column one rung of the ladder reads."""
+    return sorted({*baseline.columns_for(horizon), *required_origin_columns()})
+
+
+def _one_ladder(path: Path, horizon: int, geometry: dict, windows: list,
                 settings):
     """One horizon's baseline ladder in a worker. `config.configure` first:
     the climatology rungs group on the LOCAL calendar, and an unconfigured
-    worker scores them in UTC."""
+    worker scores them in UTC. Reads its own columns, so the task carries a
+    path rather than a slice of the wide table."""
     if settings is not None:
         config.configure(settings)
+    frame = pd.read_parquet(path, columns=ladder_columns(horizon))
     started = time.perf_counter()
     rungs = baseline.run(frame, horizon, geometry=geometry, windows=windows,
                          required=required_origin_columns())
@@ -596,8 +889,8 @@ def train_dedicated(path: Path, horizon: int, windows: list) -> tuple[Pipeline, 
             pd.concat(collected, ignore_index=True), len(frame))
 
 
-def _pooled_fold(frame: pd.DataFrame, index: int, start, stop, settings,
-                 extras: tuple[str, ...] = ()):
+def _pooled_fold(path: Path, index: int, start, stop, settings,
+                 extras: tuple[str, ...] = (), rate: float = TRAIN_SAMPLE_RATE):
     """One pooled fold in a worker.
 
     `config.configure` FIRST and it is not optional: a fresh interpreter has
@@ -611,6 +904,9 @@ def _pooled_fold(frame: pd.DataFrame, index: int, start, stop, settings,
     # changes what a fit reads has to travel as an argument, or two probe arms
     # come back byte-identical and look like an honest null.
     features.SHIPPED_EXTRAS = extras
+    # Loaded after `SHIPPED_EXTRAS`, which decides which columns it reads, and
+    # sampled while reading so the whole table is never held.
+    frame = load_long_sampled(path, rate, index, window=(start, stop))
     # The embargo is applied PER ROW: one scalar would cover the worst case and
     # throw 47 hours of legal training data away from every short-horizon row.
     times = frame["time"]
@@ -618,63 +914,107 @@ def _pooled_fold(frame: pd.DataFrame, index: int, start, stop, settings,
     train_idx = np.flatnonzero((targets < start).to_numpy())
     test_idx = np.flatnonzero(((times >= start) & (times < stop)).to_numpy())
     if len(train_idx) == 0 or len(test_idx) == 0:
-        return None
-    estimator = fit_pooled(_pooled_estimator(), subsample(frame.iloc[train_idx], index))
+        return None, peak_rss()
+    estimator = fit_pooled(_pooled_estimator(rate), frame.iloc[train_idx])
     test = frame.iloc[test_idx]
     part = test[["subject", "time", features.HORIZON_COLUMN,
                  features.TARGET_COLUMN]].copy()
     part["p"] = predict_pooled(estimator, test)
     part["fold"] = index
-    return part
+    return part, peak_rss()
 
 
-def _pooled_final(frame: pd.DataFrame, seed: int, settings,
-                  extras: tuple[str, ...] = ()) -> Pipeline:
+def _pooled_final(path: Path, seed: int, settings,
+                  extras: tuple[str, ...] = (),
+                  rate: float = TRAIN_SAMPLE_RATE) -> tuple[Pipeline, int | None]:
     """The shipped pooled model, in a worker, on the whole history at the same
-    subsample rate the folds used. The one place a fitted Pipeline crosses the
+    sample rate the folds used. The one place a fitted Pipeline crosses the
     process boundary -- it is the largest fit and hiding it in the fan-out
     keeps the workers busy."""
     if settings is not None:
         config.configure(settings)
     features.SHIPPED_EXTRAS = extras
-    return fit_pooled(_pooled_estimator(), subsample(frame, seed=seed))
+    # Sampled while reading: this fit sees every origin, and holding the whole
+    # table to then drop most of it is what the box cannot afford.
+    sample = load_long_sampled(path, rate, seed)
+    return fit_pooled(_pooled_estimator(rate), sample), peak_rss()
 
 
-def train_pooled(path: Path | pd.DataFrame, windows: list, horizons=None,
+def _pooled_refusal(long_bytes: float) -> str:
+    return (f"pooled training skipped: the training table is about "
+            f"{long_bytes / 1e9:.1f} GB and there is not enough free memory to "
+            f"train on even a small part of it. Free some memory and the next "
+            f"scheduled train will try again. The previous models stay in use "
+            f"until then.")
+
+
+def train_pooled(source: Path | pd.DataFrame, windows: list, *,
+                 scratch: Path, horizons=None,
                  n_jobs: int | None = None,
                  phases: Phases | None = None) -> tuple[Pipeline, pd.DataFrame, int]:
     """One model over every horizon. Folds are farmed out longest-first with
     the final refit first in the queue -- the windows expand, so submitting in
-    order strands the most expensive task alone. Takes a path or an
-    already-read frame."""
+    order strands the most expensive task alone. Given a path, the wide table
+    is never read whole.
+
+    `scratch` holds the melted table and has no default, because /tmp is tmpfs
+    on Home Assistant OS and would put the melt back in memory.
+    """
     phases = phases if phases is not None else Phases()
     horizons = config.HORIZONS_H if horizons is None else tuple(horizons)
-    with phases("pooled melt"):
-        wide = read_wide(path) if isinstance(path, (str, Path)) else path
-        frame = to_long(wide, horizons=horizons)
-    if frame.empty:
-        raise ValueError("no usable rows in the feature table after the filter")
+    # Budgeted before the melt, because after it the memory is already spent.
+    budgeted = n_jobs is None
+    estimate = long_bytes(source, horizons) if budgeted else None
+    rate = TRAIN_SAMPLE_RATE
+    # Refused on the estimate, so a box that cannot train does not pay for the melt.
+    if budgeted and pooled_rate(estimate, len(windows)) is None:
+        raise OutOfMemory(_pooled_refusal(estimate))
+    long_path = scratch / LONG_NAME
+    try:
+        with phases("pooled melt"):
+            rows, size = write_long(source, long_path, horizons=horizons)
+        # The melt grew this process, and a worker now needs the room back.
+        features.release_heap()
+        if budgeted:
+            # Priced after the melt, which spends memory the fan-out has to fit into.
+            rate = pooled_rate(size, len(windows))
+            if rate is None:
+                raise OutOfMemory(_pooled_refusal(size))
+            n_jobs = worker_count(
+                POOLED_WORKER_FRAMES * size * worker_share(rate, len(windows)),
+                what="pooled")
+        # Both numbers, so the `POOLED_WORKER_FRAMES` estimate can be checked
+        # against a real train.
+        _log.info("pooled melt: %d rows, %.2f GB if held whole%s, fitting on "
+                  "%.0f of 48 horizons per origin", rows, size / 1e9,
+                  "" if estimate is None else f", estimated {estimate / 1e9:.2f} GB",
+                  rate * len(config.HORIZONS_H))
 
-    settings = config.SETTINGS
-    extras = features.SHIPPED_EXTRAS
-    order = range(len(windows) - 1, -1, -1)
-    with phases("pooled fits"), _worker_loss_is_fatal():
-        if n_jobs is None:
-            n_jobs = worker_count(POOLED_WORKER_FRAMES * frame_bytes(frame))
-        answers = Parallel(n_jobs=n_jobs,
-                           backend="loky")([
-            expendable(_pooled_final)(frame, len(windows), settings, extras),
-            *(expendable(_pooled_fold)(frame, index, *windows[index], settings, extras)
-              for index in order),
-        ])
-    estimator, parts = answers[0], answers[1:]
+        settings = config.SETTINGS
+        extras = features.SHIPPED_EXTRAS
+        order = range(len(windows) - 1, -1, -1)
+        with phases("pooled fits"), _worker_loss_is_fatal():
+            answers = _in_workers([
+                expendable(_pooled_final)(long_path, len(windows), settings,
+                                          extras, rate),
+                *(expendable(_pooled_fold)(long_path, index, *windows[index],
+                                           settings, extras, rate)
+                  for index in order),
+            ], n_jobs, subprocess_at_one=budgeted)
+    finally:
+        long_path.unlink(missing_ok=True)
+
+    peaks = [peak for _, peak in answers if peak is not None]
+    if peaks:
+        phases.note_peak("pooled worker", max(peaks))
+    estimator, parts = answers[0][0], [part for part, _ in answers[1:]]
     collected = [p for p in parts if p is not None]
     if not collected:
         raise ValueError("every pooled fold was empty after the per-row embargo")
 
     # Back into fold order: `per_fold` lists are read positionally elsewhere.
     collected.sort(key=lambda part: int(part["fold"].iloc[0]))
-    return estimator, pd.concat(collected, ignore_index=True), len(frame)
+    return estimator, pd.concat(collected, ignore_index=True), rows
 
 
 DEDICATED_NAME = "occupancy_{horizon}h.pkl"
@@ -702,13 +1042,18 @@ def save(estimator: Pipeline, metrics, models_dir: Path = MODELS_DIR,
     return path
 
 
-# Peak memory of one pool worker, as a multiple of the frame it is handed.
-POOLED_WORKER_FRAMES = 1.5
+# Peak memory of one pool worker, as a multiple of the frame it holds: the
+# copies taken off it, plus the tree builder's own working set.
+POOLED_WORKER_FRAMES = 5.3
 DEDICATED_WORKER_FRAMES = 1.0
+# What a worker costs before it touches data: a fresh interpreter with numpy,
+# pandas, scikit-learn and pyarrow imported.
+WORKER_BASELINE_BYTES = 250_000_000
 # The share of free memory a train plans to use; the rest stays with Home Assistant.
 MEMORY_SHARE = 0.7
 MEMINFO = Path("/proc/meminfo")
 CGROUP = Path("/sys/fs/cgroup")
+STATUS = Path("/proc/self/status")
 
 
 def available_memory() -> int | None:
@@ -728,7 +1073,69 @@ def available_memory() -> int | None:
     return free
 
 
-def worker_count(per_worker: float = 0) -> int:
+def peak_rss() -> int | None:
+    """This process's high-water resident set, in bytes. Monotonic, so a
+    reading taken at the end of a phase names the phase that cost the memory."""
+    try:
+        lines = STATUS.read_text().splitlines()
+        return next(int(l.split()[1]) * 1024 for l in lines if l.startswith("VmHWM:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+
+
+def rss() -> int | None:
+    """This process's resident set right now. Read beside `peak_rss`, because a
+    high-water mark alone cannot say how much a phase gave back."""
+    try:
+        lines = STATUS.read_text().splitlines()
+        return next(int(l.split()[1]) * 1024 for l in lines if l.startswith("VmRSS:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+
+
+def swap_used() -> int | None:
+    """Bytes of swap in use. Never planned against, but it says whether
+    MemAvailable can be believed."""
+    try:
+        lines = MEMINFO.read_text().splitlines()
+        fields = {l.split()[0]: int(l.split()[1]) * 1024 for l in lines if ":" in l}
+        return max(0, fields["SwapTotal:"] - fields["SwapFree:"])
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+# Horizons an origin contributes to a pooled fit, from the full rate down. A
+# tight box trains on fewer rather than not at all.
+HORIZONS_PER_ORIGIN_RUNGS = (TRAIN_HORIZONS_PER_ORIGIN, 6, 3, 2, 1)
+
+
+def worker_share(rate: float, n_folds: int) -> float:
+    """The share of the melted table one pooled task holds: its sample, plus
+    the fold window it scores, which is never sampled."""
+    return min(1.0, rate + (1.0 / n_folds if n_folds else 0.0))
+
+
+def pooled_bytes(long_bytes: float, rate: float, n_folds: int) -> float:
+    """Peak memory of one pooled task, interpreter included."""
+    return (POOLED_WORKER_FRAMES * long_bytes * worker_share(rate, n_folds)
+            + WORKER_BASELINE_BYTES)
+
+
+def pooled_rate(long_bytes: float, n_folds: int) -> float | None:
+    """The highest sample rate one pooled worker can afford, or None when even
+    the smallest sample does not fit. Priced through `pooled_bytes`, which is
+    what `worker_count` is then given."""
+    free = available_memory()
+    if free is None:
+        return TRAIN_SAMPLE_RATE
+    for per_origin in HORIZONS_PER_ORIGIN_RUNGS:
+        rate = per_origin / len(config.HORIZONS_H)
+        if pooled_bytes(long_bytes, rate, n_folds) <= free * MEMORY_SHARE:
+            return rate
+    return None
+
+
+def worker_count(per_worker: float = 0, what: str = "") -> int:
     """Cores less one, so Home Assistant keeps a core while a background job
     runs, and fewer when `per_worker` bytes each would not fit in free memory;
     none fitting raises rather than running the train inside the server.
@@ -742,13 +1149,21 @@ def worker_count(per_worker: float = 0) -> int:
     free = available_memory() if per_worker > 0 else None
     if free is None:
         return ceiling
-    workers = min(ceiling, int(free * MEMORY_SHARE // per_worker))
+    each = per_worker + WORKER_BASELINE_BYTES
+    workers = min(ceiling, int(free * MEMORY_SHARE // each))
+    # Named, so a refusal says which fan-out could not fit.
+    named = f"{what} " if what else ""
     if workers < 1:
         raise OutOfMemory(
-            f"training skipped: it needs about {per_worker / 1e9:.1f} GB and "
-            f"{free / 1e9:.1f} GB is free. The previous models stay in use.")
-    _log.info("training with %d of %d worker(s): %.1f GB free, about %.1f GB each",
-              workers, ceiling, free / 1e9, per_worker / 1e9)
+            f"{named}training skipped: it needs about {each / 1e9:.1f} GB for "
+            f"one worker and only {free / 1e9:.1f} GB is free. Free some memory "
+            f"and the next scheduled train will try again. The previous models "
+            f"stay in use until then.")
+    swap = swap_used()
+    _log.info("%straining with %d of %d worker(s): %.1f GB free%s, %.1f GB each",
+              named, workers, ceiling, free / 1e9,
+              "" if not swap else f", {swap / 1e9:.1f} GB swap in use",
+              each / 1e9)
     return workers
 
 
@@ -792,6 +1207,31 @@ def expendable(task):
     return lambda *args, **kwargs: delayed(_as_expendable)(parent, task, *args, **kwargs)
 
 
+def _in_workers(tasks: list, n_jobs: int, subprocess_at_one: bool = False) -> list:
+    """Run `expendable` tasks and return their answers in order. With
+    `subprocess_at_one` a lone worker still gets its own process, because
+    `Parallel(n_jobs=1)` runs the task in the server and the pooled fit is the
+    one that must never be there."""
+    if n_jobs == 1 and subprocess_at_one:
+        # `delayed` hands back a plain (function, args, kwargs) triple, so the
+        # expendable wrapper survives the switch away from Parallel.
+        executor = get_reusable_executor(max_workers=1)
+        try:
+            futures = [executor.submit(fn, *args, **kwargs)
+                       for fn, args, kwargs in tasks]
+            answers = [future.result() for future in futures]
+        except BaseException:
+            # Every task is queued before the first answer is read, so a plain
+            # shutdown here would run the whole fold schedule before raising.
+            executor.shutdown(wait=True, kill_workers=True)
+            raise
+        # Shut down on success too, or the next `Parallel` reuses an executor
+        # it cannot drive.
+        executor.shutdown(wait=True)
+        return answers
+    return Parallel(n_jobs=n_jobs, backend="loky")(tasks)
+
+
 def _staging(models_dir: Path) -> Path:
     return models_dir.with_name(f".{models_dir.name}.next")
 
@@ -803,15 +1243,17 @@ def _publish(staging: Path, models_dir: Path) -> None:
     """Move one train's occupancy artifacts over the previous train's, and drop
     any of those this train did not produce. Other models in the directory stay."""
     models_dir.mkdir(parents=True, exist_ok=True)
-    fresh = {p.name for p in staging.iterdir()}
+    # Only artifacts move: the staging directory doubles as the melt's scratch.
+    fresh = {p.name for p in staging.iterdir() if _OCCUPANCY_ARTIFACT.fullmatch(p.name)}
     for name in sorted(fresh):
         os.replace(staging / name, models_dir / name)
+    for leftover in staging.iterdir():
+        _log.debug("%s: not an artifact, left in staging", leftover.name)
     for old in list(models_dir.iterdir()):
         if old.name not in fresh and _OCCUPANCY_ARTIFACT.fullmatch(old.name):
             old.unlink()
             _log.warning("%s: removed an artifact from an earlier train; this run "
                          "produced none", old.name)
-    staging.rmdir()
 
 
 def summary_path(models_dir: Path = MODELS_DIR) -> Path:
@@ -821,10 +1263,11 @@ def summary_path(models_dir: Path = MODELS_DIR) -> Path:
 def write_summary(horizons: dict, models_dir: Path = MODELS_DIR,
                   failed: dict | None = None,
                   duration_s: float | None = None,
-                  phases: dict | None = None) -> Path:
+                  phases: dict | None = None,
+                  peak_mb: dict | None = None) -> Path:
     """The verdicts and what the run cost. `phases` sits beside `duration_s`:
     the total is what a person waiting experiences, the breakdown says what to
-    attack."""
+    attack. `peak_mb` is separate because `phases` is read as seconds."""
     models_dir.mkdir(parents=True, exist_ok=True)
     path = summary_path(models_dir)
     path.write_text(json.dumps({
@@ -832,6 +1275,7 @@ def write_summary(horizons: dict, models_dir: Path = MODELS_DIR,
         "trained_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "duration_s": duration_s,
         "phases": phases or {},
+        "peak_mb": peak_mb or {},
         "evaluation": EVALUATION,
         "horizons": horizons,
         "failed": failed or {},
@@ -839,14 +1283,23 @@ def write_summary(horizons: dict, models_dir: Path = MODELS_DIR,
     return path
 
 
-def stamp_duration(seconds: float, models_dir: Path = MODELS_DIR) -> None:
-    """Record the whole train's duration after the fact: the feature table and
-    the ETA models are built either side of `train_all`."""
+def stamp_run(seconds: float, models_dir: Path = MODELS_DIR,
+              phases: dict | None = None, peak_mb: dict | None = None) -> None:
+    """Record what the whole train cost, after the fact: the feature table and
+    the ETA models are built either side of `train_all`, which has already
+    written the summary by the time this runs. The caller's phases are added to
+    what the trainer wrote, and a peak already recorded keeps the larger
+    reading."""
     path = summary_path(models_dir)
     if not path.exists():
         return
     summary = json.loads(path.read_text())
     summary["duration_s"] = round(seconds, 1)
+    summary["phases"] = {**summary.get("phases", {}), **(phases or {})}
+    merged = dict(summary.get("peak_mb", {}))
+    for name, value in (peak_mb or {}).items():
+        merged[name] = max(merged.get(name, 0.0), value)
+    summary["peak_mb"] = merged
     path.write_text(json.dumps(summary, indent=2))
 
 
@@ -879,10 +1332,11 @@ def _dedicated_and_save(path: Path, horizon: int, windows: list, models_dir: Pat
     except Exception as err:  # noqa: BLE001
         # Logged by `train_all`: a worker's own log line reaches no handler.
         return (horizon, None, None, str(err), time.perf_counter() - started,
-                traceback.format_exc())
+                traceback.format_exc(), peak_rss())
     save(estimator, {}, models_dir, DEDICATED_NAME.format(horizon=horizon),
          features_for(horizon), kind="dedicated")
-    return horizon, scored, n_train, None, time.perf_counter() - started, None
+    return (horizon, scored, n_train, None, time.perf_counter() - started,
+            None, peak_rss())
 
 
 def _run_gate(horizons, dedicated: dict, pooled_scored, pooled_rows: int,
@@ -943,7 +1397,9 @@ def _train_all(path: Path, models_dir: Path, horizons: tuple[int, ...],
                n_jobs: int | None) -> dict:
     phases = Phases()
     with phases("read"):
-        wide = read_wide(path)
+        # Only the columns a train reads outside the melt: the melt takes the
+        # path and reads the rest a row group at a time.
+        wide = read_wide(path, columns=train_columns(horizons))
         windows, geometry = shared_windows(wide)
     unobserved = [c for c in origin_features()
                   if c in wide.columns and wide[c].isna().all()]
@@ -956,18 +1412,18 @@ def _train_all(path: Path, models_dir: Path, horizons: tuple[int, ...],
     # The ladder runs once per horizon, shared by both candidates and fanned out
     # in the SAME pool as the dedicated fits -- two blocks meant two barriers.
     # Dedicated tasks go first because they are the longer ones.
-    workers = (worker_count(DEDICATED_WORKER_FRAMES * frame_bytes(wide))
-               if n_jobs is None else n_jobs)
+    budgeted = n_jobs is None
+    workers = (worker_count(DEDICATED_WORKER_FRAMES * frame_bytes(wide),
+                            what="dedicated")
+               if budgeted else n_jobs)
     with phases("ladder+dedicated"), _worker_loss_is_fatal():
-        answers = Parallel(n_jobs=workers, backend="loky")([
+        answers = _in_workers([
             *(expendable(_dedicated_and_save)(path, h, windows, models_dir,
                                               settings, extras)
               for h in horizons),
-            *(expendable(_one_ladder)(
-                wide[sorted({*baseline.columns_for(h), *required_origin_columns()})],
-                h, geometry, windows, settings)
+            *(expendable(_one_ladder)(path, h, geometry, windows, settings)
               for h in horizons),
-        ])
+        ], workers, subprocess_at_one=budgeted)
     _close_pool()
     results, ladders = answers[:len(horizons)], answers[len(horizons):]
     rungs = {h: r for h, r, _ in ladders}
@@ -977,7 +1433,7 @@ def _train_all(path: Path, models_dir: Path, horizons: tuple[int, ...],
               if err is not None}
     # One line per distinct reason: the same one tends to repeat across all 48.
     skipped: dict[str, list] = {}
-    for h, _, _, err, _, trace in results:
+    for h, _, _, err, _, trace, *_ in results:
         if err is not None:
             skipped.setdefault(err, []).append((h, trace))
     for err, hits in skipped.items():
@@ -991,11 +1447,15 @@ def _train_all(path: Path, models_dir: Path, horizons: tuple[int, ...],
     # cannot say which to attack.
     phases.seconds["ladder(worker)"] = sum(secs for _, _, secs in ladders)
     phases.seconds["dedicated(worker)"] = sum(r[4] for r in results)
+    worker_peaks = [r[6] for r in results if r[6] is not None]
+    if worker_peaks:
+        phases.note_peak("dedicated worker", max(worker_peaks))
 
     pooled_scored, pooled_rows = None, 0
     try:
         estimator, pooled_scored, pooled_rows = train_pooled(
-            wide, windows, horizons=horizons, n_jobs=n_jobs, phases=phases)
+            path, windows, scratch=models_dir, horizons=horizons,
+            n_jobs=n_jobs, phases=phases)
     except OutOfMemory:
         raise
     except Exception as err:  # noqa: BLE001
@@ -1032,7 +1492,9 @@ def _train_all(path: Path, models_dir: Path, horizons: tuple[int, ...],
                  artifact["features"], kind="dedicated")
 
     _log.info("train_all: %s", phases.line())
-    write_summary(summary, models_dir, failed, phases=phases.as_dict())
+    _log.info("train_all peak: %s", phases.peak_line())
+    write_summary(summary, models_dir, failed, phases=phases.as_dict(),
+                  peak_mb=phases.peaks_as_dict())
     return summary
 
 
