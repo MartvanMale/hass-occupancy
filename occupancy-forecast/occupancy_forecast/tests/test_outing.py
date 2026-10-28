@@ -334,3 +334,12 @@ def test_a_return_after_midnight_yields_no_hour_rather_than_wrapping():
 
 # The routine that times the next-change row is `departure`'s, not this one --
 # see `tests/test_next_change.py`.
+
+
+def test_the_projection_carries_every_column_the_routines_read():
+    """The trainer fits both routines off a projected read of the built table,
+    so the projection has to carry every column they touch."""
+    table = _table({"2026-01-05"})
+    assert set(table.columns) <= set(outing.routine_columns())
+    narrow = table[[c for c in outing.routine_columns() if c in table.columns]]
+    assert _labelled(narrow).equals(_labelled(table))

@@ -13,12 +13,19 @@ class UnobservedToConstant(TransformerMixin, BaseEstimator):
     """Fills columns that had no values at fit with 0.0, at fit and at predict."""
 
     def fit(self, X, y=None):
-        self.unobserved_ = np.asarray(pd.isna(X)).all(axis=0)
+        # Column at a time, because `pd.isna` on the whole frame allocates a
+        # mask as big as the frame.
+        width = X.shape[1]
+        column = (lambda i: X.iloc[:, i]) if hasattr(X, "iloc") else (lambda i: X[:, i])
+        self.unobserved_ = np.fromiter(
+            (bool(pd.isna(column(i)).all()) for i in range(width)), bool, width)
         return self
 
     def transform(self, X):
-        X = X.copy()
         cols = np.flatnonzero(self.unobserved_)
+        if not len(cols):
+            return X
+        X = X.copy()
         if hasattr(X, "iloc"):
             X.iloc[:, cols] = 0.0
         else:

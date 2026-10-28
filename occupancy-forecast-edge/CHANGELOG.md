@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.7.1 - 2026-10-28
+
 ### Fixed
 
 - Training no longer runs the Home Assistant host out of memory. If there is not enough memory to train a model, the add-on log says so and forecasting continues with the models already in use.

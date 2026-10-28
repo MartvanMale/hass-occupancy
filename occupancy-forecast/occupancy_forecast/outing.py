@@ -43,6 +43,12 @@ def out_columns() -> list[str]:
     return [c for c in features.zone_columns() if c != "zone_other"]
 
 
+def routine_columns() -> list[str]:
+    """Every column the out and departure routines read off the built table.
+    They are fitted after the models, and the table is at its widest there."""
+    return ["time", "subject", "home_frac", *out_columns()]
+
+
 def label_out_days(table: pd.DataFrame, days: pd.DataFrame) -> pd.DataFrame:
     """Add `out` to labelled days: did they reach a configured zone. Candidacy
     is decided in `departure.label_days`, so this cannot drift from it.

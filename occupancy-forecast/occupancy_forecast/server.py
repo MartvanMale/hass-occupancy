@@ -14,6 +14,7 @@ import base64
 import contextlib
 import copy
 import datetime as dt
+import traceback
 import hashlib
 import json
 import faulthandler
@@ -107,6 +108,9 @@ _state: dict = {
     "models": {}, "eta_models": {}, "out_routine": {}, "departure_routine": {},
     "loaded_at": None, "last_collect": None, "last_predict": None,
     "last_train": None, "last_train_seconds": None, "training_started_at": None,
+    # Set while a failed train waits for tomorrow's slot, which is the day
+    # the status page then reports.
+    "train_retry_pending": False,
     # The full text, and what `/api/status` may show of it -- see log.SEE_THE_LOG.
     "last_error": None, "last_error_public": None, "forecast": [],
     # Days of usable history, recounted once a worker cycle. None until the
@@ -272,54 +276,78 @@ def do_train() -> dict:
     # Timed per stretch as well as end to end: these four say whether the
     # answer is in the fits at all.
     phases = train_mod.Phases()
-    source = _state["source"]
-    with phases("features"):
-        table = features.build(source)
-        features.write(table, config.FEATURES_PATH)
-    with phases("models"):
-        summary = train_mod.train_all(config.FEATURES_PATH, config.MODELS_DIR)
     try:
-        with phases("eta"):
-            eta_summary = eta_mod.train_all(source, config.MODELS_DIR)
-    except Exception as err:  # noqa: BLE001
-        _log.error("eta training failed: %s", err)
-        eta_summary = {}
-    # Arithmetic over the table already in hand. Guarded like the ETA models: a
-    # household with no zones has nothing to answer, and that must not fail a
-    # train.
-    try:
-        with phases("out routine"):
-            labelled = outing_mod.label_out_days(table, departure.label_days(table))
-            routine = outing_mod.fit_routine(labelled)
-            outing_mod.save_routine(routine, config.MODELS_DIR)
-        _log.info("out routine fitted for %d person(s)", len(routine))
-    except Exception as err:  # noqa: BLE001
-        _log.error("out routine failed: %s", err)
-    # Guarded SEPARATELY from the one above, which reads the configured zones:
-    # this one reads none, and it is what times the next-change row.
-    try:
-        with phases("departure routine"):
-            leaving = departure.fit_routine(departure.label_days(table))
-            departure.save_routine(leaving, config.MODELS_DIR)
-        _log.info("departure routine fitted for %d subject(s)", len(leaving))
-    except Exception as err:  # noqa: BLE001
-        _log.error("departure routine failed: %s", err)
-    _load_models()
-    elapsed = time.monotonic() - started
-    train_mod.stamp_duration(elapsed, config.MODELS_DIR)
-    _state["last_train"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    _state["last_train_seconds"] = round(elapsed, 1)
-    _log.info("training finished in %.0fs (%s): %d/%d horizons ship a model "
-              "(%d dedicated, %d pooled)", elapsed, phases.line(),
-              _shipping_horizons(), len(config.HORIZONS_H),
-              sum(1 for a in _state["models"].values()
-                  if a.get("metrics", {}).get("kind") == "dedicated"),
-              sum(1 for a in _state["models"].values()
-                  if a.get("metrics", {}).get("kind") == "pooled"))
-    return {"horizons": summary, "eta": eta_summary,
-            "duration_s": round(elapsed, 1),
-            "feature_rows": len(table),
-            "labelled_rows": int(table["home_frac"].notna().sum())}
+        source = _state["source"]
+        free = train_mod.available_memory()
+        _log.info("preparing the feature table, %.0f MB in use, %s",
+                  (train_mod.rss() or 0) / 1e6,
+                  "free memory unknown" if free is None
+                  else f"{free / 1e9:.1f} GB free")
+        with phases("features"):
+            built = features.build_to(source, config.FEATURES_PATH, phases=phases)
+        feature_rows, labelled_rows = built["rows"], built["labelled_rows"]
+        _log.info("feature table built: %d rows and %d columns, written in %d blocks",
+                  feature_rows, built["columns"], built["row_groups"])
+        with phases("models"):
+            summary = train_mod.train_all(config.FEATURES_PATH, config.MODELS_DIR)
+        try:
+            with phases("eta"):
+                eta_summary = eta_mod.train_all(source, config.MODELS_DIR)
+        except Exception as err:  # noqa: BLE001
+            _log.error("eta training failed: %s", err)
+            eta_summary = {}
+        # Guarded like the ETA models: a household with no zones has nothing to
+        # answer, and that must not fail a train. The read is guarded too, because
+        # the models are already published by this point.
+        try:
+            table = train_mod.read_wide(
+                config.FEATURES_PATH, columns=outing_mod.routine_columns())
+        except Exception as err:  # noqa: BLE001
+            _log.error("the feature table could not be read, so the out and "
+                       "departure routines were skipped: %s", err)
+            table = None
+        if table is not None:
+            try:
+                with phases("out routine"):
+                    labelled = outing_mod.label_out_days(table,
+                                                         departure.label_days(table))
+                    routine = outing_mod.fit_routine(labelled)
+                    outing_mod.save_routine(routine, config.MODELS_DIR)
+                _log.info("out routine fitted for %d person(s)", len(routine))
+            except Exception as err:  # noqa: BLE001
+                _log.error("out routine failed: %s", err)
+            # Guarded separately from the one above, which reads the configured
+            # zones. This one reads none, and it times the next-change row.
+            try:
+                with phases("departure routine"):
+                    leaving = departure.fit_routine(departure.label_days(table))
+                    departure.save_routine(leaving, config.MODELS_DIR)
+                _log.info("departure routine fitted for %d subject(s)", len(leaving))
+            except Exception as err:  # noqa: BLE001
+                _log.error("departure routine failed: %s", err)
+            del table
+        _load_models()
+        elapsed = time.monotonic() - started
+        train_mod.stamp_run(elapsed, config.MODELS_DIR, phases.as_dict(),
+                            phases.peaks_as_dict())
+        _state["last_train"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        _state["last_train_seconds"] = round(elapsed, 1)
+        _log.info("training finished in %.0fs: %d/%d horizons ship a model "
+                  "(%d dedicated, %d pooled)", elapsed,
+                  _shipping_horizons(), len(config.HORIZONS_H),
+                  sum(1 for a in _state["models"].values()
+                      if a.get("metrics", {}).get("kind") == "dedicated"),
+                  sum(1 for a in _state["models"].values()
+                      if a.get("metrics", {}).get("kind") == "pooled"))
+        return {"horizons": summary, "eta": eta_summary,
+                "duration_s": round(elapsed, 1),
+                "feature_rows": feature_rows,
+                "labelled_rows": labelled_rows}
+    finally:
+        # Logged on the way out too, or a failed train reports nothing.
+        _log.info("time per training phase: %s", phases.line())
+        _log.info("peak memory per phase: %s, and %.0f MB in use now",
+                  phases.peak_line(), (train_mod.rss() or 0) / 1e6)
 
 
 def _slot(now: dt.datetime, day: dt.date) -> dt.datetime:
@@ -339,17 +367,20 @@ def _last_trained_at() -> dt.datetime | None:
 
 
 def _due_slot(now: dt.datetime, days: float, last_train_day: dt.date | None,
-              trained_at: dt.datetime | None = None) -> dt.date | None:
+              trained_at: dt.datetime | None = None,
+              retry: bool = False) -> dt.date | None:
     """The date of the scheduled train that should start now, or None.
 
     Yesterday is checked too, so a 23:59 slot is still caught after midnight.
-    `trained_at` is the last finished train, which survives a restart.
+    `trained_at` is the last finished train, which survives a restart. With
+    `retry`, the weekly restriction is lifted until one train succeeds.
     """
     for day in (now.date(), now.date() - dt.timedelta(days=1)):
         slot = _slot(now, day)
         if not slot <= now < slot + TRAIN_WINDOW or last_train_day == day:
             continue
-        if days >= FULL_HISTORY_DAYS and day.weekday() != config.TRAINING_DAY:
+        if (days >= FULL_HISTORY_DAYS and not retry
+                and day.weekday() != config.TRAINING_DAY):
             continue
         if trained_at is not None and trained_at.astimezone(now.tzinfo) >= slot:
             continue
@@ -357,7 +388,8 @@ def _due_slot(now: dt.datetime, days: float, last_train_day: dt.date | None,
     return None
 
 
-def _next_slot(now: dt.datetime, days: float) -> dt.datetime | None:
+def _next_slot(now: dt.datetime, days: float,
+               retry: bool = False) -> dt.datetime | None:
     """When the scheduler will next retrain, or None if it cannot yet.
 
     `_due_slot` answers "is it now". Both build the time with `_slot`.
@@ -367,17 +399,17 @@ def _next_slot(now: dt.datetime, days: float) -> dt.datetime | None:
     candidate = _slot(now, now.date())
     if candidate <= now:
         candidate = _slot(now, now.date() + dt.timedelta(days=1))
-    if days >= FULL_HISTORY_DAYS:
+    if days >= FULL_HISTORY_DAYS and not retry:
         # Mature: weekly rather than daily, so walk on to the training weekday.
         ahead = (config.TRAINING_DAY - candidate.weekday()) % 7
         candidate = _slot(now, candidate.date() + dt.timedelta(days=ahead))
     return candidate
 
 
-def _next_train(now: dt.datetime, days: float) -> str | None:
+def _next_train(now: dt.datetime, days: float, retry: bool = False) -> str | None:
     """`_next_slot` for the status page: local time with the offset in the
     string, because the schedule is local."""
-    slot = _next_slot(now, days)
+    slot = _next_slot(now, days, retry)
     return None if slot is None else slot.isoformat(timespec="minutes")
 
 
@@ -389,17 +421,18 @@ def _seconds_until(when: dt.datetime, now: dt.datetime) -> float:
 
 
 def _scheduler_step(now: dt.datetime, days: float, last_train_day: dt.date | None,
-                    trained_at: dt.datetime | None) -> tuple[dt.date | None, float]:
+                    trained_at: dt.datetime | None,
+                    retry: bool = False) -> tuple[dt.date | None, float]:
     """The slot to train for now, or None, and how long to sleep before the next step.
 
     The sleep ends SCHEDULE_MARGIN_SECONDS before the slot, so a slot in the
     spring-forward gap is still inside its window on the wall clock.
     """
     if days >= MIN_DAYS_TO_TRAIN:
-        due = _due_slot(now, days, last_train_day, trained_at)
+        due = _due_slot(now, days, last_train_day, trained_at, retry)
         if due is not None:
             return due, 0.0
-    slot = _next_slot(now, days)
+    slot = _next_slot(now, days, retry)
     if slot is None:
         return None, float(SCHEDULE_CHECK_SECONDS)
     until = _seconds_until(slot, now)
@@ -410,15 +443,29 @@ def _scheduler_step(now: dt.datetime, days: float, last_train_day: dt.date | Non
     return None, min(wait, float(SCHEDULE_CHECK_SECONDS))
 
 
-def _train_and_publish() -> None:
+def _train_and_publish() -> bool:
     """Train, then publish with the new models at once rather than waiting up
-    to five minutes for the next cycle. The caller holds `_train_lock`."""
+    to five minutes for the next cycle. The caller holds `_train_lock`.
+    Returns whether it got that far, which is what arms the retry."""
     try:
         do_train()
         do_predict()
-    except Exception as err:  # noqa: BLE001
+        return True
+    except BaseException as err:
+        _train_failed(err)
+        if not isinstance(err, Exception):
+            raise
+        return False
+
+
+def _train_failed(err: BaseException) -> None:
+    """Everything a failed train leaves behind, wherever it was started from.
+    The file comes first, because the log line can be lost."""
+    _write_failure(err, "train")
+    _log.error("train failed: %s: %s", type(err).__name__, err)
+    _log.debug("train traceback", exc_info=True)
+    if isinstance(err, Exception):
         _record_error(err, from_cycle=False)
-        _log.error("train failed: %s", err)
 
 
 def _start_background_train() -> None:
@@ -438,6 +485,11 @@ def _start_background_train() -> None:
     def run() -> None:
         try:
             _train_and_publish()
+        except BaseException as err:
+            _write_failure(err, "training thread")
+            _log.error("the training thread stopped: %s: %s",
+                       type(err).__name__, err)
+            raise
         finally:
             _train_lock.release()
 
@@ -456,6 +508,20 @@ def _take_train_lock() -> bool:
         return False
     _train_started["at"] = time.monotonic()
     return True
+
+
+def _write_failure(err: BaseException, where: str) -> None:
+    """The last failure, on disk. A kill takes the log line with it and the
+    status page only ever shows the public placeholder, so without this a train
+    can fail with no readable reason anywhere."""
+    try:
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (config.DATA_DIR / "last_failure.txt").write_text(
+            f"{dt.datetime.now(dt.timezone.utc).isoformat()} {where}\n"
+            f"{type(err).__module__}.{type(err).__name__}: {err}\n\n"
+            + "".join(traceback.format_exception(err)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _record_error(err: Exception, from_cycle: bool) -> None:
@@ -717,6 +783,8 @@ def _scheduler() -> None:
     `_reschedule` wakes it when the configuration is saved.
     """
     last_train_day = None
+    # Lifts the weekly restriction until one train succeeds.
+    retry_from = None
     announced = refused = None
     while not _stop.is_set():
         wait = float(MIN_CYCLE_SECONDS)
@@ -729,22 +797,28 @@ def _scheduler() -> None:
                        or getattr(_state["source"], "store", None) is None)
             if counted:
                 days = _history_days()
+                retry = retry_from is not None
                 due, wait = _scheduler_step(now, days, last_train_day,
-                                            _last_trained_at())
+                                            _last_trained_at(), retry)
                 if due is not None and _take_train_lock():
+                    # Spent either way: clearing it re-arms this slot all hour.
                     last_train_day = due
                     _log.info("scheduled train starting")
                     try:
-                        _train_and_publish()
+                        trained = _train_and_publish()
                     finally:
                         _train_lock.release()
+                    retry_from = None if trained else due
+                    _state["train_retry_pending"] = not trained
+                    if not trained:
+                        _log.info("the next scheduled train is tomorrow, not next week")
                     continue
                 if due is not None:
                     if refused != due:
                         _log.info("scheduled train waits for the train already running")
                         refused = due
                     wait = float(MIN_CYCLE_SECONDS)
-                upcoming = _next_train(now, days)
+                upcoming = _next_train(now, days, retry)
                 if upcoming is not None and upcoming != announced:
                     _log.info("next scheduled train: %s", upcoming)
                 announced = upcoming
@@ -752,7 +826,8 @@ def _scheduler() -> None:
             _log.error("scheduler: %s", err)
         if _reschedule.wait(wait):
             _reschedule.clear()
-            last_train_day = None
+            last_train_day = retry_from = None
+            _state["train_retry_pending"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1077,8 @@ def _status() -> dict:
         "loaded_at": _state["loaded_at"], "last_collect": _state["last_collect"],
         "last_predict": _state["last_predict"], "last_train": _state["last_train"],
         "last_train_seconds": _state["last_train_seconds"],
-        "next_train": _next_train(dt.datetime.now(config.tzinfo()), days),
+        "next_train": _next_train(dt.datetime.now(config.tzinfo()), days,
+                                  _state["train_retry_pending"]),
         # Which schedule that came off. The panel should not have to infer the
         # policy from the gap between two timestamps.
         "train_cadence": "weekly" if days >= FULL_HISTORY_DAYS else "daily",
@@ -1751,7 +1827,7 @@ def run_train(response: Response, background: bool = False) -> dict:
     except HTTPException:
         raise
     except Exception as err:  # noqa: BLE001
-        _record_error(err, from_cycle=False)
+        _train_failed(err)
         raise HTTPException(status_code=500, detail=str(err)) from err
     finally:
         _train_lock.release()

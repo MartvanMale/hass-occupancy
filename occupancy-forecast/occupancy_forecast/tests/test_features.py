@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -38,10 +39,8 @@ def test_the_slot_arithmetic_does_not_care_which_unit_pandas_picked(unit):
         [np.nan, np.nan, 7.0, np.nan])
 
 
-def _wide_table(days: int = 40) -> pd.DataFrame:
-    """A real `features.build()` output, for the tests that melt it. Built, not
-    hand-written: a hand-written frame would only prove the melt's mapping
-    agrees with itself."""
+def _built_source(days: int = 40):
+    """A source with a real daily rhythm, and the window to build it over."""
     start = pd.Timestamp("2026-04-01T00:00:00Z")
     events = {}
     for index, subject in enumerate(config.SUBJECTS):
@@ -63,8 +62,15 @@ def _wide_table(days: int = 40) -> pd.DataFrame:
         def numeric(self, entity, s, t=None):
             return []
 
-    stop = (start + pd.Timedelta(days=days)).isoformat()
-    return features.build(_Source(), start.isoformat(), stop)
+    return _Source(), start.isoformat(), (start + pd.Timedelta(days=days)).isoformat()
+
+
+def _wide_table(days: int = 40) -> pd.DataFrame:
+    """A real `features.build()` output, for the tests that melt it. Built, not
+    hand-written: a hand-written frame would only prove the melt's mapping
+    agrees with itself."""
+    source, start, stop = _built_source(days)
+    return features.build(source, start, stop)
 
 
 # ---------------------------------------------------------------------------
@@ -634,3 +640,124 @@ def test_the_wide_climatology_is_served_to_both_families():
         assert features.wide_climatology_column(horizon) in train.features_for(horizon)
         assert features.wide_climatology_column(horizon) in train.nan_allowed_for(horizon)
     assert f"wclim{features.WIDE_CLIMATOLOGY_WEEKS}" in train.base_features()
+
+
+# ---------------------------------------------------------------------------
+# Building the table a block at a time
+# ---------------------------------------------------------------------------
+
+def test_the_blocked_build_matches_the_one_frame_build(tmp_path):
+    """`build_to` computes the horizon columns against full-history lookups, so
+    a block-local lookup would show up as NaN or a wrong lag near an edge."""
+    source, start, stop = _built_source(days=12)
+    path = tmp_path / "features.parquet"
+    report = features.build_to(source, path, start, stop, target_bytes=1_000_000)
+    assert report["row_groups"] > 1, "the test has to force several blocks"
+
+    expected = features.build(source, start, stop)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), expected)
+    assert report["rows"] == len(expected)
+    assert report["columns"] == len(expected.columns)
+
+
+def test_a_build_block_never_splits_a_timestamp():
+    """Blocks written in order leave the file sorted, and neither table's
+    readers sort it again."""
+    times = np.repeat(np.arange(10), 3)
+    for block_rows in (1, 2, 4, 7):
+        for start, stop in features.row_blocks(times, block_rows):
+            if stop < len(times):
+                assert times[stop - 1] != times[stop]
+
+
+def test_the_written_table_declares_its_sort_order(tmp_path):
+    """Pyarrow's default row group holds a million rows, so a check that the
+    groups merely look ordered would pass on a file with one group."""
+    source, start, stop = _built_source(days=12)
+    path = tmp_path / "features.parquet"
+    features.build_to(source, path, start, stop, target_bytes=1_000_000)
+
+    parquet = pq.ParquetFile(path)
+    assert parquet.metadata.num_row_groups > 1
+    for group in range(parquet.metadata.num_row_groups):
+        assert parquet.metadata.row_group(group).sorting_columns
+
+    plain = tmp_path / "plain.parquet"
+    features.write(features.build(source, start, stop), plain)
+    assert not pq.ParquetFile(plain).metadata.row_group(0).sorting_columns
+
+
+def test_the_whole_table_is_never_built_at_once(tmp_path, monkeypatch):
+    """Folding `build_to` back into one call has to fail here, not on the
+    machine running the add-on."""
+    source, start, stop = _built_source(days=12)
+    seen = []
+    real = features._add_horizon_columns
+
+    def spy(table, *args, **kwargs):
+        seen.append(len(table))
+        return real(table, *args, **kwargs)
+
+    monkeypatch.setattr(features, "_add_horizon_columns", spy)
+    report = features.build_to(source, tmp_path / "f.parquet", start, stop,
+                               target_bytes=1_000_000)
+    assert len(seen) == report["row_groups"] > 1
+    assert max(seen) < report["rows"], "a block held the whole table"
+
+
+def test_the_horizon_block_is_one_array_the_frame_shares(tmp_path):
+    """The columns are written into one block, laid out the way pyarrow can
+    alias rather than convert."""
+    columns = features._Columns(3, 4)
+    for name in ("a", "b", "c"):
+        columns[name] = np.zeros(4)
+    frame = columns.frame(pd.RangeIndex(4))
+
+    columns._array[1] = 5.0
+    assert (frame["b"] == 5.0).all(), "the frame does not share the array"
+    block = frame._mgr.blocks[0].values
+    assert block.flags["C_CONTIGUOUS"], "a strided block stops pyarrow aliasing it"
+
+
+def test_the_row_groups_carry_ascending_time_statistics(tmp_path):
+    """A reader that skips row groups needs the statistics, not just the
+    declaration, and overlapping ranges would make a skip wrong."""
+    source, start, stop = _built_source(days=12)
+    path = tmp_path / "features.parquet"
+    features.build_to(source, path, start, stop, target_bytes=1_000_000)
+
+    meta = pq.ParquetFile(path).metadata
+    column = meta.row_group(0).to_dict()["columns"]
+    index = next(i for i, c in enumerate(column) if c["path_in_schema"] == "time")
+    last = None
+    for group in range(meta.num_row_groups):
+        stats = meta.row_group(group).column(index).statistics
+        assert stats.min <= stats.max
+        if last is not None:
+            assert stats.min >= last, "row group time ranges overlap"
+        last = stats.max
+
+
+def test_a_build_that_fails_leaves_the_last_good_table(tmp_path, monkeypatch):
+    """The stream writes aside and renames, so a failure cannot leave a file
+    with no footer where the previous table was."""
+    source, start, stop = _built_source(days=12)
+    path = tmp_path / "features.parquet"
+    features.build_to(source, path, start, stop, target_bytes=1_000_000)
+    good = path.read_bytes()
+
+    calls = []
+    real = features._add_horizon_columns
+
+    def fails_partway(table, *args, **kwargs):
+        calls.append(1)
+        if len(calls) > 2:
+            raise RuntimeError("no more blocks")
+        return real(table, *args, **kwargs)
+
+    monkeypatch.setattr(features, "_add_horizon_columns", fails_partway)
+    with pytest.raises(RuntimeError, match="no more blocks"):
+        features.build_to(source, path, start, stop, target_bytes=1_000_000)
+
+    assert path.read_bytes() == good, "the previous table was replaced"
+    assert not path.with_suffix(path.suffix + ".tmp").exists()
