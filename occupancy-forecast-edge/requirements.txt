@@ -9,7 +9,7 @@ scikit-learn==1.9.1
 # Arrives with scikit-learn; pinned because train.py imports it directly.
 joblib==1.6.0
 paho-mqtt==2.1.0
-fastapi==0.141.1
+fastapi==0.162.0
 uvicorn==0.54.0
 holidays==0.105
 # listen.py uses the SYNC client; an asyncio one would mean a second event loop
