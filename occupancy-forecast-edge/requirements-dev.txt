@@ -3,4 +3,4 @@
 -r requirements.txt
 # Never below 9.0.3: earlier releases put the temp root at the predictable
 # /tmp/pytest-of-<user> (CVE-2025-71176).
-pytest==9.1.1
+pytest==9.2.0
